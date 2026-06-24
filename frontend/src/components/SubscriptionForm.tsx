@@ -38,9 +38,9 @@ interface SuccessData {
 // ─── Shared input className (larger py for ≥48px touch target on mobile) ─────
 const inputCls =
   'w-full rounded-lg bg-gray-800 border border-gray-700 px-4 py-3 text-base ' +
-  'text-white placeholder-gray-500 focus:outline-none focus:ring-2 ' +
-  'focus:ring-blue-500 disabled:opacity-50 min-h-[48px] ' +
-  'transition-all duration-150 focus:scale-[1.02]';
+  'text-white placeholder-gray-500 ' +
+  'focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400 focus-visible:ring-offset-2 focus-visible:ring-offset-gray-900 ' +
+  'disabled:opacity-50 min-h-[48px] transition-all duration-150';
 
 // ─── Contract config guard ─────────────────────────────────────────────────────
 
@@ -177,8 +177,8 @@ function SuccessCard({
       <button
         onClick={onReset}
         className="w-full rounded-lg border-2 border-green-600/70 text-green-300 hover:bg-green-900/40 active:bg-green-900/60
-                   py-3 sm:py-4 text-sm font-semibold transition-all duration-150 min-h-[48px] 
-                   focus:outline-none focus:ring-2 focus:ring-green-500 hover:shadow-lg"
+                   py-3 sm:py-4 text-sm font-semibold transition-all duration-150 min-h-[48px] hover:shadow-lg
+                   focus:outline-none focus-visible:ring-2 focus-visible:ring-green-400 focus-visible:ring-offset-2 focus-visible:ring-offset-gray-900"
       >
         Create another subscription
       </button>
@@ -263,7 +263,7 @@ export default function SubscriptionForm() {
 
   return (
     <div className="w-full max-w-lg mx-auto bg-gray-900 rounded-2xl shadow-xl p-5 sm:p-8 text-white">
-      <h2 className="text-2xl sm:text-3xl font-bold mb-2">Create Subscription</h2>
+      <h2 id="form-heading" className="text-2xl sm:text-3xl font-bold mb-2">Create Subscription</h2>
       <p className="text-gray-400 text-sm mb-8 leading-relaxed">
         Authorize a recurring on-chain payment using your Freighter wallet.
       </p>
@@ -290,20 +290,23 @@ export default function SubscriptionForm() {
 
       {/* Hide the form after success */}
       {!successData && (
-        <form onSubmit={handleSubmit} noValidate className="space-y-5 sm:space-y-6">
+        <form onSubmit={handleSubmit} noValidate aria-busy={isSubmitting} aria-labelledby="form-heading" className="space-y-5 sm:space-y-6">
 
           {/* Merchant address */}
           <div>
             <label htmlFor="merchantAddress" className="block text-sm font-semibold text-gray-300 mb-2.5">
-              Merchant address
+              Merchant address <span aria-hidden="true" className="text-red-400">*</span><span className="sr-only"> (required)</span>
             </label>
             <input
               id="merchantAddress"
               type="text"
               placeholder="GABC…"
+              autoComplete="off"
               value={merchantAddress}
               onChange={(e) => setMerchantAddress(e.target.value)}
               disabled={isSubmitting}
+              required
+              aria-required="true"
               aria-describedby={fieldErrors.merchantAddress ? 'err-merchant' : undefined}
               aria-invalid={!!fieldErrors.merchantAddress}
               className={inputCls}
@@ -318,15 +321,18 @@ export default function SubscriptionForm() {
           {/* Token address */}
           <div>
             <label htmlFor="tokenAddress" className="block text-sm font-semibold text-gray-300 mb-2.5">
-              Token contract address
+              Token contract address <span aria-hidden="true" className="text-red-400">*</span><span className="sr-only"> (required)</span>
             </label>
             <input
               id="tokenAddress"
               type="text"
               placeholder="CABC…"
+              autoComplete="off"
               value={tokenAddress}
               onChange={(e) => setTokenAddress(e.target.value)}
               disabled={isSubmitting}
+              required
+              aria-required="true"
               aria-describedby={fieldErrors.tokenAddress ? 'err-token' : undefined}
               aria-invalid={!!fieldErrors.tokenAddress}
               className={inputCls}
@@ -341,7 +347,8 @@ export default function SubscriptionForm() {
           {/* Amount */}
           <div>
             <label htmlFor="amount" className="block text-sm font-semibold text-gray-300 mb-2.5">
-              Amount <span className="text-gray-500 font-normal">(token units)</span>
+              Amount <span className="text-gray-500 font-normal">(token units)</span>{' '}
+              <span aria-hidden="true" className="text-red-400">*</span><span className="sr-only"> (required)</span>
             </label>
             <input
               id="amount"
@@ -349,9 +356,12 @@ export default function SubscriptionForm() {
               min="1"
               step="1"
               placeholder="100"
+              autoComplete="off"
               value={amount}
               onChange={(e) => setAmount(e.target.value)}
               disabled={isSubmitting}
+              required
+              aria-required="true"
               aria-describedby={fieldErrors.amount ? 'err-amount' : undefined}
               aria-invalid={!!fieldErrors.amount}
               className={inputCls}
@@ -366,7 +376,8 @@ export default function SubscriptionForm() {
           {/* Interval */}
           <div>
             <label htmlFor="interval" className="block text-sm font-semibold text-gray-300 mb-2.5">
-              Interval <span className="text-gray-500 font-normal">(seconds)</span>
+              Interval <span className="text-gray-500 font-normal">(seconds)</span>{' '}
+              <span aria-hidden="true" className="text-red-400">*</span><span className="sr-only"> (required)</span>
             </label>
             <input
               id="interval"
@@ -374,14 +385,17 @@ export default function SubscriptionForm() {
               min="86400"
               max="31536000"
               step="1"
+              autoComplete="off"
               value={interval}
               onChange={(e) => setInterval(e.target.value)}
               disabled={isSubmitting}
-              aria-describedby={fieldErrors.interval ? 'err-interval' : undefined}
+              required
+              aria-required="true"
+              aria-describedby={`hint-interval${fieldErrors.interval ? ' err-interval' : ''}`}
               aria-invalid={!!fieldErrors.interval}
               className={inputCls}
             />
-            <p className="mt-2 text-xs text-gray-500 leading-relaxed">
+            <p id="hint-interval" className="mt-2 text-xs text-gray-500 leading-relaxed">
               Default: 2 592 000 s (30 days). Range: 86 400 s – 31 536 000 s.
             </p>
             {fieldErrors.interval && (
@@ -392,29 +406,38 @@ export default function SubscriptionForm() {
           </div>
 
           {/* Submit */}
-          <button
-            type="submit"
-            disabled={isSubmitting || !publicKey}
-            className="w-full flex items-center justify-center gap-2 rounded-lg bg-blue-600
-                       hover:bg-blue-500 active:bg-blue-700 disabled:opacity-50
-                       disabled:cursor-not-allowed px-4 py-4 sm:py-5 text-base font-semibold
-                       transition-all duration-150 focus:outline-none focus:ring-2 focus:ring-blue-400
-                       min-h-[56px] hover:shadow-lg active:shadow-md"
-          >
-            {isSubmitting && (
-              <svg
-                className="animate-spin h-5 w-5 text-white"
-                xmlns="http://www.w3.org/2000/svg"
-                fill="none"
-                viewBox="0 0 24 24"
-                aria-hidden="true"
-              >
-                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
-              </svg>
+          <div>
+            {!publicKey && (
+              <p id="hint-wallet" className="mb-3 text-xs text-yellow-400 font-medium" role="status">
+                Connect your Freighter wallet to enable submission.
+              </p>
             )}
-            {isSubmitting ? 'Submitting…' : 'Authorize Subscription'}
-          </button>
+            <button
+              type="submit"
+              disabled={isSubmitting || !publicKey}
+              aria-describedby={!publicKey ? 'hint-wallet' : undefined}
+              className="w-full flex items-center justify-center gap-2 rounded-lg bg-blue-600
+                         hover:bg-blue-500 active:bg-blue-700 disabled:opacity-50
+                         disabled:cursor-not-allowed px-4 py-4 sm:py-5 text-base font-semibold
+                         transition-all duration-150 min-h-[56px] hover:shadow-lg active:shadow-md
+                         focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400
+                         focus-visible:ring-offset-2 focus-visible:ring-offset-gray-900"
+            >
+              {isSubmitting && (
+                <svg
+                  className="animate-spin h-5 w-5 text-white"
+                  xmlns="http://www.w3.org/2000/svg"
+                  fill="none"
+                  viewBox="0 0 24 24"
+                  aria-hidden="true"
+                >
+                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
+                </svg>
+              )}
+              {isSubmitting ? 'Submitting…' : 'Authorize Subscription'}
+            </button>
+          </div>
         </form>
       )}
     </div>
