@@ -216,6 +216,27 @@ For detailed guidance on event sources, storage options, indexing patterns, work
 - **Time-lock**: Payment cannot be collected before `next_payment` — enforced on-chain by the Soroban ledger timestamp.
 - **TTL**: Subscriptions have a ~30-day minimum and ~365-day maximum TTL. Each successful payment resets the 365-day clock.
 
+## Storage cleanup strategy
+
+The contract already includes a built-in cleanup model for stale subscriptions:
+
+- **Automatic expiration**: `subscribe()` and `execute_payment()` call `extend_ttl()` to refresh storage TTL for active subscriptions.
+- **Immediate removal on cancel**: `cancel()` deletes the subscription record from persistent storage.
+- **Stale entry reclamation**: if a subscriber abandons a subscription and does not trigger payments or cancellation, the Soroban runtime can reclaim the record when the TTL expires.
+
+Recommended repository strategy for periodic compaction:
+
+1. **Rely on Soroban TTL for long-lived or abandoned entries.** The contract's current TTL policy is the primary guard against indefinite storage growth.
+2. **Use off-chain indexing to detect stale subscriptions sooner.** A backend or indexer can watch `subscribe` and `executed` events and mark subscriptions as inactive if they have not been updated after a configurable overdue window.
+3. **Trigger explicit cleanup from off-chain keepers if needed.** When a subscription is identified as stale or expired off-chain, a maintenance process can call a future cleanup entry point or `cancel()` on behalf of the subscriber/merchant pair.
+4. **Avoid on-chain full scans.** Soroban does not provide efficient on-chain enumeration of all subscription keys, so storage compaction is best handled by off-chain systems using event history or a dedicated indexer.
+
+Potential future enhancement:
+
+- Add a keeper-accessible `prune_stale(subscriber, merchant)` entry point to remove records whose `next_payment` is long overdue or whose associated token allowance has been revoked. This would provide a formal cleanup API without requiring expensive on-chain storage scanning.
+
+This plan keeps the contract lightweight and production-safe while ensuring stale subscription data is managed explicitly in documentation and off-chain processes.
+
 ---
 
 ## Contributing
