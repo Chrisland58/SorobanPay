@@ -235,6 +235,24 @@ npm run type-check
 | `subscribe` | `(symbol("subscribe"), subscriber, merchant)` | `amount: i128` |
 | `executed` | `(symbol("executed"), subscriber, merchant)` | `amount: i128` |
 
+Events use three topics: a `Symbol` discriminant followed by two `Address` values. The data field is an `i128` amount in stroops.
+
+**Quick decode example (TypeScript):**
+
+```typescript
+import { xdr, scValToNative } from "@stellar/stellar-sdk";
+
+function decodeEvent(topic: string[], value: string) {
+  const [type, subscriber, merchant] = topic.map((t) =>
+    scValToNative(xdr.ScVal.fromXDR(t, "base64"))
+  );
+  const amount = BigInt(scValToNative(xdr.ScVal.fromXDR(value, "base64")));
+  return { type, subscriber, merchant, amount };
+}
+```
+
+See [docs/events.md](docs/events.md) for the full event reference, RPC query examples, and Python decoding code.
+
 ---
 
 ## Error codes
