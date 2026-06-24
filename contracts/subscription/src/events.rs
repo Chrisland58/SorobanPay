@@ -2,14 +2,15 @@ use soroban_sdk::{Address, Env, Symbol};
 
 /// Emit the `subscribe` event after a subscription has been successfully stored.
 ///
-/// Topics:  (symbol("subscribe"), subscriber, merchant)
+/// Topics:  (symbol("subscribe"), subscriber, merchant, token)
 /// Data:    amount (i128)
-pub fn emit_subscribe(env: &Env, subscriber: &Address, merchant: &Address, amount: i128) {
+pub fn emit_subscribe(env: &Env, subscriber: &Address, merchant: &Address, token: &Address, amount: i128) {
     env.events().publish(
         (
             Symbol::new(env, "subscribe"),
             subscriber.clone(),
             merchant.clone(),
+            token.clone(),
         ),
         amount,
     );
@@ -55,17 +56,15 @@ pub fn emit_payment_transfer_failure(env: &Env, subscriber: &Address, merchant: 
 /// Emit the `executed` event after a payment transfer has been successfully completed
 /// and the next_payment timestamp has been updated.
 ///
-/// **Deprecated:** Use `emit_payment_transfer_success` instead for clearer telemetry.
-/// This event is maintained for backwards compatibility.
-///
-/// Topics:  (symbol("executed"), subscriber, merchant)
+/// Topics:  (symbol("executed"), subscriber, merchant, token)
 /// Data:    amount (i128)
-pub fn emit_executed(env: &Env, subscriber: &Address, merchant: &Address, amount: i128) {
+pub fn emit_executed(env: &Env, subscriber: &Address, merchant: &Address, token: &Address, amount: i128) {
     env.events().publish(
         (
             Symbol::new(env, "executed"),
             subscriber.clone(),
             merchant.clone(),
+            token.clone(),
         ),
         amount,
     );
