@@ -194,6 +194,154 @@ fn test_subscribe_interval_too_long() {
     assert!(!t.has_sub());
 }
 
+// ─── Boundary Value Tests: Interval Edge Cases ────────────────────────────────
+
+/// Test interval exactly at lower boundary (86400 seconds = 1 day)
+/// This should be accepted as the minimum valid interval.
+#[test]
+fn test_subscribe_interval_exact_lower_boundary() {
+    let t = T::new();
+    let ivl = 86_400_u64; // exactly 1 day
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &100_i128, &ivl);
+    let d = t.get_sub();
+    assert_eq!(d.interval, ivl, "interval at exact lower boundary must be accepted");
+}
+
+/// Test interval one second below lower boundary (86399 seconds)
+/// This should be rejected with IntervalTooShort.
+#[test]
+fn test_subscribe_interval_one_below_lower_boundary() {
+    let t = T::new();
+    let ivl = 86_399_u64; // 1 second below minimum
+    let r = t.client.try_subscribe(&t.subscriber, &t.merchant, &t.token, &100_i128, &ivl);
+    assert!(
+        matches!(r, Err(Ok(ContractError::IntervalTooShort))),
+        "interval 86399 must be rejected as IntervalTooShort"
+    );
+    assert!(!t.has_sub(), "subscription must not be created");
+}
+
+/// Test interval at zero (0 seconds)
+/// This should be rejected with IntervalTooShort.
+#[test]
+fn test_subscribe_interval_zero() {
+    let t = T::new();
+    let ivl = 0_u64;
+    let r = t.client.try_subscribe(&t.subscriber, &t.merchant, &t.token, &100_i128, &ivl);
+    assert!(
+        matches!(r, Err(Ok(ContractError::IntervalTooShort))),
+        "interval 0 must be rejected as IntervalTooShort"
+    );
+    assert!(!t.has_sub(), "subscription must not be created for zero interval");
+}
+
+/// Test interval with very small value (1 second)
+/// This should be rejected with IntervalTooShort.
+#[test]
+fn test_subscribe_interval_one_second() {
+    let t = T::new();
+    let ivl = 1_u64;
+    let r = t.client.try_subscribe(&t.subscriber, &t.merchant, &t.token, &100_i128, &ivl);
+    assert!(
+        matches!(r, Err(Ok(ContractError::IntervalTooShort))),
+        "interval 1 must be rejected as IntervalTooShort"
+    );
+    assert!(!t.has_sub(), "subscription must not be created for 1-second interval");
+}
+
+/// Test interval exactly at upper boundary (31536000 seconds = 365 days)
+/// This should be accepted as the maximum valid interval.
+#[test]
+fn test_subscribe_interval_exact_upper_boundary() {
+    let t = T::new();
+    let ivl = 31_536_000_u64; // exactly 365 days
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &100_i128, &ivl);
+    let d = t.get_sub();
+    assert_eq!(d.interval, ivl, "interval at exact upper boundary must be accepted");
+}
+
+/// Test interval one second above upper boundary (31536001 seconds)
+/// This should be rejected with IntervalTooLong.
+#[test]
+fn test_subscribe_interval_one_above_upper_boundary() {
+    let t = T::new();
+    let ivl = 31_536_001_u64; // 1 second above maximum
+    let r = t.client.try_subscribe(&t.subscriber, &t.merchant, &t.token, &100_i128, &ivl);
+    assert!(
+        matches!(r, Err(Ok(ContractError::IntervalTooLong))),
+        "interval 31536001 must be rejected as IntervalTooLong"
+    );
+    assert!(!t.has_sub(), "subscription must not be created");
+}
+
+/// Test interval at maximum u64 value
+/// This should be rejected with IntervalTooLong.
+#[test]
+fn test_subscribe_interval_max_u64() {
+    let t = T::new();
+    let ivl = u64::MAX;
+    let r = t.client.try_subscribe(&t.subscriber, &t.merchant, &t.token, &100_i128, &ivl);
+    assert!(
+        matches!(r, Err(Ok(ContractError::IntervalTooLong))),
+        "interval u64::MAX must be rejected as IntervalTooLong"
+    );
+    assert!(!t.has_sub(), "subscription must not be created");
+}
+
+/// Test interval at large value (1 year + 1 day = 31622400 seconds)
+/// This should be rejected with IntervalTooLong.
+#[test]
+fn test_subscribe_interval_just_over_one_year() {
+    let t = T::new();
+    let ivl = 31_622_400_u64; // 1 year + 1 day
+    let r = t.client.try_subscribe(&t.subscriber, &t.merchant, &t.token, &100_i128, &ivl);
+    assert!(
+        matches!(r, Err(Ok(ContractError::IntervalTooLong))),
+        "interval exceeding 365 days must be rejected as IntervalTooLong"
+    );
+    assert!(!t.has_sub(), "subscription must not be created");
+}
+
+// ─── Combined Boundary Tests: Interval + Amount ───────────────────────────────
+
+/// Test that boundary intervals are properly validated regardless of amount.
+/// Uses edge case amount combined with minimum interval.
+#[test]
+fn test_subscribe_min_amount_min_interval_boundary() {
+    let t = T::new();
+    let amt = 1_i128; // minimum positive amount
+    let ivl = 86_400_u64; // exact lower boundary
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &amt, &ivl);
+    let d = t.get_sub();
+    assert_eq!(d.amount, amt);
+    assert_eq!(d.interval, ivl);
+}
+
+/// Test that maximum amount works with boundary intervals.
+/// Uses large amount with exact upper boundary interval.
+#[test]
+fn test_subscribe_large_amount_max_interval_boundary() {
+    let t = T::new();
+    let amt = i128::MAX / 2; // large but safe amount
+    let ivl = 31_536_000_u64; // exact upper boundary
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &amt, &ivl);
+    let d = t.get_sub();
+    assert_eq!(d.amount, amt);
+    assert_eq!(d.interval, ivl);
+}
+
+/// Test that zero interval is rejected even with valid amount.
+/// Ensures interval validation is independent and robust.
+#[test]
+fn test_subscribe_zero_interval_with_valid_amount() {
+    let t = T::new();
+    let amt = 100_000_i128; // valid positive amount
+    let ivl = 0_u64; // invalid zero interval
+    let r = t.client.try_subscribe(&t.subscriber, &t.merchant, &t.token, &amt, &ivl);
+    assert!(matches!(r, Err(Ok(ContractError::IntervalTooShort))));
+    assert!(!t.has_sub());
+}
+
 // ─── Extra: Overwrite existing subscription ───────────────────────────────────
 
 #[test]
