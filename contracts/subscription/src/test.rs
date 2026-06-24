@@ -189,6 +189,40 @@ fn test_cancel_nonexistent() {
     assert!(matches!(r, Err(Ok(ContractError::NoActiveSubscription))));
 }
 
+// ─── Extra: Cancel and re-subscribe ───────────────────────────────────────────
+
+#[test]
+fn test_cancel_and_resubscribe() {
+    let t = T::new();
+    let amt1  = 100_000_i128;
+    let ivl1  = 86_400_u64;
+    let ts1   = t.env.ledger().timestamp();
+
+    // (a) first subscribe
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &amt1, &ivl1);
+    let d1 = t.get_sub();
+    assert_eq!(d1.amount,       amt1);
+    assert_eq!(d1.interval,     ivl1);
+    assert_eq!(d1.next_payment, ts1 + ivl1);
+
+    // (b) cancel
+    t.client.cancel(&t.subscriber, &t.merchant);
+    assert!(!t.has_sub());
+
+    // (c) re-subscribe with different terms
+    let amt2  = 200_000_i128;
+    let ivl2  = 172_800_u64;
+    let ts2   = t.env.ledger().timestamp();
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &amt2, &ivl2);
+
+    // (d) verify new subscription replaces old one
+    let d2 = t.get_sub();
+    assert_eq!(d2.amount,       amt2);
+    assert_eq!(d2.interval,     ivl2);
+    assert_eq!(d2.next_payment, ts2 + ivl2);
+    assert_ne!(d1.next_payment, d2.next_payment);
+}
+
 // ─── Requirement 13.10 — Events ──────────────────────────────────────────────
 
 #[test]
