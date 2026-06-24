@@ -38,7 +38,7 @@ interface SuccessData {
 // ─── Shared input className (larger py for ≥48px touch target on mobile) ─────
 const inputCls =
   'w-full rounded-lg bg-gray-800 border border-gray-700 px-4 py-3 text-base ' +
-  'text-white placeholder-gray-500 focus:outline-none focus:ring-2 ' +
+  'text-white placeholder-gray-400 focus:outline-none focus:ring-2 ' +
   'focus:ring-blue-500 disabled:opacity-50 min-h-[48px] ' +
   'transition-all duration-150 focus:scale-[1.02]';
 
@@ -88,7 +88,7 @@ function ContractConfigError() {
         </div>
 
         <div className="border-t border-yellow-600/30 pt-4">
-          <p className="text-xs text-gray-400">
+          <p className="text-xs text-gray-300">
             📖 For full details, see <code className="bg-gray-800/60 px-1.5 py-0.5 rounded text-yellow-300">README.md → Frontend → Environment variables</code>
           </p>
         </div>
@@ -110,12 +110,12 @@ function ProgressBar() {
           </svg>
           <span className="text-sm font-medium text-blue-300">Submitting transaction…</span>
         </div>
-        <span className="text-xs text-blue-300/60 animate-pulse">Processing on blockchain</span>
+        <span className="text-xs text-blue-200 animate-pulse">Processing on blockchain</span>
       </div>
       <div className="h-2 w-full bg-gray-700 rounded-full overflow-hidden shadow-inner">
         <div className="h-full bg-gradient-to-r from-blue-400 via-blue-500 to-blue-400 rounded-full animate-progress" />
       </div>
-      <p className="mt-2 text-xs text-gray-400 text-center">
+      <p className="mt-2 text-xs text-gray-300 text-center">
         This may take 10-30 seconds. Keep the window open.
       </p>
     </div>
@@ -151,11 +151,11 @@ function SuccessCard({
 
       {/* Summary */}
       <div className="grid grid-cols-2 gap-x-4 gap-y-3 text-xs text-gray-300 bg-gray-800/30 rounded-lg p-3">
-        <span className="text-gray-400 font-medium">Amount</span>
+        <span className="text-gray-300 font-medium">Amount</span>
         <span className="font-medium">{data.amount} tokens</span>
-        <span className="text-gray-400 font-medium">Interval</span>
+        <span className="text-gray-300 font-medium">Interval</span>
         <span className="font-medium">every {days} day{days !== 1 ? 's' : ''}</span>
-        <span className="text-gray-400 font-medium break-all">Merchant</span>
+        <span className="text-gray-300 font-medium break-all">Merchant</span>
         <span className="break-all font-mono text-xs">{data.merchant}</span>
       </div>
 
@@ -264,7 +264,7 @@ export default function SubscriptionForm() {
   return (
     <div className="w-full max-w-lg mx-auto bg-gray-900 rounded-2xl shadow-xl p-5 sm:p-8 text-white">
       <h2 className="text-2xl sm:text-3xl font-bold mb-2">Create Subscription</h2>
-      <p className="text-gray-400 text-sm mb-8 leading-relaxed">
+      <p className="text-gray-300 text-sm mb-8 leading-relaxed">
         Authorize a recurring on-chain payment using your Freighter wallet.
       </p>
 
@@ -282,7 +282,7 @@ export default function SubscriptionForm() {
         >
           <p className="font-semibold mb-2 text-base">Transaction error</p>
           <p className="leading-relaxed">{txError}</p>
-          <p className="mt-3 text-gray-400 text-xs">
+          <p className="mt-3 text-gray-300 text-xs">
             Your form data has been preserved — review and retry.
           </p>
         </div>
@@ -341,7 +341,7 @@ export default function SubscriptionForm() {
           {/* Amount */}
           <div>
             <label htmlFor="amount" className="block text-sm font-semibold text-gray-300 mb-2.5">
-              Amount <span className="text-gray-500 font-normal">(token units)</span>
+              Amount <span className="text-gray-400 font-normal">(token units)</span>
             </label>
             <input
               id="amount"
@@ -366,7 +366,7 @@ export default function SubscriptionForm() {
           {/* Interval */}
           <div>
             <label htmlFor="interval" className="block text-sm font-semibold text-gray-300 mb-2.5">
-              Interval <span className="text-gray-500 font-normal">(seconds)</span>
+              Interval <span className="text-gray-400 font-normal">(seconds)</span>
             </label>
             <input
               id="interval"
@@ -381,7 +381,7 @@ export default function SubscriptionForm() {
               aria-invalid={!!fieldErrors.interval}
               className={inputCls}
             />
-            <p className="mt-2 text-xs text-gray-500 leading-relaxed">
+            <p className="mt-2 text-xs text-gray-400 leading-relaxed">
               Default: 2 592 000 s (30 days). Range: 86 400 s – 31 536 000 s.
             </p>
             {fieldErrors.interval && (
