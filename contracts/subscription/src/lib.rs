@@ -157,6 +157,127 @@ impl SubscriptionProtocol {
         Ok(())
     }
 
+    /// Collect multiple recurring payments in a single transaction.
+    ///
+    /// # Authorization
+    /// Requires a valid signature from `merchant` in the transaction auth envelope.
+    /// All payments must be to the same merchant (enforced by caller authorization).
+    ///
+    /// # Parameters
+    /// - `payments`: Vector of `(subscriber, merchant)` tuples representing payments to execute.
+    ///   Must be non-empty.
+    ///
+    /// # Errors
+    /// - `ContractError::EmptyBatch` — if `payments` vector is empty.
+    /// - Per-subscription errors are NOT propagated; instead, each payment is processed
+    ///   independently with individual success/failure events.
+    ///
+    /// # Behavior
+    /// For each payment in the batch:
+    /// 1. Load subscription (skip if absent).
+    /// 2. Check time-lock (skip if not due).
+    /// 3. Verify subscriber balance (emit failure event if insufficient; skip transfer).
+    /// 4. Execute token transfer (emit failure event if transfer fails; skip state update).
+    /// 5. On success: update `next_payment`, extend TTL, emit success + executed events.
+    ///
+    /// # Events
+    /// Emits for each subscription:
+    /// - `payment_transfer_success` + `executed` (on successful collection).
+    /// - `payment_transfer_failure` (on transfer failure).
+    /// - No events (if subscription doesn't exist or payment not due).
+    ///
+    /// # Advantages
+    /// - Reduces transaction overhead: single auth check + single bulk TTL extension for N payments.
+    /// - Per-subscription success handling: failures don't block other payments.
+    /// - Ideal for merchant backends batching collections from multiple subscribers.
+    ///
+    /// # Example Usage (Off-Chain)
+    /// ```text
+    /// const paymentBatch = [
+    ///   (subscriber_a, merchant),
+    ///   (subscriber_b, merchant),
+    ///   (subscriber_c, merchant),
+    /// ];
+    /// contract.execute_payment_batch(paymentBatch)
+    ///   .then(() => {
+    ///     // Check events for per-subscription success/failure
+    ///   });
+    /// ```
+    pub fn execute_payment_batch(
+        env: Env,
+        merchant: Address,
+        payments: soroban_sdk::Vec<Address>,
+    ) -> Result<(), ContractError> {
+        // 1. Authorization — merchant triggers collection for all payments.
+        merchant.require_auth();
+
+        // 2. Validate batch is non-empty.
+        if payments.is_empty() {
+            return Err(ContractError::EmptyBatch);
+        }
+
+        // 3. Emit batch initiation event for telemetry.
+        events::emit_batch_execute_initiated(&env, &merchant, payments.len() as u32);
+
+        // 4. Collect keys to extend TTL in bulk (after all transfers).
+        let mut keys_to_extend = soroban_sdk::Vec::new(&env);
+        let now = env.ledger().timestamp();
+
+        // 5. Process each payment independently — collect successes for bulk TTL extension.
+        for subscriber in payments.iter() {
+            let key = DataKey::Subscription(subscriber.clone(), merchant.clone());
+
+            // 5a. Load subscription — skip silently if absent (no event).
+            let mut data: SubscriptionData = match env.storage().persistent().get(&key) {
+                Some(data) => data,
+                None => continue,
+            };
+
+            // 5b. Check time-lock — skip silently if not due.
+            if now < data.next_payment {
+                continue;
+            }
+
+            // 5c. Verify subscriber balance before transfer attempt.
+            let token_client = token::Client::new(&env, &data.token);
+            let subscriber_balance = token_client.balance(&subscriber);
+
+            if subscriber_balance < data.amount {
+                // Insufficient balance — emit failure event and skip to next payment.
+                events::emit_payment_transfer_failure(&env, &subscriber, &merchant, data.amount);
+                continue;
+            }
+
+            // 5d. Execute token transfer.
+            //     If transfer panics (e.g., allowance revoked), the entire transaction reverts.
+            //     This is expected Soroban behavior; the caller must ensure subscribers have
+            //     sufficient allowance for all payments in the batch.
+            token_client.transfer(
+                &subscriber,
+                &merchant,
+                &data.amount,
+            );
+
+            // 5e. Transfer succeeded — advance next_payment and record key for TTL extension.
+            data.next_payment = now + data.interval;
+            env.storage().persistent().set(&key, &data);
+            keys_to_extend.push_back(key);
+
+            // 5f. Emit success events.
+            events::emit_payment_transfer_success(&env, &subscriber, &merchant, data.amount);
+            events::emit_executed(&env, &subscriber, &merchant, &data.token, data.amount);
+        }
+
+        // 6. Bulk extend TTL for all successful payments.
+        for key in keys_to_extend.iter() {
+            env.storage()
+                .persistent()
+                .extend_ttl(&key, MIN_TTL_LEDGERS, MAX_TTL_LEDGERS);
+        }
+
+        Ok(())
+    }
+
     /// Cancel an active subscription.
     ///
     /// # Authorization

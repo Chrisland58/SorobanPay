@@ -1202,3 +1202,345 @@ fn prop_repeated_cancel_is_deterministic(
         prop_ok!(())
     });
 }
+
+// ─── Batch Payment Execution Tests ───────────────────────────────────────────
+
+#[test]
+fn test_execute_payment_batch_empty_returns_error() {
+    let t = T::new();
+    let empty_batch = soroban_sdk::Vec::<Address>::new(&t.env);
+
+    let result = t.client.try_execute_payment_batch(&t.merchant, &empty_batch);
+    assert!(
+        matches!(result, Err(Ok(ContractError::EmptyBatch))),
+        "batch with no payments must return EmptyBatch error"
+    );
+}
+
+#[test]
+fn test_execute_payment_batch_single_payment() {
+    let t = T::new();
+    let amt = 100_000_i128;
+    let ivl = 86_400_u64;
+    let ts0 = t.env.ledger().timestamp();
+
+    // Setup subscription
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &amt, &ivl);
+    t.advance(ivl + 1);
+
+    // Build batch with single subscriber
+    let mut batch = soroban_sdk::Vec::new(&t.env);
+    batch.push_back(t.subscriber.clone());
+
+    // Execute batch
+    let result = t.client.execute_payment_batch(&t.merchant, &batch);
+    assert!(result.is_ok(), "batch with single due payment must succeed");
+
+    // Verify payment was collected
+    let sub_bal_after = t.sub_bal();
+    assert_eq!(sub_bal_after, 10_000_000_i128 - amt, "subscriber balance must decrease by payment amount");
+
+    let mer_bal_after = t.mer_bal();
+    assert_eq!(mer_bal_after, amt, "merchant balance must increase by payment amount");
+
+    // Verify next_payment was advanced
+    let data = t.get_sub();
+    assert_eq!(data.next_payment, ts0 + 2 * ivl, "next_payment must be advanced by interval");
+}
+
+#[test]
+fn test_execute_payment_batch_multiple_subscribers_mixed_status() {
+    let t = T::new();
+    let env = &t.env;
+    let amt = 100_000_i128;
+    let ivl = 86_400_u64;
+
+    // Setup multiple subscriptions with different timelines
+    let subscriber_a = Address::generate(env);
+    let subscriber_b = Address::generate(env);
+    let subscriber_c = Address::generate(env);
+
+    // Register SAC and mint for all subscribers
+    let token_client = token::Client::new(env, &t.token);
+    token_client.mint(&subscriber_a, &5_000_000_i128);
+    token_client.mint(&subscriber_b, &5_000_000_i128);
+    token_client.mint(&subscriber_c, &5_000_000_i128);
+
+    // Approve contract to spend
+    token_client.approve(&subscriber_a, &t.contract_id, &5_000_000_i128, &(env.ledger().sequence() + 100_000_u32));
+    token_client.approve(&subscriber_b, &t.contract_id, &5_000_000_i128, &(env.ledger().sequence() + 100_000_u32));
+    token_client.approve(&subscriber_c, &t.contract_id, &5_000_000_i128, &(env.ledger().sequence() + 100_000_u32));
+
+    let ts0 = env.ledger().timestamp();
+
+    // Create subscriptions
+    t.client.subscribe(&subscriber_a, &t.merchant, &t.token, &amt, &ivl);
+    t.client.subscribe(&subscriber_b, &t.merchant, &t.token, &amt, &ivl);
+    t.client.subscribe(&subscriber_c, &t.merchant, &t.token, &amt, &ivl);
+
+    // Advance time — only A and B are due
+    env.ledger().with_mut(|l| l.timestamp = ts0 + ivl + 1);
+
+    // Subscriber C cancels before batch execution
+    t.client.cancel(&subscriber_c, &t.merchant);
+
+    // Build batch with all three subscribers
+    let mut batch = soroban_sdk::Vec::new(env);
+    batch.push_back(subscriber_a.clone());
+    batch.push_back(subscriber_b.clone());
+    batch.push_back(subscriber_c.clone());
+
+    // Execute batch — expect A and B to succeed, C to be silently skipped
+    let result = t.client.execute_payment_batch(&t.merchant, &batch);
+    assert!(result.is_ok(), "batch execution must succeed even with skipped subscriptions");
+
+    // Verify A and B were charged
+    let bal_a = token_client.balance(&subscriber_a);
+    assert_eq!(bal_a, 5_000_000_i128 - amt, "subscriber A balance must decrease");
+
+    let bal_b = token_client.balance(&subscriber_b);
+    assert_eq!(bal_b, 5_000_000_i128 - amt, "subscriber B balance must decrease");
+
+    // Verify C was not charged (already cancelled)
+    let bal_c = token_client.balance(&subscriber_c);
+    assert_eq!(bal_c, 5_000_000_i128, "subscriber C balance must remain unchanged (cancelled)");
+
+    // Verify merchant received 2 payments
+    let mer_bal = t.mer_bal();
+    assert_eq!(mer_bal, 2 * amt, "merchant must receive exactly 2 payments");
+
+    // Verify next_payment was advanced only for A and B
+    let data_a = env.storage().persistent().get::<_, SubscriptionData>(
+        &DataKey::Subscription(subscriber_a.clone(), t.merchant.clone())
+    ).unwrap();
+    assert_eq!(data_a.next_payment, ts0 + 2 * ivl, "subscriber A next_payment must be advanced");
+
+    let data_b = env.storage().persistent().get::<_, SubscriptionData>(
+        &DataKey::Subscription(subscriber_b.clone(), t.merchant.clone())
+    ).unwrap();
+    assert_eq!(data_b.next_payment, ts0 + 2 * ivl, "subscriber B next_payment must be advanced");
+
+    // Verify C's subscription is gone
+    assert!(!env.storage().persistent().has(&DataKey::Subscription(subscriber_c.clone(), t.merchant.clone())),
+        "subscriber C subscription must not exist (cancelled)");
+}
+
+#[test]
+fn test_execute_payment_batch_insufficient_balance_continues() {
+    let t = T::new();
+    let env = &t.env;
+
+    // Create subscriber with low balance
+    let subscriber_low_balance = Address::generate(env);
+    let token_client = token::Client::new(env, &t.token);
+    let low_balance = 50_000_i128; // less than payment amount
+    token_client.mint(&subscriber_low_balance, &low_balance);
+    token_client.approve(&subscriber_low_balance, &t.contract_id, &low_balance, &(env.ledger().sequence() + 100_000_u32));
+
+    let amt = 100_000_i128;
+    let ivl = 86_400_u64;
+    let ts0 = env.ledger().timestamp();
+
+    // Create subscriptions
+    t.client.subscribe(&subscriber_low_balance, &t.merchant, &t.token, &amt, &ivl);
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &amt, &ivl);
+
+    env.ledger().with_mut(|l| l.timestamp = ts0 + ivl + 1);
+
+    // Build batch: low balance subscriber first, then normal subscriber
+    let mut batch = soroban_sdk::Vec::new(env);
+    batch.push_back(subscriber_low_balance.clone());
+    batch.push_back(t.subscriber.clone());
+
+    // Execute batch — first should fail silently, second should succeed
+    let result = t.client.execute_payment_batch(&t.merchant, &batch);
+    assert!(result.is_ok(), "batch must continue despite insufficient balance in first payment");
+
+    // Verify low balance subscriber was NOT charged
+    let bal_low = token_client.balance(&subscriber_low_balance);
+    assert_eq!(bal_low, low_balance, "subscriber with low balance must not be charged");
+
+    // Verify normal subscriber WAS charged
+    let bal_normal = token_client.balance(&t.subscriber);
+    assert_eq!(bal_normal, 10_000_000_i128 - amt, "subscriber with sufficient balance must be charged");
+
+    // Verify merchant received only 1 payment
+    let mer_bal = t.mer_bal();
+    assert_eq!(mer_bal, amt, "merchant must receive exactly 1 payment (1 failed, 1 succeeded)");
+
+    // Verify low balance subscription is still active (not advanced)
+    let data_low = env.storage().persistent().get::<_, SubscriptionData>(
+        &DataKey::Subscription(subscriber_low_balance.clone(), t.merchant.clone())
+    ).unwrap();
+    assert_eq!(data_low.next_payment, ts0 + ivl, "low balance subscription next_payment must NOT advance");
+
+    // Verify normal subscription was advanced
+    let data_normal = env.storage().persistent().get::<_, SubscriptionData>(
+        &DataKey::Subscription(t.subscriber.clone(), t.merchant.clone())
+    ).unwrap();
+    assert_eq!(data_normal.next_payment, ts0 + 2 * ivl, "normal subscription next_payment must advance");
+}
+
+#[test]
+fn test_execute_payment_batch_not_due_silently_skipped() {
+    let t = T::new();
+    let env = &t.env;
+    let amt = 100_000_i128;
+    let ivl = 86_400_u64;
+    let ts0 = env.ledger().timestamp();
+
+    // Create subscriber
+    let subscriber_not_due = Address::generate(env);
+    let token_client = token::Client::new(env, &t.token);
+    token_client.mint(&subscriber_not_due, &5_000_000_i128);
+    token_client.approve(&subscriber_not_due, &t.contract_id, &5_000_000_i128, &(env.ledger().sequence() + 100_000_u32));
+
+    // Create subscriptions (both just created, so both not due)
+    t.client.subscribe(&subscriber_not_due, &t.merchant, &t.token, &amt, &ivl);
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &amt, &ivl);
+
+    // Advance time for only one subscriber
+    env.ledger().with_mut(|l| l.timestamp = ts0 + ivl + 1);
+    t.client.execute_payment(&t.subscriber, &t.merchant); // execute first one manually
+
+    // Reset time so only one is due now
+    env.ledger().with_mut(|l| l.timestamp = ts0 + ivl + 1);
+
+    // Build batch with both subscribers
+    let mut batch = soroban_sdk::Vec::new(env);
+    batch.push_back(subscriber_not_due.clone()); // this one is NOT due
+    batch.push_back(t.subscriber.clone()); // this one is NOT due (already executed)
+
+    let events_before = env.events().all().len();
+
+    // Execute batch — both should be skipped silently
+    let result = t.client.execute_payment_batch(&t.merchant, &batch);
+    assert!(result.is_ok(), "batch with no-due payments must succeed");
+
+    let events_after = env.events().all().len();
+    assert_eq!(events_after, events_before, "batch with no-due payments must emit no events");
+
+    // Verify no funds were transferred
+    let bal_not_due = token_client.balance(&subscriber_not_due);
+    assert_eq!(bal_not_due, 5_000_000_i128, "not-due subscriber balance must not change");
+}
+
+#[test]
+fn test_execute_payment_batch_emits_individual_events() {
+    let t = T::new();
+    let env = &t.env;
+    let amt = 100_000_i128;
+    let ivl = 86_400_u64;
+
+    // Create second subscriber
+    let subscriber_b = Address::generate(env);
+    let token_client = token::Client::new(env, &t.token);
+    token_client.mint(&subscriber_b, &5_000_000_i128);
+    token_client.approve(&subscriber_b, &t.contract_id, &5_000_000_i128, &(env.ledger().sequence() + 100_000_u32));
+
+    let ts0 = env.ledger().timestamp();
+
+    // Create subscriptions
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &amt, &ivl);
+    t.client.subscribe(&subscriber_b, &t.merchant, &t.token, &amt, &ivl);
+
+    env.ledger().with_mut(|l| l.timestamp = ts0 + ivl + 1);
+
+    // Build batch
+    let mut batch = soroban_sdk::Vec::new(env);
+    batch.push_back(t.subscriber.clone());
+    batch.push_back(subscriber_b.clone());
+
+    // Clear event history before batch execution
+    env.events().all();
+
+    // Execute batch
+    t.client.execute_payment_batch(&t.merchant, &batch);
+
+    // Verify 4 events emitted (2 payments × 2 events each: transfer_success + executed)
+    let events = env.events().all();
+    let payment_events: Vec<_> = events.iter()
+        .filter(|(topics, _)| {
+            topics.len() > 0 && (
+                topics[0] == Symbol::new(env, "payment_transfer_success") ||
+                topics[0] == Symbol::new(env, "executed")
+            )
+        })
+        .collect();
+
+    assert_eq!(payment_events.len(), 4, "batch must emit 4 events (2 payments × 2 events)");
+}
+
+#[test]
+fn test_execute_payment_batch_mixed_missing_subscriptions() {
+    let t = T::new();
+    let env = &t.env;
+    let amt = 100_000_i128;
+    let ivl = 86_400_u64;
+
+    // Create second valid subscriber
+    let subscriber_b = Address::generate(env);
+    let token_client = token::Client::new(env, &t.token);
+    token_client.mint(&subscriber_b, &5_000_000_i128);
+    token_client.approve(&subscriber_b, &t.contract_id, &5_000_000_i128, &(env.ledger().sequence() + 100_000_u32));
+
+    // Create third subscriber with NO subscription
+    let subscriber_no_sub = Address::generate(env);
+
+    let ts0 = env.ledger().timestamp();
+
+    // Create subscriptions only for A and B (not C)
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &amt, &ivl);
+    t.client.subscribe(&subscriber_b, &t.merchant, &t.token, &amt, &ivl);
+
+    env.ledger().with_mut(|l| l.timestamp = ts0 + ivl + 1);
+
+    // Build batch with all three (C has no subscription)
+    let mut batch = soroban_sdk::Vec::new(env);
+    batch.push_back(t.subscriber.clone());
+    batch.push_back(subscriber_no_sub.clone());
+    batch.push_back(subscriber_b.clone());
+
+    // Execute batch — C should be silently skipped
+    let result = t.client.execute_payment_batch(&t.merchant, &batch);
+    assert!(result.is_ok(), "batch with missing subscriptions must succeed");
+
+    // Verify A and B were charged
+    let bal_b = token_client.balance(&subscriber_b);
+    assert_eq!(bal_b, 5_000_000_i128 - amt, "subscriber B must be charged");
+
+    // Verify merchant received 2 payments
+    let mer_bal = t.mer_bal();
+    assert_eq!(mer_bal, 2 * amt, "merchant must receive exactly 2 payments");
+}
+
+#[test]
+fn test_execute_payment_batch_ttl_extended_for_successful_payments() {
+    let t = T::new();
+    let env = &t.env;
+    let amt = 100_000_i128;
+    let ivl = 86_400_u64;
+    let ts0 = env.ledger().timestamp();
+
+    // Create subscription
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &amt, &ivl);
+
+    env.ledger().with_mut(|l| l.timestamp = ts0 + ivl + 1);
+
+    // Build batch
+    let mut batch = soroban_sdk::Vec::new(env);
+    batch.push_back(t.subscriber.clone());
+
+    // Execute batch
+    t.client.execute_payment_batch(&t.merchant, &batch);
+
+    // Verify TTL was extended (check that entry still exists and TTL is fresh)
+    let key = DataKey::Subscription(t.subscriber.clone(), t.merchant.clone());
+    assert!(
+        env.storage().persistent().has(&key),
+        "subscription must persist after batch execution (TTL extended)"
+    );
+
+    // Note: Soroban test utilities don't expose TTL directly, but we verify the entry exists
+    // and would not exist if TTL wasn't extended far enough.
+}

@@ -20,4 +20,6 @@ pub enum ContractError {
     Unauthorized         = 6,
     /// `execute_payment` token transfer failed (insufficient balance or allowance)
     TransferFailed       = 7,
+    /// `execute_payment_batch` called with empty payment list
+    EmptyBatch           = 8,
 }

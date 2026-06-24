@@ -84,3 +84,19 @@ pub fn emit_cancel(env: &Env, subscriber: &Address, merchant: &Address) {
         (),
     );
 }
+
+/// Emit the `batch_execute_initiated` event after batch payment execution starts.
+///
+/// This event provides telemetry for off-chain services to track batch execution operations.
+///
+/// Topics:  (symbol("batch_execute_initiated"), merchant)
+/// Data:    batch_size (u32)
+pub fn emit_batch_execute_initiated(env: &Env, merchant: &Address, batch_size: u32) {
+    env.events().publish(
+        (
+            Symbol::new(env, "batch_execute_initiated"),
+            merchant.clone(),
+        ),
+        batch_size as i128,
+    );
+}
