@@ -1034,3 +1034,74 @@ fn load_test_bulk_execute_payment() {
         );
     }
 }
+
+// ─── InvalidTimestamp guard tests ────────────────────────────────────────────
+
+/// `subscribe` must return `InvalidTimestamp` when the ledger clock is zero
+/// (uninitialised mock or unusual environment).
+#[test]
+fn test_subscribe_zero_timestamp_returns_invalid_timestamp() {
+    let t = T::new();
+
+    // Force ledger timestamp to zero to simulate an uninitialised clock.
+    t.env.ledger().with_mut(|l| l.timestamp = 0);
+
+    let r = t.client.try_subscribe(
+        &t.subscriber,
+        &t.merchant,
+        &t.token,
+        &100_000_i128,
+        &86_400_u64,
+    );
+    assert!(
+        matches!(r, Err(Ok(ContractError::InvalidTimestamp))),
+        "subscribe must return InvalidTimestamp when ledger timestamp is 0"
+    );
+    assert!(!t.has_sub(), "no subscription must be created with a zero timestamp");
+}
+
+/// `subscribe` must return `InvalidTimestamp` when `timestamp + interval` would
+/// overflow a u64 (attacker-controlled or extremely large timestamp).
+#[test]
+fn test_subscribe_timestamp_overflow_returns_invalid_timestamp() {
+    let t = T::new();
+
+    // Set timestamp so that adding even the minimum interval overflows u64.
+    t.env.ledger().with_mut(|l| l.timestamp = u64::MAX);
+
+    let r = t.client.try_subscribe(
+        &t.subscriber,
+        &t.merchant,
+        &t.token,
+        &100_000_i128,
+        &86_400_u64, // any positive interval will overflow from u64::MAX
+    );
+    assert!(
+        matches!(r, Err(Ok(ContractError::InvalidTimestamp))),
+        "subscribe must return InvalidTimestamp on u64 overflow"
+    );
+    assert!(!t.has_sub(), "no subscription must be created on overflow");
+}
+
+/// `execute_payment` must return `InvalidTimestamp` when the ledger clock is
+/// zero — even for an active, past-due subscription.
+#[test]
+fn test_execute_payment_zero_timestamp_returns_invalid_timestamp() {
+    let t   = T::new();
+    let ivl = 86_400_u64;
+
+    // Create a valid subscription at a normal timestamp.
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &100_000_i128, &ivl);
+
+    // Corrupt the clock to zero after subscription creation.
+    t.env.ledger().with_mut(|l| l.timestamp = 0);
+
+    let r = t.client.try_execute_payment(&t.subscriber, &t.merchant);
+    assert!(
+        matches!(r, Err(Ok(ContractError::InvalidTimestamp))),
+        "execute_payment must return InvalidTimestamp when ledger timestamp is 0"
+    );
+
+    // Subscription state must be untouched.
+    assert!(t.has_sub(), "subscription must remain intact on timestamp error");
+}
