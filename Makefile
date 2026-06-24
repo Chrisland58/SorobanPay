@@ -2,7 +2,7 @@ CONTRACT_DIR := contracts/subscription
 TARGET_DIR   := contracts/target
 WASM_PATH    := $(TARGET_DIR)/wasm32-unknown-unknown/release/soroban_subscription_contract.wasm
 
-.PHONY: build test clean
+.PHONY: build test clean smoke-test
 
 ## build: Compile the Soroban subscription contract to WASM (release profile)
 build:
@@ -21,3 +21,7 @@ test:
 ## clean: Remove all build artifacts
 clean:
 	cargo clean --manifest-path $(CONTRACT_DIR)/Cargo.toml
+
+## smoke-test: Validate deploy/deploy.sh syntax and env logic (no network required)
+smoke-test:
+	bash deploy/smoke_test.sh
