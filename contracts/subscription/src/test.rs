@@ -1105,3 +1105,97 @@ fn test_execute_payment_zero_timestamp_returns_invalid_timestamp() {
     // Subscription state must be untouched.
     assert!(t.has_sub(), "subscription must remain intact on timestamp error");
 }
+
+// ─── Requirement: Amount upper-bound guard ────────────────────────────────────
+
+use crate::storage::MAX_AMOUNT;
+
+/// Amount exactly at the maximum threshold must be accepted.
+#[test]
+fn test_subscribe_amount_at_max_accepted() {
+    let t = T::new();
+    // We only check the error path here; storage won't have enough balance for
+    // execution, but subscribe itself must not reject a valid amount.
+    let r = t.client.try_subscribe(
+        &t.subscriber,
+        &t.merchant,
+        &t.token,
+        &MAX_AMOUNT,
+        &86_400_u64,
+    );
+    // subscribe should succeed (Ok(())) — the amount is within bounds.
+    assert!(r.is_ok(), "amount equal to MAX_AMOUNT must be accepted");
+}
+
+/// Amount one above the maximum threshold must be rejected with AmountTooLarge.
+#[test]
+fn test_subscribe_amount_one_above_max_rejected() {
+    let t = T::new();
+    let r = t.client.try_subscribe(
+        &t.subscriber,
+        &t.merchant,
+        &t.token,
+        &(MAX_AMOUNT + 1),
+        &86_400_u64,
+    );
+    assert!(
+        matches!(r, Err(Ok(ContractError::AmountTooLarge))),
+        "amount MAX_AMOUNT + 1 must return AmountTooLarge"
+    );
+    assert!(!t.has_sub(), "no subscription must be created for an oversized amount");
+}
+
+/// i128::MAX must be rejected with AmountTooLarge.
+#[test]
+fn test_subscribe_amount_i128_max_rejected() {
+    let t = T::new();
+    let r = t.client.try_subscribe(
+        &t.subscriber,
+        &t.merchant,
+        &t.token,
+        &i128::MAX,
+        &86_400_u64,
+    );
+    assert!(
+        matches!(r, Err(Ok(ContractError::AmountTooLarge))),
+        "i128::MAX must be rejected as AmountTooLarge"
+    );
+    assert!(!t.has_sub());
+}
+
+/// No event must be emitted when the amount exceeds the threshold.
+#[test]
+fn test_subscribe_amount_too_large_emits_no_event() {
+    let t = T::new();
+    let _ = t.client.try_subscribe(
+        &t.subscriber,
+        &t.merchant,
+        &t.token,
+        &(MAX_AMOUNT + 1),
+        &86_400_u64,
+    );
+    assert_eq!(
+        t.env.events().all().len(),
+        0,
+        "no event must be emitted for a rejected oversized amount"
+    );
+}
+
+proptest! {
+    /// Property: any amount above MAX_AMOUNT is always rejected.
+    #[test]
+    fn prop_amount_above_max_always_rejected(
+        excess in 1_i128..=i128::MAX - MAX_AMOUNT,
+    ) {
+        let t = T::new();
+        let r = t.client.try_subscribe(
+            &t.subscriber,
+            &t.merchant,
+            &t.token,
+            &(MAX_AMOUNT + excess),
+            &86_400_u64,
+        );
+        prop_assert!(matches!(r, Err(Ok(ContractError::AmountTooLarge))));
+        prop_assert!(!t.has_sub());
+    }
+}

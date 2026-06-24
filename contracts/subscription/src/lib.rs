@@ -7,7 +7,7 @@ mod storage;
 use soroban_sdk::{contract, contractimpl, token, Address, Env};
 
 use crate::error::ContractError;
-use crate::storage::{DataKey, SubscriptionData, MAX_TTL_LEDGERS, MIN_TTL_LEDGERS};
+use crate::storage::{DataKey, SubscriptionData, MAX_AMOUNT, MAX_TTL_LEDGERS, MIN_TTL_LEDGERS};
 
 // ─── Internal helpers ─────────────────────────────────────────────────────────
 
@@ -48,11 +48,12 @@ impl SubscriptionProtocol {
     /// - `subscriber`: Account that will be charged on each payment interval.
     /// - `merchant`:   Account that receives payments.
     /// - `token`:      SEP-41 token contract address.
-    /// - `amount`:     Payment amount per interval. Must be > 0.
+    /// - `amount`:     Payment amount per interval. Must be > 0 and <= 10^18.
     /// - `interval`:   Seconds between payments. Must be in [86400, 31536000].
     ///
     /// # Errors
     /// - `ContractError::AmountMustBePositive` — if `amount <= 0`.
+    /// - `ContractError::AmountTooLarge`       — if `amount > 10^18`.
     /// - `ContractError::IntervalTooShort`     — if `interval < 86400`.
     /// - `ContractError::IntervalTooLong`      — if `interval > 31536000`.
     /// - `ContractError::InvalidTimestamp`     — if ledger timestamp is zero or overflows.
@@ -70,6 +71,9 @@ impl SubscriptionProtocol {
         // 2. Validate amount.
         if amount <= 0 {
             return Err(ContractError::AmountMustBePositive);
+        }
+        if amount > MAX_AMOUNT {
+            return Err(ContractError::AmountTooLarge);
         }
 
         // 3. Validate interval.

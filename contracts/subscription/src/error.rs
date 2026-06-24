@@ -22,4 +22,6 @@ pub enum ContractError {
     TransferFailed       = 7,
     /// ledger timestamp is zero or would overflow when computing next_payment
     InvalidTimestamp     = 8,
+    /// `subscribe` called with amount exceeding the safe maximum threshold
+    AmountTooLarge       = 9,
 }
