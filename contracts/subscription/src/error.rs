@@ -20,10 +20,8 @@ pub enum ContractError {
     Unauthorized         = 6,
     /// `execute_payment` token transfer failed (insufficient balance or allowance)
     TransferFailed       = 7,
-    /// `execute_payment_batch` called with empty payment list
-    EmptyBatch           = 8,
-    /// `execute_payment` called on a paused subscription
-    SubscriptionPaused   = 9,
-    /// `resume` called on an already-active (not paused) subscription
-    SubscriptionNotPaused = 10,
+    /// ledger timestamp is zero or would overflow when computing next_payment
+    InvalidTimestamp     = 8,
+    /// `subscribe` called with amount exceeding the safe maximum threshold
+    AmountTooLarge       = 9,
 }
