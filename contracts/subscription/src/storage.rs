@@ -1,5 +1,20 @@
 use soroban_sdk::{contracttype, Address};
 
+// ==================== Version Metadata ====================
+/// Contract semantic version: MAJOR.MINOR.PATCH
+/// Increment MAJOR for breaking changes, MINOR for new backwards-compatible features, PATCH for bug fixes
+pub const CONTRACT_VERSION: &str = "1.0.0";
+
+/// Contract version as numeric components for off-chain compatibility checks
+pub const VERSION_MAJOR: u32 = 1;
+pub const VERSION_MINOR: u32 = 0;
+pub const VERSION_PATCH: u32 = 0;
+
+/// Human-readable contract identifier for integration verification
+pub const CONTRACT_NAME: &str = "SorobanPay-SubscriptionProtocol";
+
+// ==================== Storage & Data Structures ====================
+
 /// Composite storage key uniquely identifying a subscription.
 /// One entry per (subscriber, merchant) pair.
 #[contracttype]
@@ -15,6 +30,7 @@ pub struct SubscriptionData {
     pub amount:       i128,      // payment amount per interval (strictly positive)
     pub interval:     u64,       // seconds between payments [86400, 31536000]
     pub next_payment: u64,       // Unix timestamp of next valid payment window
+    pub is_paused:    bool,      // true if subscription payments are suspended
 }
 
 /// Safe upper bound for a single subscription payment amount (1 × 10¹⁸ stroops).
