@@ -14,7 +14,7 @@
  *  - Contract config error card with remediation steps
  */
 
-import { useState, useEffect, type FormEvent } from 'react';
+import { useState, useEffect, useCallback, type FormEvent } from 'react';
 import { useWallet } from '@/hooks/useWallet';
 import { buildAndSubmitSubscribe } from '@/lib/transaction_builder';
 import {
@@ -41,6 +41,49 @@ const inputCls =
   'text-white placeholder-gray-500 ' +
   'focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400 focus-visible:ring-offset-2 focus-visible:ring-offset-gray-900 ' +
   'disabled:opacity-50 min-h-[48px] transition-all duration-150';
+
+// ─── Copy button ──────────────────────────────────────────────────────────────
+
+function CopyButton({ text, label = 'Copy' }: { text: string; label?: string }) {
+  const [copied, setCopied] = useState(false);
+
+  const handleCopy = useCallback(() => {
+    navigator.clipboard.writeText(text).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    });
+  }, [text]);
+
+  return (
+    <button
+      type="button"
+      onClick={handleCopy}
+      aria-label={copied ? 'Copied!' : `${label} to clipboard`}
+      title={copied ? 'Copied!' : `${label} to clipboard`}
+      className="inline-flex items-center gap-1 rounded px-2 py-1 text-xs font-medium
+                 bg-gray-700 hover:bg-gray-600 active:bg-gray-500 text-gray-300
+                 hover:text-white transition-colors duration-150 shrink-0
+                 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400"
+    >
+      {copied ? (
+        <>
+          <svg xmlns="http://www.w3.org/2000/svg" className="h-3.5 w-3.5 text-green-400" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+            <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
+          </svg>
+          <span className="text-green-400">Copied!</span>
+        </>
+      ) : (
+        <>
+          <svg xmlns="http://www.w3.org/2000/svg" className="h-3.5 w-3.5" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+            <path d="M8 3a1 1 0 011-1h2a1 1 0 110 2H9a1 1 0 01-1-1z" />
+            <path d="M6 3a2 2 0 00-2 2v11a2 2 0 002 2h8a2 2 0 002-2V5a2 2 0 00-2-2 3 3 0 01-3 3H9a3 3 0 01-3-3z" />
+          </svg>
+          {label}
+        </>
+      )}
+    </button>
+  );
+}
 
 // ─── Network + contract status badge ──────────────────────────────────────────
 
@@ -117,9 +160,12 @@ function ContractConfigError() {
             <li className="leading-relaxed">
               Copy the printed address into{' '}
               <code className="bg-gray-800 px-2 py-1 rounded text-yellow-300 text-xs font-mono">frontend/.env.local</code>:
-              <pre className="mt-2 bg-gray-800 rounded-lg p-3 text-xs overflow-x-auto border border-gray-700">
-                <code>NEXT_PUBLIC_CONTRACT_ID=C…your_address…</code>
-              </pre>
+              <div className="mt-2 flex items-center gap-2">
+                <pre className="flex-1 bg-gray-800 rounded-lg p-3 text-xs overflow-x-auto border border-gray-700">
+                  <code>NEXT_PUBLIC_CONTRACT_ID=C…your_address…</code>
+                </pre>
+                <CopyButton text="NEXT_PUBLIC_CONTRACT_ID=C…your_address…" label="Copy" />
+              </div>
             </li>
             <li className="leading-relaxed">
               Restart the dev server:
@@ -401,9 +447,18 @@ export default function SubscriptionForm() {
           {publicKey ? 'Connected' : 'Disconnected'}
         </span>
       </div>
-      <p className="text-gray-400 text-sm mb-8 leading-relaxed">
+      <p className="text-gray-400 text-sm mb-5 leading-relaxed">
         Authorize a recurring on-chain payment using your Freighter wallet.
       </p>
+
+      {/* Contract ID with copy button */}
+      <div className="flex items-center gap-2 mb-8 bg-gray-800/50 border border-gray-700/60 rounded-lg px-3 py-2">
+        <span className="text-xs text-gray-500 font-medium shrink-0">Contract</span>
+        <code className="flex-1 text-xs text-gray-300 font-mono truncate" title={CONTRACT_ID}>
+          {CONTRACT_ID}
+        </code>
+        <CopyButton text={CONTRACT_ID} label="Copy" />
+      </div>
 
       {/* Progress indicator — visible only while submitting */}
       {isSubmitting && <ProgressBar />}
