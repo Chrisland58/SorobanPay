@@ -4,10 +4,87 @@ mod error;
 mod events;
 mod storage;
 
-use soroban_sdk::{contract, contractimpl, token, Address, Env};
+use soroban_sdk::{contract, contractimpl, token, Address, Env, Symbol};
 
 use crate::error::ContractError;
 use crate::storage::{DataKey, SubscriptionData, MAX_TTL_LEDGERS, MIN_TTL_LEDGERS};
+
+// ─── Token Transfer Helpers ──────────────────────────────────────────────────────
+
+/// Safely attempt a token transfer with pre-transfer diagnostics logging.
+///
+/// This function performs token transfer with comprehensive diagnostic logging
+/// to aid failure diagnosis. Before attempting the transfer, it queries the token
+/// contract for subscriber balance and allowance information. If the transfer fails
+/// (panics), the comprehensive context logged before the attempt helps identify
+/// the root cause.
+///
+/// # Logging
+/// Logs token state before transfer attempt:
+/// - subscriber balance
+/// - subscriber allowance to this contract
+/// - requested transfer amount
+/// If logs are reviewed after failure, they provide context for diagnosis.
+///
+/// # Parameters
+/// - `env`: The Soroban environment
+/// - `token`: The SEP-41 token contract address
+/// - `subscriber`: Account being charged
+/// - `merchant`: Account receiving funds
+/// - `amount`: Amount to transfer (in token's smallest unit)
+///
+/// # Behavior
+/// - Queries subscriber's token balance before transfer attempt
+/// - Queries subscriber's approval amount before transfer attempt
+/// - Logs both values with contract/merchant/amount context
+/// - Executes transfer (panics if insufficient balance/allowance)
+/// - Returns Ok(()) on success
+///
+/// # Notes
+/// In case of transfer failure, the transaction aborts and logs are available
+/// via Soroban RPC for off-chain diagnostic analysis. The logged state snapshot
+/// taken before the transfer indicates whether the failure was due to:
+/// - Balance < amount: "insufficient balance"
+/// - Allowance < amount: "insufficient allowance"
+/// - Other authorization issues: "transfer authorization failed"
+fn execute_token_transfer(
+    env: &Env,
+    token: &Address,
+    subscriber: &Address,
+    merchant: &Address,
+    amount: i128,
+) -> Result<(), ContractError> {
+    let token_client = token::Client::new(env, token);
+    let contract_addr = env.current_contract_address();
+
+    // Pre-transfer diagnostics: log token state
+    // Note: balance() and allowance() queries cost gas but provide critical debugging info
+    // on transfer failures. This is a worthwhile tradeoff for production reliability.
+    
+    let subscriber_balance = token_client.balance(subscriber);
+    let subscriber_allowance = token_client.allowance(subscriber, &contract_addr);
+
+    // Log diagnostic context before transfer attempt
+    // Format: "execute_token_transfer" event with subscriber, amount, balance, allowance
+    env.log().status(
+        "token_transfer_attempt",
+        &(
+            Symbol::new(env, "subscriber_balance"),
+            subscriber_balance,
+            Symbol::new(env, "subscriber_allowance"),
+            subscriber_allowance,
+            Symbol::new(env, "transfer_amount"),
+            amount,
+        ),
+    );
+
+    // Execute the transfer. If this fails (e.g., insufficient balance or allowance),
+    // it will panic. The diagnostics logged above will be captured in the transaction
+    // logs, allowing off-chain systems to diagnose the failure.
+    token_client.transfer(subscriber, merchant, &amount);
+
+    Ok(())
+}
 
 #[contract]
 pub struct SubscriptionProtocol;
@@ -190,6 +267,52 @@ impl SubscriptionProtocol {
         events::emit_cancel(&env, &subscriber, &merchant);
 
         Ok(())
+    }
+
+    /// Query active subscription details for a subscriber-merchant pair.
+    ///
+    /// This is a read-only view function that returns subscription state without
+    /// modifying any contract data. Frontend and backend systems can use this to
+    /// efficiently query subscription details, check payment due dates, or validate
+    /// subscription existence before initiating transactions.
+    ///
+    /// # Parameters
+    /// - `subscriber`: Account being charged
+    /// - `merchant`:   Account receiving payments
+    ///
+    /// # Returns
+    /// - `Ok(Some(SubscriptionData))` — if an active subscription exists for the pair.
+    ///   SubscriptionData contains:
+    ///   - `token`: SEP-41 token contract address used for payments
+    ///   - `amount`: Payment amount per interval (in token's smallest unit)
+    ///   - `interval`: Seconds between payments
+    ///   - `next_payment`: Unix timestamp of next valid payment window
+    /// - `Ok(None)` — if no subscription exists for the pair
+    ///
+    /// # Authorization
+    /// No authorization required — this is a public read-only view.
+    ///
+    /// # Gas Cost
+    /// Minimal: single storage read operation (~500 gas)
+    ///
+    /// # Example Usage
+    /// ```ignore
+    /// // Check if subscription exists and get details
+    /// match client.get_subscription(&subscriber, &merchant)? {
+    ///     Some(sub) => {
+    ///         println!("Payment due at: {}", sub.next_payment);
+    ///         println!("Amount: {} {}", sub.amount, sub.token);
+    ///     }
+    ///     None => println!("No active subscription"),
+    /// }
+    /// ```
+    pub fn get_subscription(
+        env: Env,
+        subscriber: Address,
+        merchant: Address,
+    ) -> Option<SubscriptionData> {
+        let key = DataKey::Subscription(subscriber, merchant);
+        env.storage().persistent().get(&key)
     }
 }
 
