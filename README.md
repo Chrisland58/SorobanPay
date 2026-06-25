@@ -350,6 +350,74 @@ npm run type-check
 | `execute_payment(subscriber, merchant)` | merchant | Collect payment if interval has elapsed. Transfers tokens directly subscriber → merchant. |
 | `cancel(subscriber, merchant)` | subscriber | Remove subscription from persistent storage. |
 
+### Examples
+
+**subscribe** — authorize 100 tokens every 30 days:
+
+```bash
+stellar contract invoke \
+  --id $CONTRACT_ID --source alice --network testnet \
+  -- subscribe \
+  --subscriber GABC...ALICE \
+  --merchant   GXYZ...MERCHANT \
+  --token      CABC...USDC \
+  --amount     100 \
+  --interval   2592000
+```
+
+```typescript
+import { Contract, nativeToScVal, Address } from "@stellar/stellar-sdk";
+const op = contract.call(
+  "subscribe",
+  new Address(subscriber).toScVal(),
+  new Address(merchant).toScVal(),
+  new Address(tokenAddress).toScVal(),
+  nativeToScVal(100n, { type: "i128" }),
+  nativeToScVal(2592000n, { type: "u64" }),
+);
+// Expected: subscription stored, `subscribe` event emitted, first payment collectable immediately.
+```
+
+**execute_payment** — merchant collects a due payment:
+
+```bash
+stellar contract invoke \
+  --id $CONTRACT_ID --source merchant-key --network testnet \
+  -- execute_payment \
+  --subscriber GABC...ALICE \
+  --merchant   GXYZ...MERCHANT
+```
+
+```typescript
+const op = contract.call(
+  "execute_payment",
+  new Address(subscriber).toScVal(),
+  new Address(merchant).toScVal(),
+);
+// Expected: 100 tokens transferred subscriber → merchant, `executed` event emitted, next_payment advanced.
+```
+
+**cancel** — subscriber terminates the agreement:
+
+```bash
+stellar contract invoke \
+  --id $CONTRACT_ID --source alice --network testnet \
+  -- cancel \
+  --subscriber GABC...ALICE \
+  --merchant   GXYZ...MERCHANT
+```
+
+```typescript
+const op = contract.call(
+  "cancel",
+  new Address(subscriber).toScVal(),
+  new Address(merchant).toScVal(),
+);
+// Expected: subscription removed; future execute_payment calls return NoActiveSubscription (error 4).
+```
+
+For the full parameter reference and error cases see [docs/contract-api.md](docs/contract-api.md).
+
 ### Events emitted
 
 | Event | Topics | Data |
