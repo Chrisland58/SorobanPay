@@ -4,7 +4,9 @@ import cors from 'cors';
 import cron from 'node-cron';
 import { EventIndexer } from './services/eventIndexer';
 import { PayoutSummaryGenerator } from './services/payoutSummaryGenerator';
+import { PaymentScheduler } from './services/paymentScheduler';
 import summariesRouter from './routes/summaries';
+import webhooksRouter from './routes/webhooks';
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -15,19 +17,33 @@ app.use(express.json());
 
 // Routes
 app.use('/api/summaries', summariesRouter);
+app.use('/api/webhooks', webhooksRouter);
 
 // Initialize services
 const rpcUrl = process.env.RPC_URL || 'https://soroban-testnet.stellar.org';
 const contractId = process.env.CONTRACT_ID || '';
+const networkPassphrase = process.env.NETWORK_PASSPHRASE || 'Test SDF Network ; September 2015';
 
 const eventIndexer = new EventIndexer(rpcUrl, contractId);
 const summaryGenerator = new PayoutSummaryGenerator();
+
+// Payment scheduler — only active when operator secret is configured
+const operatorSecret = process.env.OPERATOR_SECRET;
+const paymentScheduler = operatorSecret
+  ? new PaymentScheduler(rpcUrl, contractId, operatorSecret, networkPassphrase)
+  : null;
 
 // Schedule jobs
 // Fetch events every 5 minutes
 cron.schedule('*/5 * * * *', async () => {
   console.log('Fetching new events...');
   await eventIndexer.fetchAndStoreEvents();
+});
+
+// Execute due payments every minute
+cron.schedule('* * * * *', async () => {
+  if (!paymentScheduler) return;
+  await paymentScheduler.processDuePayments();
 });
 
 // Generate daily summaries at 1 AM every day
@@ -45,6 +61,9 @@ cron.schedule('0 2 * * 0', async () => {
 // Start server
 app.listen(PORT, () => {
   console.log(`Server is running on port ${PORT}`);
+  if (!operatorSecret) {
+    console.warn('[scheduler] OPERATOR_SECRET not set — payment scheduler disabled.');
+  }
   // Initial fetch of events
   eventIndexer.fetchAndStoreEvents();
 });
