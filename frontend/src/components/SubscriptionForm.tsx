@@ -266,10 +266,10 @@ function SuccessCard({
       <button
         onClick={onReset}
         className="w-full rounded-lg border-2 border-green-600/70 text-green-300 hover:bg-green-900/40 active:bg-green-900/60
-                   py-3 sm:py-4 text-sm font-semibold transition-all duration-150 min-h-[48px] hover:shadow-lg
+                   py-3 text-sm font-semibold transition-all duration-150 min-h-[48px] hover:shadow-lg
                    focus:outline-none focus-visible:ring-2 focus-visible:ring-green-400 focus-visible:ring-offset-2 focus-visible:ring-offset-gray-900"
       >
-        Create another subscription
+        Create Another Subscription
       </button>
     </div>
   );
@@ -321,15 +321,15 @@ function ConfirmModal({
         <div className="flex gap-3 pt-1">
           <button
             onClick={onCancel}
-            className="flex-1 rounded-lg border border-gray-600 text-gray-300 hover:bg-gray-800 py-3 text-sm font-semibold transition-colors focus:outline-none focus:ring-2 focus:ring-gray-500"
+            className="flex-1 rounded-lg border border-gray-600 bg-gray-800/50 text-gray-300 hover:bg-gray-700 active:bg-gray-800 py-3 text-sm font-semibold transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-500"
           >
-            Go back
+            Go Back
           </button>
           <button
             onClick={onConfirm}
-            className="flex-1 rounded-lg bg-blue-600 hover:bg-blue-500 active:bg-blue-700 py-3 text-sm font-semibold transition-colors focus:outline-none focus:ring-2 focus:ring-blue-400"
+            className="flex-1 rounded-lg bg-blue-600 hover:bg-blue-500 active:bg-blue-700 py-3 text-sm font-semibold transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400"
           >
-            Confirm & authorize
+            Confirm & Authorize
           </button>
         </div>
       </div>
@@ -737,8 +737,8 @@ export default function SubscriptionForm() {
               aria-describedby={!publicKey ? 'hint-wallet' : undefined}
               className="w-full flex items-center justify-center gap-2 rounded-lg bg-blue-600
                          hover:bg-blue-500 active:bg-blue-700 disabled:opacity-50
-                         disabled:cursor-not-allowed px-4 py-4 sm:py-5 text-base font-semibold
-                         transition-all duration-150 min-h-[56px] hover:shadow-lg active:shadow-md
+                         disabled:cursor-not-allowed px-4 py-3 text-sm font-semibold
+                         transition-all duration-150 min-h-[48px] hover:shadow-lg active:shadow-md
                          focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400
                          focus-visible:ring-offset-2 focus-visible:ring-offset-gray-900"
             >
