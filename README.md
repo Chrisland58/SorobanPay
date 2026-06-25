@@ -15,9 +15,10 @@ SorobanPay
 ```
 
 **Three layers:**
-1. **Smart Contract** — `SubscriptionProtocol` Soroban contract with `subscribe`, `execute_payment`, and `cancel` entry points. Uses persistent storage with TTL management and emits structured events for off-chain indexing.
-2. **Frontend** — Next.js 14 App Router + Freighter wallet integration + Tailwind CSS.
-3. **Build & Deploy** — GNU Makefile + bash deployment script with testnet/mainnet switching.
+1. **Smart Contract** — `SubscriptionProtocol` Soroban contract with `subscribe`, `execute_payment`, and `cancel` entry points. Uses persistent storage with TTL management and emits structured events for off-chain indexing. This is the sole source of truth for subscription state and payment execution — it never holds balances and requires a fresh auth signature on every call.
+2. **Frontend** — Next.js 14 App Router + Freighter wallet integration + Tailwind CSS. Signs and submits transactions directly to Soroban RPC; handles no server-side logic.
+3. **Backend** (`backend/`) — Optional off-chain service for event indexing, cancellation detection, payout summaries, and a merchant REST API. Read-only with respect to the chain — it polls `getEvents()` but never submits transactions. See [docs/architecture.md](docs/architecture.md) for the full backend role definition.
+4. **Build & Deploy** — GNU Makefile + bash deployment script with testnet/mainnet switching.
 
 ### System flow
 
