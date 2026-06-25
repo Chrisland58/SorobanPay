@@ -2,12 +2,24 @@ import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
 import cron from 'node-cron';
+import { validateConfig } from './lib/config';
 import { EventIndexer } from './services/eventIndexer';
 import { PayoutSummaryGenerator } from './services/payoutSummaryGenerator';
 import summariesRouter from './routes/summaries';
+import { buildHealthRouter } from './routes/health';
+
+// Validate config first — exits with a clear error if anything is missing/wrong
+const config = (() => {
+  try {
+    return validateConfig();
+  } catch (err) {
+    console.error((err as Error).message);
+    process.exit(1);
+  }
+})();
 
 const app = express();
-const PORT = process.env.PORT || 3001;
+const { port: PORT, rpcUrl, contractId } = config;
 
 // Middleware
 app.use(cors());
@@ -15,10 +27,7 @@ app.use(express.json());
 
 // Routes
 app.use('/api/summaries', summariesRouter);
-
-// Initialize services
-const rpcUrl = process.env.RPC_URL || 'https://soroban-testnet.stellar.org';
-const contractId = process.env.CONTRACT_ID || '';
+app.use('/health', buildHealthRouter(rpcUrl, contractId));
 
 const eventIndexer = new EventIndexer(rpcUrl, contractId);
 const summaryGenerator = new PayoutSummaryGenerator();
