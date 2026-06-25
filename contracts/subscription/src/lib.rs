@@ -252,6 +252,83 @@ fn execute_token_transfer(
 //
 // ═════════════════════════════════════════════════════════════════════════════
 
+// ─── Token Transfer Helpers ──────────────────────────────────────────────────────
+
+/// Safely attempt a token transfer with pre-transfer diagnostics logging.
+///
+/// This function performs token transfer with comprehensive diagnostic logging
+/// to aid failure diagnosis. Before attempting the transfer, it queries the token
+/// contract for subscriber balance and allowance information. If the transfer fails
+/// (panics), the comprehensive context logged before the attempt helps identify
+/// the root cause.
+///
+/// # Logging
+/// Logs token state before transfer attempt:
+/// - subscriber balance
+/// - subscriber allowance to this contract
+/// - requested transfer amount
+/// If logs are reviewed after failure, they provide context for diagnosis.
+///
+/// # Parameters
+/// - `env`: The Soroban environment
+/// - `token`: The SEP-41 token contract address
+/// - `subscriber`: Account being charged
+/// - `merchant`: Account receiving funds
+/// - `amount`: Amount to transfer (in token's smallest unit)
+///
+/// # Behavior
+/// - Queries subscriber's token balance before transfer attempt
+/// - Queries subscriber's approval amount before transfer attempt
+/// - Logs both values with contract/merchant/amount context
+/// - Executes transfer (panics if insufficient balance/allowance)
+/// - Returns Ok(()) on success
+///
+/// # Notes
+/// In case of transfer failure, the transaction aborts and logs are available
+/// via Soroban RPC for off-chain diagnostic analysis. The logged state snapshot
+/// taken before the transfer indicates whether the failure was due to:
+/// - Balance < amount: "insufficient balance"
+/// - Allowance < amount: "insufficient allowance"
+/// - Other authorization issues: "transfer authorization failed"
+fn execute_token_transfer(
+    env: &Env,
+    token: &Address,
+    subscriber: &Address,
+    merchant: &Address,
+    amount: i128,
+) -> Result<(), ContractError> {
+    let token_client = token::Client::new(env, token);
+    let contract_addr = env.current_contract_address();
+
+    // Pre-transfer diagnostics: log token state
+    // Note: balance() and allowance() queries cost gas but provide critical debugging info
+    // on transfer failures. This is a worthwhile tradeoff for production reliability.
+    
+    let subscriber_balance = token_client.balance(subscriber);
+    let subscriber_allowance = token_client.allowance(subscriber, &contract_addr);
+
+    // Log diagnostic context before transfer attempt
+    // Format: "execute_token_transfer" event with subscriber, amount, balance, allowance
+    env.log().status(
+        "token_transfer_attempt",
+        &(
+            Symbol::new(env, "subscriber_balance"),
+            subscriber_balance,
+            Symbol::new(env, "subscriber_allowance"),
+            subscriber_allowance,
+            Symbol::new(env, "transfer_amount"),
+            amount,
+        ),
+    );
+
+    // Execute the transfer. If this fails (e.g., insufficient balance or allowance),
+    // it will panic. The diagnostics logged above will be captured in the transaction
+    // logs, allowing off-chain systems to diagnose the failure.
+    token_client.transfer(subscriber, merchant, &amount);
+
+    Ok(())
+}
+
 #[contract]
 pub struct SubscriptionProtocol;
 
