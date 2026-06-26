@@ -765,7 +765,13 @@ impl SubscriptionProtocol {
         merchant: Address,
     ) -> Option<SubscriptionData> {
         let key = DataKey::Subscription(subscriber, merchant);
-        env.storage().persistent().get(&key)
+        let data = env.storage().persistent().get(&key)?;
+        // Bump TTL on read so active subscriptions don't expire silently
+        // between payment cycles while being monitored off-chain.
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, MIN_TTL_LEDGERS, MAX_TTL_LEDGERS);
+        Some(data)
     }
 }
 
