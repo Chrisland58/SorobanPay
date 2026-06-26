@@ -1003,8 +1003,11 @@ export default function SubscriptionForm() {
               id="help-amount"
               className="mt-2 text-xs text-gray-500 leading-relaxed"
             >
-              Must be a positive integer (e.g. 100). Represents the number of
-              token units transferred per interval.
+              Whole token units per payment cycle. Each unit equals the token's
+              smallest indivisible unit (stroops for XLM, 1×10⁻⁷). Examples:{" "}
+              <span className="text-gray-400 font-mono">10</span> ≈ 10 USDC,{" "}
+              <span className="text-gray-400 font-mono">500</span> ≈ 500 USDC.
+              Must be a positive integer.
             </p>
             {fieldErrors.amount && (
               <p
@@ -1050,8 +1053,13 @@ export default function SubscriptionForm() {
               id="help-interval"
               className="mt-2 text-xs text-gray-500 leading-relaxed"
             >
-              Seconds between payments. Min: 86 400 s (1 day), max: 31 536 000 s
-              (1 year). Default: 2 592 000 s (30 days).
+              Time between each payment, in seconds. Common values:{" "}
+              <span className="text-gray-400 font-mono">86 400</span> = 1 day,{" "}
+              <span className="text-gray-400 font-mono">604 800</span> = 1 week,{" "}
+              <span className="text-gray-400 font-mono">2 592 000</span> = 30
+              days (default),{" "}
+              <span className="text-gray-400 font-mono">31 536 000</span> = 1
+              year (maximum).
             </p>
             {intervalError && (
               <p id="err-interval" role="alert" className="mt-2 text-xs text-red-400 font-medium">
