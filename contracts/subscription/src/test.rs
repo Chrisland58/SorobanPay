@@ -1731,3 +1731,32 @@ fn test_amount_zero_rejected() {
     assert!(matches!(r, Err(Ok(ContractError::AmountMustBePositive))));
     assert!(!t.has_sub());
 }
+
+// ─── Issue #90 — subscribe invalid amount ────────────────────────────────────
+
+/// Amount of zero must be rejected with AmountMustBePositive and no subscription stored.
+#[test]
+fn test_subscribe_amount_zero_rejected() {
+    let t = T::new();
+    let r = t.client.try_subscribe(&t.subscriber, &t.merchant, &t.token, &0_i128, &86_400_u64);
+    assert!(matches!(r, Err(Ok(ContractError::AmountMustBePositive))));
+    assert!(!t.has_sub());
+}
+
+/// Negative amount must be rejected with AmountMustBePositive.
+#[test]
+fn test_subscribe_negative_amount_rejected() {
+    let t = T::new();
+    let r = t.client.try_subscribe(&t.subscriber, &t.merchant, &t.token, &-1_i128, &86_400_u64);
+    assert!(matches!(r, Err(Ok(ContractError::AmountMustBePositive))));
+    assert!(!t.has_sub());
+}
+
+/// i128::MIN amount must be rejected with AmountMustBePositive.
+#[test]
+fn test_subscribe_i128_min_amount_rejected() {
+    let t = T::new();
+    let r = t.client.try_subscribe(&t.subscriber, &t.merchant, &t.token, &i128::MIN, &86_400_u64);
+    assert!(matches!(r, Err(Ok(ContractError::AmountMustBePositive))));
+    assert!(!t.has_sub());
+}
