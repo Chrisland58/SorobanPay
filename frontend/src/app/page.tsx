@@ -144,8 +144,43 @@ export default function Home() {
       {publicKey ? (
         <SubscriptionForm />
       ) : (
-        <div className="w-full max-w-lg rounded-2xl border border-gray-800 bg-gray-900/40 p-8 text-center text-gray-500 text-sm">
-          Connect your wallet above to create a subscription.
+        <div className="w-full max-w-lg rounded-2xl border border-gray-800 bg-gray-900/40 p-8 text-center space-y-3">
+          <p className="text-2xl" aria-hidden="true">🔒</p>
+          <p className="text-gray-300 font-semibold text-sm">Connect your wallet to get started</p>
+          <p className="text-gray-500 text-xs leading-relaxed">
+            Install{' '}
+            <a
+              href="https://www.freighter.app"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="underline text-blue-400 hover:text-blue-300 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400 rounded"
+            >
+              Freighter
+            </a>{' '}
+            and click <strong className="text-gray-300">Connect Freighter Wallet</strong> above.
+            Then set <code className="bg-gray-800 px-1 rounded text-yellow-300 text-xs">NEXT_PUBLIC_CONTRACT_ID</code> in{' '}
+            <code className="bg-gray-800 px-1 rounded text-gray-300 text-xs">frontend/.env.local</code> if you haven't deployed yet.
+            See the <a href="https://github.com/Chrisland58/SorobanPay#quick-start-testnet-demo--5-minutes" target="_blank" rel="noopener noreferrer" className="underline text-blue-400 hover:text-blue-300 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400 rounded">Quick Start guide</a>.
+          </p>
+        </div>
+      )}
+
+      {/* Subscription history placeholder */}
+      {publicKey && (
+        <div className="w-full max-w-lg mt-6">
+          <div className="rounded-2xl border border-dashed border-gray-700 bg-gray-900/30 p-6 text-center space-y-3">
+            <p className="text-2xl" aria-hidden="true">📋</p>
+            <p className="text-gray-300 font-semibold text-sm">Payment History</p>
+            <p className="text-gray-500 text-xs leading-relaxed max-w-xs mx-auto">
+              Executed payments and subscription activity will appear here once
+              on-chain event indexing is available. Payments are recorded as{' '}
+              <code className="bg-gray-800 px-1 rounded text-gray-400 text-xs">executed</code>{' '}
+              events on the Soroban ledger.
+            </p>
+            <span className="inline-block mt-1 px-3 py-1 rounded-full bg-gray-800 text-gray-600 text-xs font-medium border border-gray-700">
+              Coming soon
+            </span>
+          </div>
         </div>
       )}
     </main>

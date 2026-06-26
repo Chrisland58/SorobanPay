@@ -391,9 +391,9 @@ impl SubscriptionProtocol {
         // 1. Authorization — must be first, before any state reads.
         subscriber.require_auth();
 
-        // 2. Reject contract's own address as token (invalid/zero-equivalent).
-        if token == env.current_contract_address() {
-            return Err(ContractError::InvalidTokenAddress);
+        // 2. Reject self-subscriptions.
+        if subscriber == merchant {
+            return Err(ContractError::SelfSubscription);
         }
 
         // 3. Validate amount.
@@ -770,7 +770,13 @@ impl SubscriptionProtocol {
         merchant: Address,
     ) -> Option<SubscriptionData> {
         let key = DataKey::Subscription(subscriber, merchant);
-        env.storage().persistent().get(&key)
+        let data = env.storage().persistent().get(&key)?;
+        // Bump TTL on read so active subscriptions don't expire silently
+        // between payment cycles while being monitored off-chain.
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, MIN_TTL_LEDGERS, MAX_TTL_LEDGERS);
+        Some(data)
     }
 }
 
