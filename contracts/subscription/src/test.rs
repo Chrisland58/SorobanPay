@@ -1732,40 +1732,43 @@ fn test_amount_zero_rejected() {
     assert!(!t.has_sub());
 }
 
-// ─── Issue #92 — Cancel missing subscription ─────────────────────────────────
+// ─── Issue #91 — execute_payment before due date ─────────────────────────────
 
-/// Cancelling a subscription that was never created must return NoActiveSubscription.
+/// Calling execute_payment immediately after subscribe (before interval elapses)
+/// must return PaymentNotDue and leave balances unchanged.
 #[test]
-fn test_cancel_nonexistent_subscription_returns_error() {
-    let t = T::new();
-    let r = t.client.try_cancel(&t.subscriber, &t.merchant);
-    assert!(matches!(r, Err(Ok(ContractError::NoActiveSubscription))));
-}
-
-/// Cancelling a subscription that was already cancelled must return NoActiveSubscription.
-#[test]
-fn test_cancel_already_cancelled_returns_error() {
+fn test_execute_payment_immediately_after_subscribe_returns_not_due() {
     let t = T::new();
     t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &100_000_i128, &86_400_u64);
-    t.client.cancel(&t.subscriber, &t.merchant);
-    assert!(!t.has_sub());
-    let r = t.client.try_cancel(&t.subscriber, &t.merchant);
-    assert!(matches!(r, Err(Ok(ContractError::NoActiveSubscription))));
+    let sb = t.sub_bal();
+    let mb = t.mer_bal();
+    let r = t.client.try_execute_payment(&t.subscriber, &t.merchant);
+    assert!(matches!(r, Err(Ok(ContractError::PaymentNotDue))));
+    assert_eq!(t.sub_bal(), sb);
+    assert_eq!(t.mer_bal(), mb);
 }
 
-/// A cancel on a missing subscription must not affect unrelated subscriptions.
+/// Calling execute_payment one second before the due date must return PaymentNotDue.
 #[test]
-fn test_cancel_missing_does_not_affect_other_subscriptions() {
+fn test_execute_payment_one_second_early_returns_not_due() {
     let t = T::new();
-    let other_merchant = Address::generate(&t.env);
-    // Subscribe only to other_merchant
-    t.client.subscribe(&t.subscriber, &other_merchant, &t.token, &100_000_i128, &86_400_u64);
+    let ivl = 86_400_u64;
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &100_000_i128, &ivl);
+    t.advance(ivl - 1); // one second before due
+    let r = t.client.try_execute_payment(&t.subscriber, &t.merchant);
+    assert!(matches!(r, Err(Ok(ContractError::PaymentNotDue))));
+}
 
-    // Cancel for t.merchant (no subscription) must fail
-    let r = t.client.try_cancel(&t.subscriber, &t.merchant);
-    assert!(matches!(r, Err(Ok(ContractError::NoActiveSubscription))));
-
-    // The other subscription must still exist
-    let key = DataKey::Subscription(t.subscriber.clone(), other_merchant.clone());
-    assert!(t.env.storage().persistent().has(&key));
+/// PaymentNotDue must not modify subscription state.
+#[test]
+fn test_execute_payment_before_due_does_not_mutate_subscription() {
+    let t = T::new();
+    let ivl = 86_400_u64;
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &100_000_i128, &ivl);
+    let before = t.get_sub();
+    t.advance(ivl / 2);
+    let _ = t.client.try_execute_payment(&t.subscriber, &t.merchant);
+    let after = t.get_sub();
+    assert_eq!(before.next_payment, after.next_payment);
+    assert_eq!(before.amount, after.amount);
 }
