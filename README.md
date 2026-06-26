@@ -651,6 +651,11 @@ Failed calls that return a `ContractError` (e.g., `PaymentNotDue`, `NoActiveSubs
 | 4 | `NoActiveSubscription` | No subscription found for `(subscriber, merchant)` pair |
 | 5 | `PaymentNotDue` | `now < next_payment` in `execute_payment` |
 | 6 | `Unauthorized` | Authorization check failed |
+| 7 | `TransferFailed` | Insufficient subscriber balance at payment time |
+| 8 | `InvalidTimestamp` | Ledger timestamp is zero or would overflow |
+| 9 | `AmountTooLarge` | `amount > 10¹⁸` in `subscribe` |
+| 10 | `SelfSubscription` | `subscriber == merchant` in `subscribe` |
+| 11 | `InvalidTokenAddress` | `token` is the contract's own address in `subscribe` |
 
 ---
 
