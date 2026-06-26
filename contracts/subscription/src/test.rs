@@ -1712,3 +1712,22 @@ proptest! {
         prop_assert!(!t.has_sub());
     }
 }
+
+// ─── Amount minimum boundary tests (#98) ──────────────────────────────────────
+
+/// Amount of exactly 1 (minimum positive value) must be accepted.
+#[test]
+fn test_amount_minimum_one_accepted() {
+    let t = T::new();
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &1_i128, &86_400_u64);
+    assert_eq!(t.get_sub().amount, 1_i128);
+}
+
+/// Amount of zero must be rejected with AmountMustBePositive.
+#[test]
+fn test_amount_zero_rejected() {
+    let t = T::new();
+    let r = t.client.try_subscribe(&t.subscriber, &t.merchant, &t.token, &0_i128, &86_400_u64);
+    assert!(matches!(r, Err(Ok(ContractError::AmountMustBePositive))));
+    assert!(!t.has_sub());
+}
