@@ -375,6 +375,8 @@ impl SubscriptionProtocol {
     /// - `interval`:   Seconds between payments. Must be in [86400, 31536000].
     ///
     /// # Errors
+    /// - `ContractError::SelfSubscription`     — if `subscriber == merchant`.
+    /// - `ContractError::InvalidTokenAddress`  — if `token` is the contract's own address.
     /// - `ContractError::AmountMustBePositive` — if `amount <= 0`.
     /// - `ContractError::AmountTooLarge`       — if `amount > 10^18`.
     /// - `ContractError::IntervalTooShort`     — if `interval < 86400`.
@@ -391,7 +393,12 @@ impl SubscriptionProtocol {
         // 1. Authorization — must be first, before any state reads.
         subscriber.require_auth();
 
-        // 2. Validate amount.
+        // 2. Reject self-subscriptions.
+        if subscriber == merchant {
+            return Err(ContractError::SelfSubscription);
+        }
+
+        // 3. Validate amount.
         if amount <= 0 {
             return Err(ContractError::AmountMustBePositive);
         }
@@ -399,7 +406,7 @@ impl SubscriptionProtocol {
             return Err(ContractError::AmountTooLarge);
         }
 
-        // 3. Validate interval.
+        // 4. Validate interval.
         if interval < 86_400 {
             return Err(ContractError::IntervalTooShort);
         }
@@ -407,7 +414,7 @@ impl SubscriptionProtocol {
             return Err(ContractError::IntervalTooLong);
         }
 
-        // 4. Build subscription record.
+        // 5. Build subscription record.
         //    Guard against an uninitialised ledger clock (zero timestamp) and
         //    against arithmetic overflow when projecting the first due date.
         let ts           = ledger_timestamp(&env)?;
@@ -765,7 +772,13 @@ impl SubscriptionProtocol {
         merchant: Address,
     ) -> Option<SubscriptionData> {
         let key = DataKey::Subscription(subscriber, merchant);
-        env.storage().persistent().get(&key)
+        let data = env.storage().persistent().get(&key)?;
+        // Bump TTL on read so active subscriptions don't expire silently
+        // between payment cycles while being monitored off-chain.
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, MIN_TTL_LEDGERS, MAX_TTL_LEDGERS);
+        Some(data)
     }
 }
 
