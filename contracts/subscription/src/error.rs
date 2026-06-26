@@ -24,4 +24,6 @@ pub enum ContractError {
     InvalidTimestamp     = 8,
     /// `subscribe` called with amount exceeding the safe maximum threshold
     AmountTooLarge       = 9,
+    /// `subscribe` called with a zero/invalid token address
+    InvalidTokenAddress  = 11,
 }

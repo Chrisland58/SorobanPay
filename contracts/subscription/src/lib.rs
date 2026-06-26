@@ -391,7 +391,12 @@ impl SubscriptionProtocol {
         // 1. Authorization — must be first, before any state reads.
         subscriber.require_auth();
 
-        // 2. Validate amount.
+        // 2. Reject contract's own address as token (invalid/zero-equivalent).
+        if token == env.current_contract_address() {
+            return Err(ContractError::InvalidTokenAddress);
+        }
+
+        // 3. Validate amount.
         if amount <= 0 {
             return Err(ContractError::AmountMustBePositive);
         }
