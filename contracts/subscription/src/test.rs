@@ -1732,31 +1732,43 @@ fn test_amount_zero_rejected() {
     assert!(!t.has_sub());
 }
 
-// ─── Issue #90 — subscribe invalid amount ────────────────────────────────────
+// ─── Issue #91 — execute_payment before due date ─────────────────────────────
 
-/// Amount of zero must be rejected with AmountMustBePositive and no subscription stored.
+/// Calling execute_payment immediately after subscribe (before interval elapses)
+/// must return PaymentNotDue and leave balances unchanged.
 #[test]
-fn test_subscribe_amount_zero_rejected() {
+fn test_execute_payment_immediately_after_subscribe_returns_not_due() {
     let t = T::new();
-    let r = t.client.try_subscribe(&t.subscriber, &t.merchant, &t.token, &0_i128, &86_400_u64);
-    assert!(matches!(r, Err(Ok(ContractError::AmountMustBePositive))));
-    assert!(!t.has_sub());
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &100_000_i128, &86_400_u64);
+    let sb = t.sub_bal();
+    let mb = t.mer_bal();
+    let r = t.client.try_execute_payment(&t.subscriber, &t.merchant);
+    assert!(matches!(r, Err(Ok(ContractError::PaymentNotDue))));
+    assert_eq!(t.sub_bal(), sb);
+    assert_eq!(t.mer_bal(), mb);
 }
 
-/// Negative amount must be rejected with AmountMustBePositive.
+/// Calling execute_payment one second before the due date must return PaymentNotDue.
 #[test]
-fn test_subscribe_negative_amount_rejected() {
+fn test_execute_payment_one_second_early_returns_not_due() {
     let t = T::new();
-    let r = t.client.try_subscribe(&t.subscriber, &t.merchant, &t.token, &-1_i128, &86_400_u64);
-    assert!(matches!(r, Err(Ok(ContractError::AmountMustBePositive))));
-    assert!(!t.has_sub());
+    let ivl = 86_400_u64;
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &100_000_i128, &ivl);
+    t.advance(ivl - 1); // one second before due
+    let r = t.client.try_execute_payment(&t.subscriber, &t.merchant);
+    assert!(matches!(r, Err(Ok(ContractError::PaymentNotDue))));
 }
 
-/// i128::MIN amount must be rejected with AmountMustBePositive.
+/// PaymentNotDue must not modify subscription state.
 #[test]
-fn test_subscribe_i128_min_amount_rejected() {
+fn test_execute_payment_before_due_does_not_mutate_subscription() {
     let t = T::new();
-    let r = t.client.try_subscribe(&t.subscriber, &t.merchant, &t.token, &i128::MIN, &86_400_u64);
-    assert!(matches!(r, Err(Ok(ContractError::AmountMustBePositive))));
-    assert!(!t.has_sub());
+    let ivl = 86_400_u64;
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &100_000_i128, &ivl);
+    let before = t.get_sub();
+    t.advance(ivl / 2);
+    let _ = t.client.try_execute_payment(&t.subscriber, &t.merchant);
+    let after = t.get_sub();
+    assert_eq!(before.next_payment, after.next_payment);
+    assert_eq!(before.amount, after.amount);
 }
