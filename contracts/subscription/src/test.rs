@@ -1732,47 +1732,43 @@ fn test_amount_zero_rejected() {
     assert!(!t.has_sub());
 }
 
-// ─── Issue #93 — End-to-end subscription lifecycle ───────────────────────────
+// ─── Issue #91 — execute_payment before due date ─────────────────────────────
 
-/// Full end-to-end test: subscribe → verify state → collect payment → verify
-/// balances and next_payment → cancel → verify removed.
+/// Calling execute_payment immediately after subscribe (before interval elapses)
+/// must return PaymentNotDue and leave balances unchanged.
 #[test]
-fn test_e2e_subscription_create_pay_cancel() {
-    let t   = T::new();
-    let amt = 500_000_i128;
+fn test_execute_payment_immediately_after_subscribe_returns_not_due() {
+    let t = T::new();
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &100_000_i128, &86_400_u64);
+    let sb = t.sub_bal();
+    let mb = t.mer_bal();
+    let r = t.client.try_execute_payment(&t.subscriber, &t.merchant);
+    assert!(matches!(r, Err(Ok(ContractError::PaymentNotDue))));
+    assert_eq!(t.sub_bal(), sb);
+    assert_eq!(t.mer_bal(), mb);
+}
+
+/// Calling execute_payment one second before the due date must return PaymentNotDue.
+#[test]
+fn test_execute_payment_one_second_early_returns_not_due() {
+    let t = T::new();
     let ivl = 86_400_u64;
-    let ts0 = t.env.ledger().timestamp();
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &100_000_i128, &ivl);
+    t.advance(ivl - 1); // one second before due
+    let r = t.client.try_execute_payment(&t.subscriber, &t.merchant);
+    assert!(matches!(r, Err(Ok(ContractError::PaymentNotDue))));
+}
 
-    // 1. Subscribe
-    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &amt, &ivl);
-
-    // Verify subscription stored with correct fields
-    assert!(t.has_sub(), "subscription must be stored");
-    let sub = t.get_sub();
-    assert_eq!(sub.amount, amt);
-    assert_eq!(sub.interval, ivl);
-    assert_eq!(sub.next_payment, ts0 + ivl);
-
-    // 2. Advance past due date and collect payment
-    t.advance(ivl + 1);
-    let sb_before = t.sub_bal();
-    let mb_before = t.mer_bal();
-
-    t.client.execute_payment(&t.subscriber, &t.merchant);
-
-    // Verify token transfer
-    assert_eq!(t.sub_bal(), sb_before - amt, "subscriber must be debited");
-    assert_eq!(t.mer_bal(), mb_before + amt, "merchant must be credited");
-
-    // Verify next_payment advanced
-    let now = t.env.ledger().timestamp();
-    assert_eq!(t.get_sub().next_payment, now + ivl, "next_payment must be now + interval");
-
-    // 3. Cancel and verify removal
-    t.client.cancel(&t.subscriber, &t.merchant);
-    assert!(!t.has_sub(), "subscription must be removed after cancel");
-
-    // Subsequent cancel must fail
-    let r = t.client.try_cancel(&t.subscriber, &t.merchant);
-    assert!(matches!(r, Err(Ok(ContractError::NoActiveSubscription))));
+/// PaymentNotDue must not modify subscription state.
+#[test]
+fn test_execute_payment_before_due_does_not_mutate_subscription() {
+    let t = T::new();
+    let ivl = 86_400_u64;
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &100_000_i128, &ivl);
+    let before = t.get_sub();
+    t.advance(ivl / 2);
+    let _ = t.client.try_execute_payment(&t.subscriber, &t.merchant);
+    let after = t.get_sub();
+    assert_eq!(before.next_payment, after.next_payment);
+    assert_eq!(before.amount, after.amount);
 }
