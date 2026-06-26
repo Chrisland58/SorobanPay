@@ -708,7 +708,7 @@ function ErrorCard({
 // ─── Component ────────────────────────────────────────────────────────────────
 
 export default function SubscriptionForm() {
-  const { publicKey } = useWallet();
+  const { publicKey, isCheckingFreighter, freighterInstalled } = useWallet();
 
   // Guard: must have a valid contract address before rendering the form
   if (!CONTRACT_ID) return <ContractConfigError />;
