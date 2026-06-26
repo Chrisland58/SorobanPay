@@ -389,6 +389,49 @@ Steps to resolve:
 
 ---
 
+## Empty states and missing configuration
+
+### Missing contract ID
+
+If `NEXT_PUBLIC_CONTRACT_ID` is not set or is blank, the app renders a **"Contract not configured"** warning card instead of the subscription form. This is the most common first-run issue.
+
+**Symptom:** Yellow warning card titled "Contract not configured" appears where the form should be.
+
+**Fix:**
+
+1. Deploy the contract and capture the address:
+   ```bash
+   CONTRACT_ID=$(bash deploy/deploy.sh)
+   echo "Contract: $CONTRACT_ID"
+   ```
+
+2. Paste the address into `frontend/.env.local`:
+   ```env
+   NEXT_PUBLIC_CONTRACT_ID=CXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+   ```
+
+3. Restart the dev server:
+   ```bash
+   npm run dev
+   ```
+
+The warning card also displays the current values of `RPC_URL`, `NETWORK_PASSPHRASE`, and `CONTRACT_ID` to help you verify your environment.
+
+### Wallet not connected (disconnected empty state)
+
+When no wallet is connected the app shows a prompt card with:
+- A link to install Freighter if the extension is not detected.
+- A link to the [Quick Start guide](#quick-start-testnet-demo--5-minutes).
+- A reminder to set `NEXT_PUBLIC_CONTRACT_ID` in `.env.local`.
+
+Connect Freighter and approve the site to dismiss this state.
+
+### Payment history (coming soon)
+
+Once the wallet is connected, a **Payment History** placeholder card is shown below the subscription form. This area will display executed payments and subscription activity once on-chain event indexing (polling `getEvents()`) is implemented. Until then it serves as a roadmap indicator.
+
+---
+
 ## Wallet connection UX states
 
 The `SubscriptionForm` component reflects the wallet and transaction lifecycle through distinct visual states. Contributors should maintain these states when modifying the form.

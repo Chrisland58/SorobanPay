@@ -393,16 +393,9 @@ impl SubscriptionProtocol {
         // 1. Authorization — must be first, before any state reads.
         subscriber.require_auth();
 
-        // 2a. Reject self-subscriptions.
+        // 2. Reject self-subscriptions.
         if subscriber == merchant {
             return Err(ContractError::SelfSubscription);
-        }
-
-        // 2b. Reject zero/contract-self token address.
-        //     On Soroban, Address has no explicit "zero" sentinel, but the current
-        //     contract address is always an invalid payment token for this protocol.
-        if token == env.current_contract_address() {
-            return Err(ContractError::InvalidTokenAddress);
         }
 
         // 3. Validate amount.
@@ -780,7 +773,7 @@ impl SubscriptionProtocol {
     ) -> Option<SubscriptionData> {
         let key = DataKey::Subscription(subscriber, merchant);
         let data = env.storage().persistent().get(&key)?;
-        // Extend TTL on read so active subscriptions don't expire silently
+        // Bump TTL on read so active subscriptions don't expire silently
         // between payment cycles while being monitored off-chain.
         env.storage()
             .persistent()

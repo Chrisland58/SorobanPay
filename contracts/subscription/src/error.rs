@@ -26,6 +26,4 @@ pub enum ContractError {
     AmountTooLarge       = 9,
     /// `subscribe` called with subscriber == merchant (self-subscription)
     SelfSubscription     = 10,
-    /// `subscribe` called with a zero/invalid token address
-    InvalidTokenAddress  = 11,
 }
