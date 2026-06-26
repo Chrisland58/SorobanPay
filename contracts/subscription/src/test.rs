@@ -1731,3 +1731,41 @@ fn test_amount_zero_rejected() {
     assert!(matches!(r, Err(Ok(ContractError::AmountMustBePositive))));
     assert!(!t.has_sub());
 }
+
+// ─── Issue #92 — Cancel missing subscription ─────────────────────────────────
+
+/// Cancelling a subscription that was never created must return NoActiveSubscription.
+#[test]
+fn test_cancel_nonexistent_subscription_returns_error() {
+    let t = T::new();
+    let r = t.client.try_cancel(&t.subscriber, &t.merchant);
+    assert!(matches!(r, Err(Ok(ContractError::NoActiveSubscription))));
+}
+
+/// Cancelling a subscription that was already cancelled must return NoActiveSubscription.
+#[test]
+fn test_cancel_already_cancelled_returns_error() {
+    let t = T::new();
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &100_000_i128, &86_400_u64);
+    t.client.cancel(&t.subscriber, &t.merchant);
+    assert!(!t.has_sub());
+    let r = t.client.try_cancel(&t.subscriber, &t.merchant);
+    assert!(matches!(r, Err(Ok(ContractError::NoActiveSubscription))));
+}
+
+/// A cancel on a missing subscription must not affect unrelated subscriptions.
+#[test]
+fn test_cancel_missing_does_not_affect_other_subscriptions() {
+    let t = T::new();
+    let other_merchant = Address::generate(&t.env);
+    // Subscribe only to other_merchant
+    t.client.subscribe(&t.subscriber, &other_merchant, &t.token, &100_000_i128, &86_400_u64);
+
+    // Cancel for t.merchant (no subscription) must fail
+    let r = t.client.try_cancel(&t.subscriber, &t.merchant);
+    assert!(matches!(r, Err(Ok(ContractError::NoActiveSubscription))));
+
+    // The other subscription must still exist
+    let key = DataKey::Subscription(t.subscriber.clone(), other_merchant.clone());
+    assert!(t.env.storage().persistent().has(&key));
+}
