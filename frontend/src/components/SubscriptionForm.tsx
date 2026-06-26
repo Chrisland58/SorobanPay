@@ -508,8 +508,8 @@ function classifyError(err: unknown): TxErrorInfo {
   ) {
     return {
       title: "Signing cancelled",
-      summary: "You declined the transaction in Freighter.",
-      fix: 'Click "Authorize Subscription" again and approve the request in the Freighter pop-up.',
+      summary: "The Freighter pop-up was dismissed or the request was rejected.",
+      fix: 'To retry: click "Authorize Subscription" again and approve in the Freighter pop-up. To use a different account, switch accounts in Freighter first, then resubmit.',
       raw,
     };
   }
