@@ -11,6 +11,78 @@ import { useState } from 'react';
 import SubscriptionForm from '@/components/SubscriptionForm';
 import { useWallet } from '@/hooks/useWallet';
 
+function OnboardingCard({ freighterInstalled }: { freighterInstalled: boolean }) {
+  return (
+    <div className="w-full max-w-lg rounded-2xl border border-gray-800 bg-gradient-to-br from-slate-950/80 via-slate-900/90 to-slate-950/95 p-6 shadow-xl mb-6">
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <p className="text-xs uppercase tracking-[0.28em] text-blue-300 font-semibold">
+            First-time onboarding
+          </p>
+          <h2 className="mt-3 text-2xl font-bold text-white">Launch your first recurring payment</h2>
+        </div>
+        <span className="rounded-full bg-blue-500/10 px-3 py-1 text-xs font-semibold uppercase tracking-[0.18em] text-blue-200 border border-blue-500/20">
+          3 steps
+        </span>
+      </div>
+
+      <ol className="mt-6 space-y-4 text-sm text-gray-300">
+        <li className="rounded-2xl border border-gray-800 bg-gray-900/70 p-4">
+          <div className="flex items-center justify-between gap-3 mb-2">
+            <span className="inline-flex h-7 min-w-[1.75rem] items-center justify-center rounded-full bg-blue-600 text-xs font-semibold text-white">
+              1
+            </span>
+            <span className="text-xs text-blue-200 uppercase tracking-[0.18em] font-semibold">
+              Wallet setup
+            </span>
+          </div>
+          <p className="text-gray-300">
+            Install Freighter and switch it to Testnet. Then connect your wallet with the button below.
+          </p>
+          {!freighterInstalled && (
+            <a
+              href="https://www.freighter.app"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="mt-3 inline-flex rounded-lg bg-blue-600 px-3 py-2 text-xs font-semibold text-white hover:bg-blue-500"
+            >
+              Install Freighter
+            </a>
+          )}
+        </li>
+
+        <li className="rounded-2xl border border-gray-800 bg-gray-900/70 p-4">
+          <div className="flex items-center justify-between gap-3 mb-2">
+            <span className="inline-flex h-7 min-w-[1.75rem] items-center justify-center rounded-full bg-slate-700 text-xs font-semibold text-slate-100">
+              2
+            </span>
+            <span className="text-xs text-blue-200 uppercase tracking-[0.18em] font-semibold">
+              Environment config
+            </span>
+          </div>
+          <p className="text-gray-300">
+            Add <code className="rounded bg-slate-800 px-2 py-0.5 text-xs text-slate-200">NEXT_PUBLIC_CONTRACT_ID</code> to <code className="rounded bg-slate-800 px-2 py-0.5 text-xs text-slate-200">frontend/.env.local</code> and restart the app.
+          </p>
+        </li>
+
+        <li className="rounded-2xl border border-gray-800 bg-gray-900/70 p-4">
+          <div className="flex items-center justify-between gap-3 mb-2">
+            <span className="inline-flex h-7 min-w-[1.75rem] items-center justify-center rounded-full bg-slate-700 text-xs font-semibold text-slate-100">
+              3
+            </span>
+            <span className="text-xs text-blue-200 uppercase tracking-[0.18em] font-semibold">
+              Create a subscription
+            </span>
+          </div>
+          <p className="text-gray-300">
+            Fill in the merchant, token, amount, and interval fields. Then authorize the subscription with Freighter.
+          </p>
+        </li>
+      </ol>
+    </div>
+  );
+}
+
 export default function Home() {
   const {
     publicKey,
@@ -65,6 +137,8 @@ export default function Home() {
             </button>
           </div>
         )}
+
+        <OnboardingCard freighterInstalled={freighterInstalled} />
 
         {!publicKey ? (
           <div className="bg-gray-900 rounded-2xl p-6 shadow-lg">
