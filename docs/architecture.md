@@ -759,6 +759,25 @@ async function persistEventWithDLQ(event: DecodedEvent) {
 }
 ```
 
+## Recommended Implementation Checklist
+
+Use this checklist to ensure the SorobanPay backend indexer is production-ready.
+
+1. Persist the indexer state with a durable cursor and ledger checkpoint.
+2. Decode `subscribe` and `executed` contract events reliably.
+3. Use idempotent database writes and unique constraints to avoid duplicate records.
+4. Record both subscription state and payment history in separate store projections.
+5. Implement cancellation inference in a periodic reconciliation job.
+6. Add health metrics for indexer lag, event throughput, and error rates.
+7. Provide a failover path for RPC endpoint outages and transient database failures.
+
+## References
+
+- [Soroban RPC Event Streaming](https://developers.stellar.org/docs/learn/soroban-rpc/events)
+- [Stellar JavaScript SDK](https://developers.stellar.org/docs/learn/stellar-sdk)
+- [Event Sourcing Pattern](https://martinfowler.com/eaaDev/EventSourcing.html)
+- [CQRS Pattern](https://martinfowler.com/bliki/CQRS.html)
+
 ---
 
 ### Scenario 3: Ledger Rollback (Rare)
