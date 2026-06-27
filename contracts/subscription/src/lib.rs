@@ -67,7 +67,10 @@ impl SubscriptionProtocol {
         let key = DataKey::Subscription(subscriber.clone(), merchant.clone());
         env.storage().persistent().set(&key, &data);
 
-        // 6. Extend TTL to keep entry alive for up to MAX_TTL_LEDGERS.
+        // 6. Extend TTL so the entry survives at least MIN_TTL_LEDGERS (~30 days) from now,
+        //    up to a ceiling of MAX_TTL_LEDGERS (~365 days). The host only charges the fee
+        //    if the remaining TTL is already below the threshold — so this is a no-op for
+        //    entries that were recently extended.
         env.storage()
             .persistent()
             .extend_ttl(&key, MIN_TTL_LEDGERS, MAX_TTL_LEDGERS);
@@ -146,7 +149,10 @@ impl SubscriptionProtocol {
         // 6. Persist updated subscription.
         env.storage().persistent().set(&key, &data);
 
-        // 7. Extend TTL.
+        // 7. Extend TTL after a successful payment so the subscription survives the next
+        //    billing cycle. Without this bump, a long-lived subscription (e.g., annual)
+        //    could expire between payments and the next execute_payment call would return
+        //    ContractError::NoActiveSubscription even though the subscriber never cancelled.
         env.storage()
             .persistent()
             .extend_ttl(&key, MIN_TTL_LEDGERS, MAX_TTL_LEDGERS);
