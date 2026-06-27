@@ -724,6 +724,16 @@ export default function SubscriptionForm() {
   const [successData, setSuccessData]   = useState<SuccessData | null>(null);
   const [showConfirm, setShowConfirm]   = useState(false);
   const intervalNum = Number(interval);
+
+  const labelCls = 'block text-sm font-semibold text-gray-100 mb-2.5';
+  const hintCls = 'text-xs text-gray-300 leading-relaxed';
+  const requiredMark = (
+    <span aria-hidden="true" className="text-red-400 ml-1">
+      *
+    </span>
+  );
+  const fieldClass = (hasError: boolean) =>
+    `${inputCls} ${hasError ? 'border-red-500 ring-1 ring-red-400/30 focus-visible:ring-red-400' : ''}`;
   const liveIntervalError =
     interval.trim() && Number.isInteger(intervalNum) &&
     (intervalNum < MIN_INTERVAL_SECONDS || intervalNum > MAX_INTERVAL_SECONDS)
@@ -824,8 +834,11 @@ export default function SubscriptionForm() {
           {publicKey ? "Connected" : "Disconnected"}
         </span>
       </div>
-      <p className="text-gray-400 text-sm mb-5 leading-relaxed">
+      <p className="text-gray-400 text-sm mb-3 leading-relaxed">
         Authorize a recurring on-chain payment using your Freighter wallet.
+      </p>
+      <p className="text-xs text-gray-500 mb-5">
+        Required fields are marked with <span className="text-red-400">*</span>.
       </p>
 
       {/* Freighter not installed warning (Issue #110) */}
@@ -896,12 +909,9 @@ export default function SubscriptionForm() {
           <div>
             <label
               htmlFor="merchantAddress"
-              className="block text-sm font-semibold text-gray-300 mb-2.5"
+              className={labelCls}
             >
-              Merchant address{" "}
-              <span aria-hidden="true" className="text-red-400">
-                *
-              </span>
+              Merchant address{requiredMark}
               <span className="sr-only"> (required)</span>
             </label>
             <input
@@ -918,8 +928,11 @@ export default function SubscriptionForm() {
                 fieldErrors.merchantAddress ? "err-merchant" : undefined
               }
               aria-invalid={!!fieldErrors.merchantAddress}
-              className={inputCls}
+              className={fieldClass(!!fieldErrors.merchantAddress)}
             />
+            <p className={hintCls}>
+              Required. The merchant's Soroban account public key.
+            </p>
             {fieldErrors.merchantAddress && (
               <p
                 id="err-merchant"
@@ -935,12 +948,9 @@ export default function SubscriptionForm() {
           <div>
             <label
               htmlFor="tokenAddress"
-              className="block text-sm font-semibold text-gray-300 mb-2.5"
+              className={labelCls}
             >
-              Token contract address{" "}
-              <span aria-hidden="true" className="text-red-400">
-                *
-              </span>
+              Token contract address{requiredMark}
               <span className="sr-only"> (required)</span>
             </label>
             <input
@@ -957,8 +967,11 @@ export default function SubscriptionForm() {
                 fieldErrors.tokenAddress ? "err-token" : undefined
               }
               aria-invalid={!!fieldErrors.tokenAddress}
-              className={inputCls}
+              className={fieldClass(!!fieldErrors.tokenAddress)}
             />
+            <p className={hintCls}>
+              Required. The SEP-41 token contract used for recurring payments.
+            </p>
             {fieldErrors.tokenAddress && (
               <p
                 id="err-token"
@@ -974,13 +987,9 @@ export default function SubscriptionForm() {
           <div>
             <label
               htmlFor="amount"
-              className="block text-sm font-semibold text-gray-300 mb-2.5"
+              className={labelCls}
             >
-              Amount{" "}
-              <span className="text-gray-500 font-normal">(token units)</span>{" "}
-              <span aria-hidden="true" className="text-red-400">
-                *
-              </span>
+              Amount <span className="text-gray-400 font-normal">(token units)</span>{requiredMark}
               <span className="sr-only"> (required)</span>
             </label>
             <input
@@ -997,17 +1006,10 @@ export default function SubscriptionForm() {
               disabled={isSubmitting}
               aria-describedby={`help-amount${fieldErrors.amount ? " err-amount" : ""}`}
               aria-invalid={!!fieldErrors.amount}
-              className={inputCls}
+              className={fieldClass(!!fieldErrors.amount)}
             />
-            <p
-              id="help-amount"
-              className="mt-2 text-xs text-gray-500 leading-relaxed"
-            >
-              Whole token units per payment cycle. Each unit equals the token's
-              smallest indivisible unit (stroops for XLM, 1×10⁻⁷). Examples:{" "}
-              <span className="text-gray-400 font-mono">10</span> ≈ 10 USDC,{" "}
-              <span className="text-gray-400 font-mono">500</span> ≈ 500 USDC.
-              Must be a positive integer.
+            <p id="help-amount" className={hintCls}>
+              Required. Enter the recurring payment amount in token units.
             </p>
             {fieldErrors.amount && (
               <p
@@ -1024,13 +1026,9 @@ export default function SubscriptionForm() {
           <div>
             <label
               htmlFor="interval"
-              className="block text-sm font-semibold text-gray-300 mb-2.5"
+              className={labelCls}
             >
-              Interval{" "}
-              <span className="text-gray-500 font-normal">(seconds)</span>{" "}
-              <span aria-hidden="true" className="text-red-400">
-                *
-              </span>
+              Interval <span className="text-gray-400 font-normal">(seconds)</span>{requiredMark}
               <span className="sr-only"> (required)</span>
             </label>
             <input
@@ -1047,19 +1045,10 @@ export default function SubscriptionForm() {
               disabled={isSubmitting}
               aria-describedby={`help-interval${intervalError ? ' err-interval' : ''}`}
               aria-invalid={!!intervalError}
-              className={inputCls}
+              className={fieldClass(!!intervalError)}
             />
-            <p
-              id="help-interval"
-              className="mt-2 text-xs text-gray-500 leading-relaxed"
-            >
-              Time between each payment, in seconds. Common values:{" "}
-              <span className="text-gray-400 font-mono">86 400</span> = 1 day,{" "}
-              <span className="text-gray-400 font-mono">604 800</span> = 1 week,{" "}
-              <span className="text-gray-400 font-mono">2 592 000</span> = 30
-              days (default),{" "}
-              <span className="text-gray-400 font-mono">31 536 000</span> = 1
-              year (maximum).
+            <p id="help-interval" className={hintCls}>
+              Required. The recurrence cadence for the subscription. Default is 30 days.
             </p>
             {intervalError && (
               <p id="err-interval" role="alert" className="mt-2 text-xs text-red-400 font-medium">
