@@ -382,14 +382,46 @@ See [docs/events.md](docs/events.md) for the full event reference, RPC query exa
 
 ## Error codes
 
-| Code | Name | Trigger |
-|------|------|---------|
-| 1 | `AmountMustBePositive` | `amount ≤ 0` in `subscribe` |
-| 2 | `IntervalTooShort` | `interval < 86400` in `subscribe` |
-| 3 | `IntervalTooLong` | `interval > 31536000` in `subscribe` |
-| 4 | `NoActiveSubscription` | No subscription found for `(subscriber, merchant)` pair |
-| 5 | `PaymentNotDue` | `now < next_payment` in `execute_payment` |
-| 6 | `Unauthorized` | Authorization check failed |
+All entry points return a `ContractError` on failure. The numeric value is surfaced in the Stellar RPC error response under `result.error.code` and can be compared directly in client code.
+
+| Code | Name | Entry point(s) | Trigger | Recommended user-facing message |
+|------|------|----------------|---------|----------------------------------|
+| `1` | `AmountMustBePositive` | `subscribe` | `amount` is `0` or negative | "Payment amount must be greater than zero." |
+| `2` | `IntervalTooShort` | `subscribe` | `interval < 86400` (less than 1 day) | "Billing interval must be at least 1 day (86400 seconds)." |
+| `3` | `IntervalTooLong` | `subscribe` | `interval > 31536000` (more than 365 days) | "Billing interval cannot exceed 365 days (31536000 seconds)." |
+| `4` | `NoActiveSubscription` | `execute_payment`, `cancel` | No subscription record exists for the `(subscriber, merchant)` pair | "No active subscription found for this subscriber–merchant pair." |
+| `5` | `PaymentNotDue` | `execute_payment` | `ledger_timestamp < next_payment` — interval has not elapsed yet | "Payment is not due yet. Retry after the next billing date." |
+| `6` | `Unauthorized` | `subscribe`, `execute_payment`, `cancel` | `require_auth()` failed — transaction missing the required signer | "Transaction was not signed by the required account." |
+| `7` | `TransferFailed` | `execute_payment` | Subscriber's token balance is below the subscription `amount` at collection time | "Payment failed: subscriber has insufficient token balance." |
+
+### Notes for integrators
+
+- **Codes are stable.** Numeric values are fixed by `#[repr(u32)]` and will not change across contract upgrades.
+- **Code 6 (`Unauthorized`) rarely surfaces as a typed error.** `require_auth()` panics rather than returning, so the RPC response will show a generic auth failure. Treat any auth-class RPC error as equivalent.
+- **Code 7 (`TransferFailed`) is retriable.** The subscription record is preserved when a transfer fails due to insufficient balance. The merchant can retry `execute_payment` once the subscriber's balance is restored, as long as the payment remains due.
+- **Code 5 (`PaymentNotDue`) is not an error condition** in the traditional sense — it means the merchant attempted collection too early. No action is needed; retry after the `next_payment` timestamp.
+- **Allowance revocation** (subscriber calls `token.approve(contract_id, 0)`) causes the token contract to panic inside `execute_payment`, rolling back the entire transaction. This does **not** produce a `TransferFailed` code — the transaction will fail at the RPC level with a Soroban host error.
+
+### Detecting errors in TypeScript
+
+```typescript
+import { SorobanRpc } from "@stellar/stellar-sdk";
+
+const CONTRACT_ERRORS: Record<number, string> = {
+  1: "AmountMustBePositive",
+  2: "IntervalTooShort",
+  3: "IntervalTooLong",
+  4: "NoActiveSubscription",
+  5: "PaymentNotDue",
+  6: "Unauthorized",
+  7: "TransferFailed",
+};
+
+function parseContractError(result: SorobanRpc.Api.SendTransactionResponse): string | null {
+  const code = (result as any)?.error?.code as number | undefined;
+  return code !== undefined ? (CONTRACT_ERRORS[code] ?? `UnknownError(${code})`) : null;
+}
+```
 
 ---
 
