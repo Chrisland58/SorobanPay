@@ -4,11 +4,13 @@
  * page.tsx — Home page
  *
  * Renders the wallet connect/disconnect button and the subscription form.
+ * Includes an onboarding guide for first-time users.
  * Requirements: 9.1, 9.5, 9.6, 10.1
  */
 
 import { useState } from 'react';
 import SubscriptionForm from '@/components/SubscriptionForm';
+import OnboardingGuide from '@/components/OnboardingGuide';
 import { useWallet } from '@/hooks/useWallet';
 
 function OnboardingCard({ freighterInstalled }: { freighterInstalled: boolean }) {
@@ -109,6 +111,9 @@ export default function Home() {
 
   return (
     <main className="min-h-screen flex flex-col items-center px-4 py-12">
+      {/* Onboarding guide */}
+      <OnboardingGuide isConnected={!!publicKey} />
+
       {/* Header */}
       <div className="w-full max-w-lg mb-8 text-center">
         <h1 className="text-4xl font-extrabold tracking-tight mb-2">SorobanPay</h1>
