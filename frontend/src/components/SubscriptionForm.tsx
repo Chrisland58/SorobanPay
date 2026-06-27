@@ -892,17 +892,27 @@ export default function SubscriptionForm() {
           aria-labelledby="form-heading"
           className="space-y-5 sm:space-y-6"
         >
+          {/* Form legend */}
+          <div className="text-xs text-gray-400 font-medium mb-3">
+            <span className="inline-block px-2 py-0.5 bg-blue-900/30 border border-blue-600/40 rounded text-blue-300">
+              Fields marked with <span className="text-red-400 font-bold">*</span> are required
+            </span>
+          </div>
+
           {/* Merchant address */}
           <div>
             <label
               htmlFor="merchantAddress"
-              className="block text-sm font-semibold text-gray-300 mb-2.5"
+              className="block text-sm font-semibold text-white mb-2.5 flex items-center gap-2"
             >
-              Merchant address{" "}
-              <span aria-hidden="true" className="text-red-400">
+              <span>Merchant address</span>
+              <span
+                aria-hidden="true"
+                className="inline-flex items-center justify-center w-4 h-4 text-xs font-bold text-red-400 bg-red-900/40 rounded border border-red-600/50"
+              >
                 *
               </span>
-              <span className="sr-only"> (required)</span>
+              <span className="sr-only">(required)</span>
             </label>
             <input
               id="merchantAddress"
@@ -925,13 +935,16 @@ export default function SubscriptionForm() {
                 id="err-merchant"
                 role="alert"
                 className="mt-2 text-xs text-red-400 font-medium"
+              >white mb-2.5 flex items-center gap-2"
+            >
+              <span>Token contract address</span>
+              <span
+                aria-hidden="true"
+                className="inline-flex items-center justify-center w-4 h-4 text-xs font-bold text-red-400 bg-red-900/40 rounded border border-red-600/50"
               >
-                {fieldErrors.merchantAddress}
-              </p>
-            )}
-          </div>
-
-          {/* Token address */}
+                *
+              </span>
+              <span className="sr-only">
           <div>
             <label
               htmlFor="tokenAddress"
@@ -971,14 +984,18 @@ export default function SubscriptionForm() {
           </div>
 
           {/* Amount */}
-          <div>
-            <label
-              htmlFor="amount"
-              className="block text-sm font-semibold text-gray-300 mb-2.5"
+          <div>white mb-2.5 flex items-center gap-2"
             >
-              Amount{" "}
-              <span className="text-gray-500 font-normal">(token units)</span>{" "}
-              <span aria-hidden="true" className="text-red-400">
+              <span>
+                Amount <span className="text-gray-400 font-normal">(token units)</span>
+              </span>
+              <span
+                aria-hidden="true"
+                className="inline-flex items-center justify-center w-4 h-4 text-xs font-bold text-red-400 bg-red-900/40 rounded border border-red-600/50"
+              >
+                *
+              </span>
+              <span className="sr-only">assName="text-red-400">
                 *
               </span>
               <span className="sr-only"> (required)</span>
@@ -1020,14 +1037,18 @@ export default function SubscriptionForm() {
             )}
           </div>
 
-          {/* Interval */}
-          <div>
-            <label
-              htmlFor="interval"
-              className="block text-sm font-semibold text-gray-300 mb-2.5"
+          {/* Interval */}white mb-2.5 flex items-center gap-2"
             >
-              Interval{" "}
-              <span className="text-gray-500 font-normal">(seconds)</span>{" "}
+              <span>
+                Interval <span className="text-gray-400 font-normal">(seconds)</span>
+              </span>
+              <span
+                aria-hidden="true"
+                className="inline-flex items-center justify-center w-4 h-4 text-xs font-bold text-red-400 bg-red-900/40 rounded border border-red-600/50"
+              >
+                *
+              </span>
+              <span className="sr-only">500 font-normal">(seconds)</span>{" "}
               <span aria-hidden="true" className="text-red-400">
                 *
               </span>
