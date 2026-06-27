@@ -7,9 +7,9 @@ import { EventIndexer } from './services/eventIndexer';
 import { PayoutSummaryGenerator } from './services/payoutSummaryGenerator';
 import { PaymentScheduler } from './services/paymentScheduler';
 import summariesRouter from './routes/summaries';
-import subscriptionsRouter from './routes/subscriptions';
-import auditLogsRouter from './routes/auditLogs';
-import { apiLimiter } from './middleware/rateLimiter';
+import reconcileRouter from './routes/reconcile';
+import { reconcile } from './services/reconciler';
+import { PrismaSubscriptionDB, fetchChainEventsFromDB } from './services/reconciler';
 
 const app = express();
 const { port: PORT, rpcUrl, contractId } = config;
@@ -21,8 +21,7 @@ app.use(apiLimiter);
 
 // Routes
 app.use('/api/summaries', summariesRouter);
-app.use('/api/subscriptions', subscriptionsRouter);
-app.use('/api/audit-logs', auditLogsRouter);
+app.use('/api/reconcile', reconcileRouter);
 
 // Initialize services
 const rpcUrl = process.env.RPC_URL || 'https://soroban-testnet.stellar.org';
@@ -61,6 +60,22 @@ cron.schedule('0 1 * * *', async () => {
 cron.schedule('0 2 * * 0', async () => {
   console.log('Generating weekly summaries...');
   await summaryGenerator.generateWeeklySummaries();
+});
+
+// Run reconciliation every hour
+cron.schedule('0 * * * *', async () => {
+  console.log('Running reconciliation...');
+  try {
+    const [chainEvents, db] = await Promise.all([
+      fetchChainEventsFromDB(),
+      PrismaSubscriptionDB.load(),
+    ]);
+    const { repairs, errors } = reconcile(chainEvents, db);
+    console.log(`Reconciliation complete: ${repairs.length} repairs, ${errors.length} errors`);
+    if (errors.length > 0) console.warn('Reconciliation errors:', errors);
+  } catch (err) {
+    console.error('Reconciliation cron error:', err);
+  }
 });
 
 // Start server
