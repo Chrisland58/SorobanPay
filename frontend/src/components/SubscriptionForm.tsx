@@ -951,16 +951,13 @@ export default function SubscriptionForm() {
                 id="err-merchant"
                 role="alert"
                 className="mt-2 text-xs text-red-400 font-medium"
-              >white mb-2.5 flex items-center gap-2"
-            >
-              <span>Token contract address</span>
-              <span
-                aria-hidden="true"
-                className="inline-flex items-center justify-center w-4 h-4 text-xs font-bold text-red-400 bg-red-900/40 rounded border border-red-600/50"
               >
-                *
-              </span>
-              <span className="sr-only">
+                {fieldErrors.merchantAddress}
+              </p>
+            )}
+          </div>
+
+          {/* Token address */}
           <div>
             <label
               htmlFor="tokenAddress"
@@ -1000,20 +997,12 @@ export default function SubscriptionForm() {
           </div>
 
           {/* Amount */}
-          <div>white mb-2.5 flex items-center gap-2"
+          <div>
+            <label
+              htmlFor="amount"
+              className={labelCls}
             >
-              <span>
-                Amount <span className="text-gray-400 font-normal">(token units)</span>
-              </span>
-              <span
-                aria-hidden="true"
-                className="inline-flex items-center justify-center w-4 h-4 text-xs font-bold text-red-400 bg-red-900/40 rounded border border-red-600/50"
-              >
-                *
-              </span>
-              <span className="sr-only">assName="text-red-400">
-                *
-              </span>
+              Amount{requiredMark}
               <span className="sr-only"> (required)</span>
             </label>
             <input
@@ -1046,21 +1035,13 @@ export default function SubscriptionForm() {
             )}
           </div>
 
-          {/* Interval */}white mb-2.5 flex items-center gap-2"
+          {/* Interval */}
+          <div>
+            <label
+              htmlFor="interval"
+              className={labelCls}
             >
-              <span>
-                Interval <span className="text-gray-400 font-normal">(seconds)</span>
-              </span>
-              <span
-                aria-hidden="true"
-                className="inline-flex items-center justify-center w-4 h-4 text-xs font-bold text-red-400 bg-red-900/40 rounded border border-red-600/50"
-              >
-                *
-              </span>
-              <span className="sr-only">500 font-normal">(seconds)</span>{" "}
-              <span aria-hidden="true" className="text-red-400">
-                *
-              </span>
+              Interval{requiredMark}
               <span className="sr-only"> (required)</span>
             </label>
             <input
