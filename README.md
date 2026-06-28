@@ -109,7 +109,16 @@ npm run dev
 
 Open http://localhost:3000 in a browser with the [Freighter extension](https://www.freighter.app) installed and set to **Testnet**.
 
-### 5. Try a subscription
+### 5. First-time onboarding
+
+1. Install and enable the Freighter wallet extension.
+2. Switch Freighter to **Testnet** and load a funded account.
+3. Connect Freighter in the app by clicking **Connect Freighter Wallet**.
+4. Ensure `NEXT_PUBLIC_CONTRACT_ID` is set in `frontend/.env.local`.
+5. Fill in the merchant address, token contract, amount, and interval.
+6. Submit the form and approve the transaction in Freighter.
+
+### 6. Try a subscription
 
 1. In Freighter, switch to Testnet and fund your wallet via [Friendbot](https://laboratory.stellar.org/#account-creator?network=test).
 2. Open the app, enter a merchant address and amount, and click **Subscribe**.
@@ -335,15 +344,127 @@ npm run type-check
 
 ### Troubleshooting Freighter
 
+#### Connection errors
+
+**Symptom:** "Wallet not connected" badge appears and the Submit button is disabled.
+
+Steps to resolve:
+1. Click the Freighter extension icon in your browser toolbar.
+2. If the site is not listed under "Connected Sites", click **Connect** and approve the connection prompt.
+3. Reload the page — the badge should turn green.
+
+**Symptom:** Freighter popup does not appear when the page loads.
+
+Steps to resolve:
+1. Confirm the Freighter extension is installed (Chrome/Brave or Firefox — see [Install Freighter](#1-install-freighter)).
+2. Make sure the page is served over `http://localhost` or `https://`. Freighter blocks requests from `file://` origins.
+3. Disable other wallet extensions temporarily — they can conflict with the Freighter injected API.
+4. Try a hard reload (`Ctrl+Shift+R` / `Cmd+Shift+R`).
+
+#### Signing / permission failures
+
+**Symptom:** Transaction rejected — "User declined" or signing popup dismissed.
+
+Steps to resolve:
+1. Open Freighter and confirm the correct account is selected.
+2. Re-submit the form; Freighter will show the signing prompt again.
+3. If Freighter closes before you can sign, disable browser pop-up blockers for `localhost`.
+
+**Symptom:** Transaction rejected — wrong network.
+
+Steps to resolve:
+1. Open Freighter → click the network name at the top-right.
+2. Select the network that matches `NEXT_PUBLIC_NETWORK_PASSPHRASE` in your `.env.local`:
+   - Testnet passphrase: `Test SDF Network ; September 2015`
+   - Mainnet passphrase: `Public Global Stellar Network ; September 2015`
+3. Reload and retry.
+
+**Symptom:** "Insufficient balance" error.
+
+Steps to resolve:
+- **Testnet:** fund your wallet at [Stellar Friendbot](https://laboratory.stellar.org/#account-creator?network=test).
+- **Mainnet:** transfer at least 2 XLM to your account to cover the base reserve and transaction fee.
+
+#### Quick-reference table
+
 | Symptom | Fix |
 |---------|-----|
-| "Wallet not connected" | Click the Freighter icon and approve the site connection |
-| Transaction rejected — wrong network | Match the Freighter network with `NEXT_PUBLIC_NETWORK_PASSPHRASE` |
-| "Insufficient balance" | Fund the account (Friendbot on testnet; real XLM on mainnet) |
-| Freighter not detected | Ensure the extension is installed and the page is served over `http://localhost` or `https://` |
+| "Wallet not connected" badge | Open Freighter and approve the site connection |
+| Signing popup never appears | Serve the app over `http://localhost` or `https://`; disable conflicting extensions |
+| Transaction rejected — wrong network | Match Freighter's network selector to `NEXT_PUBLIC_NETWORK_PASSPHRASE` |
+| "Insufficient balance" | Fund via Friendbot (testnet) or send XLM (mainnet) |
+| Freighter not detected | Install the extension; page must be on `http://localhost` or `https://` |
+| Popup closes before signing | Disable pop-up blockers for `localhost` |
 
 ---
 
+## Empty states and missing configuration
+
+### Missing contract ID
+
+If `NEXT_PUBLIC_CONTRACT_ID` is not set or is blank, the app renders a **"Contract not configured"** warning card instead of the subscription form. This is the most common first-run issue.
+
+**Symptom:** Yellow warning card titled "Contract not configured" appears where the form should be.
+
+**Fix:**
+
+1. Deploy the contract and capture the address:
+   ```bash
+   CONTRACT_ID=$(bash deploy/deploy.sh)
+   echo "Contract: $CONTRACT_ID"
+   ```
+
+2. Paste the address into `frontend/.env.local`:
+   ```env
+   NEXT_PUBLIC_CONTRACT_ID=CXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+   ```
+
+3. Restart the dev server:
+   ```bash
+   npm run dev
+   ```
+
+The warning card also displays the current values of `RPC_URL`, `NETWORK_PASSPHRASE`, and `CONTRACT_ID` to help you verify your environment.
+
+### Wallet not connected (disconnected empty state)
+
+When no wallet is connected the app shows a prompt card with:
+- A link to install Freighter if the extension is not detected.
+- A link to the [Quick Start guide](#quick-start-testnet-demo--5-minutes).
+- A reminder to set `NEXT_PUBLIC_CONTRACT_ID` in `.env.local`.
+
+Connect Freighter and approve the site to dismiss this state.
+
+### Payment history (coming soon)
+
+Once the wallet is connected, a **Payment History** placeholder card is shown below the subscription form. This area will display executed payments and subscription activity once on-chain event indexing (polling `getEvents()`) is implemented. Until then it serves as a roadmap indicator.
+
+---
+
+## Wallet connection UX states
+
+The `SubscriptionForm` component reflects the wallet and transaction lifecycle through distinct visual states. Contributors should maintain these states when modifying the form.
+
+| State | Trigger | UI indicator | Submit button |
+|-------|---------|-------------|---------------|
+| **Disconnected** | `publicKey` is `null` (Freighter not connected or not approved) | Gray badge: "Disconnected" with dim dot | Disabled; yellow hint: "Connect your Freighter wallet to enable submission." |
+| **Connected / idle** | `publicKey` is set, `isSubmitting` is `false` | Green badge: "Connected" with green dot | Enabled: "Authorize Subscription" |
+| **Awaiting signature** | `isSubmitting` is `true` (transaction sent to Freighter, waiting for user approval) | Blue animated spinner + progress bar with label "Submitting transaction…" | Disabled: "Submitting…" with spinner |
+| **Success** | `successData` is set after transaction confirmed | Green `SuccessCard` with tx hash, summary, and next-steps guidance | Hidden; replaced by "Create another subscription" button |
+| **Error** | `txError` is set after a failed or rejected transaction | Red alert box with error message and "Your form data has been preserved — review and retry." | Re-enabled; form data retained for correction |
+
+### State transition diagram
+
+```
+Disconnected ──(connect Freighter)──► Connected/idle
+Connected/idle ──(submit form)──► Awaiting signature
+Awaiting signature ──(user approves)──► Success
+Awaiting signature ──(user rejects / timeout / RPC error)──► Error
+Error ──(fix form & resubmit)──► Awaiting signature
+Success ──(click "Create another")──► Connected/idle
+```
+
+---
 
 ## Contract entry points
 
@@ -353,14 +474,84 @@ npm run type-check
 | `execute_payment(subscriber, merchant)` | merchant | Collect payment if interval has elapsed. Transfers tokens directly subscriber → merchant. |
 | `cancel(subscriber, merchant)` | subscriber | Remove subscription from persistent storage. |
 
+### Examples
+
+**subscribe** — authorize 100 tokens every 30 days:
+
+```bash
+stellar contract invoke \
+  --id $CONTRACT_ID --source alice --network testnet \
+  -- subscribe \
+  --subscriber GABC...ALICE \
+  --merchant   GXYZ...MERCHANT \
+  --token      CABC...USDC \
+  --amount     100 \
+  --interval   2592000
+```
+
+```typescript
+import { Contract, nativeToScVal, Address } from "@stellar/stellar-sdk";
+const op = contract.call(
+  "subscribe",
+  new Address(subscriber).toScVal(),
+  new Address(merchant).toScVal(),
+  new Address(tokenAddress).toScVal(),
+  nativeToScVal(100n, { type: "i128" }),
+  nativeToScVal(2592000n, { type: "u64" }),
+);
+// Expected: subscription stored, `subscribe` event emitted, first payment collectable immediately.
+```
+
+**execute_payment** — merchant collects a due payment:
+
+```bash
+stellar contract invoke \
+  --id $CONTRACT_ID --source merchant-key --network testnet \
+  -- execute_payment \
+  --subscriber GABC...ALICE \
+  --merchant   GXYZ...MERCHANT
+```
+
+```typescript
+const op = contract.call(
+  "execute_payment",
+  new Address(subscriber).toScVal(),
+  new Address(merchant).toScVal(),
+);
+// Expected: 100 tokens transferred subscriber → merchant, `executed` event emitted, next_payment advanced.
+```
+
+**cancel** — subscriber terminates the agreement:
+
+```bash
+stellar contract invoke \
+  --id $CONTRACT_ID --source alice --network testnet \
+  -- cancel \
+  --subscriber GABC...ALICE \
+  --merchant   GXYZ...MERCHANT
+```
+
+```typescript
+const op = contract.call(
+  "cancel",
+  new Address(subscriber).toScVal(),
+  new Address(merchant).toScVal(),
+);
+// Expected: subscription removed; future execute_payment calls return NoActiveSubscription (error 4).
+```
+
+For the full parameter reference and error cases see [docs/contract-api.md](docs/contract-api.md).
+
 ### Events emitted
 
-| Event | Topics | Data |
-|-------|--------|------|
-| `subscribe` | `(symbol("subscribe"), subscriber, merchant)` | `amount: i128` |
-| `executed` | `(symbol("executed"), subscriber, merchant)` | `amount: i128` |
+| Event | Topics | Data | Condition |
+|-------|--------|------|-----------|
+| `subscribe` | `(symbol("subscribe"), subscriber, merchant, token)` | `amount: i128` | Always on success |
+| `executed` | `(symbol("executed"), subscriber, merchant, token)` | `amount: i128` | Successful transfer |
+| `payment_transfer_failure` | `(symbol("payment_transfer_failure"), subscriber, merchant)` | `amount: i128` | Insufficient balance detected before transfer |
+| `cancel` | `(symbol("cancel"), subscriber, merchant)` | `()` | Always on success |
 
-Events use three topics: a `Symbol` discriminant followed by two `Address` values. The data field is an `i128` amount in stroops.
+Events use a `Symbol` discriminant as the first topic. The data field is an `i128` amount in stroops (or `()` for `cancel`).
 
 **Quick decode example (TypeScript):**
 
@@ -380,59 +571,154 @@ See [docs/events.md](docs/events.md) for the full event reference, RPC query exa
 
 ---
 
-## Error codes
+## Transaction fees and execution budgets
 
-All entry points return a `ContractError` on failure. The numeric value is surfaced in the Stellar RPC error response under `result.error.code` and can be compared directly in client code.
+Soroban charges fees based on **CPU instructions**, **memory bytes**, and **ledger entry reads/writes**. All three entry points are computationally O(1) — they touch a fixed number of storage entries and make no loops — but they differ meaningfully in cost because `execute_payment` crosses into an external token contract.
 
-| Code | Name | Entry point(s) | Trigger | Recommended user-facing message |
-|------|------|----------------|---------|----------------------------------|
-| `1` | `AmountMustBePositive` | `subscribe` | `amount` is `0` or negative | "Payment amount must be greater than zero." |
-| `2` | `IntervalTooShort` | `subscribe` | `interval < 86400` (less than 1 day) | "Billing interval must be at least 1 day (86400 seconds)." |
-| `3` | `IntervalTooLong` | `subscribe` | `interval > 31536000` (more than 365 days) | "Billing interval cannot exceed 365 days (31536000 seconds)." |
-| `4` | `NoActiveSubscription` | `execute_payment`, `cancel` | No subscription record exists for the `(subscriber, merchant)` pair | "No active subscription found for this subscriber–merchant pair." |
-| `5` | `PaymentNotDue` | `execute_payment` | `ledger_timestamp < next_payment` — interval has not elapsed yet | "Payment is not due yet. Retry after the next billing date." |
-| `6` | `Unauthorized` | `subscribe`, `execute_payment`, `cancel` | `require_auth()` failed — transaction missing the required signer | "Transaction was not signed by the required account." |
-| `7` | `TransferFailed` | `execute_payment` | Subscriber's token balance is below the subscription `amount` at collection time | "Payment failed: subscriber has insufficient token balance." |
+### Cost breakdown per entry point
 
-### Notes for integrators
+#### `subscribe` — moderate cost
 
-- **Codes are stable.** Numeric values are fixed by `#[repr(u32)]` and will not change across contract upgrades.
-- **Code 6 (`Unauthorized`) rarely surfaces as a typed error.** `require_auth()` panics rather than returning, so the RPC response will show a generic auth failure. Treat any auth-class RPC error as equivalent.
-- **Code 7 (`TransferFailed`) is retriable.** The subscription record is preserved when a transfer fails due to insufficient balance. The merchant can retry `execute_payment` once the subscriber's balance is restored, as long as the payment remains due.
-- **Code 5 (`PaymentNotDue`) is not an error condition** in the traditional sense — it means the merchant attempted collection too early. No action is needed; retry after the `next_payment` timestamp.
-- **Allowance revocation** (subscriber calls `token.approve(contract_id, 0)`) causes the token contract to panic inside `execute_payment`, rolling back the entire transaction. This does **not** produce a `TransferFailed` code — the transaction will fail at the RPC level with a Soroban host error.
+Operations performed:
+- 1 `require_auth` on `subscriber`
+- 5 input validations (amount bounds, interval bounds, timestamp guard)
+- 1 persistent storage write (`SubscriptionData` struct, ~5 fields)
+- 1 TTL extension (`extend_ttl` on the same entry)
+- 1 event publish (`subscribe`, 4 topics + i128 data)
 
-### Detecting errors in TypeScript
+This is a pure write with no cross-contract calls. Expect roughly **50,000–150,000 CPU instructions** under normal conditions. The dominant cost is the auth verification and the persistent storage write (ledger entry write fee).
+
+**Budget guidance:**
+- Inclusion fee: standard (100 stroops is usually sufficient on testnet; 1,000–10,000 stroops on mainnet during normal congestion)
+- Resource fee: set `instructions` to at least **150,000** and `write_bytes` to at least **300**
+- The Stellar CLI and SDKs can simulate the transaction first (`simulateTransaction`) to get exact values
+
+#### `execute_payment` — highest cost
+
+Operations performed:
+- 1 `require_auth` on `merchant`
+- 1 persistent storage read
+- 1 ledger timestamp read
+- 1 cross-contract `balance` call on the SEP-41 token contract
+- 1 cross-contract `transfer` call on the SEP-41 token contract (the most expensive operation)
+- 1 persistent storage write (updated `next_payment`)
+- 1 TTL extension
+- 1 event publish (`executed` or `payment_transfer_failure`, depending on outcome)
+
+The two cross-contract calls — especially `transfer`, which itself performs auth checks, balance reads, and two storage writes inside the token contract — are what make this the most expensive entry point. Soroban charges for every instruction executed within invoked contracts, not just the top-level caller.
+
+**Budget guidance:**
+- Resource fee: set `instructions` to at least **500,000** and `write_bytes` to at least **500**
+- Always run `simulateTransaction` before broadcasting — the simulation returns exact `instructions`, `readBytes`, and `writeBytes` values
+- If the subscriber has insufficient balance, the contract returns `TransferFailed` early (after the `balance` read but before `transfer`) and emits `payment_transfer_failure`. This path is slightly cheaper than a successful transfer since the token's `transfer` is never invoked
+
+#### `cancel` — lowest cost
+
+Operations performed:
+- 1 `require_auth` on `subscriber`
+- 1 persistent storage `has` check (read)
+- 1 persistent storage `remove`
+- 1 event publish (`cancel`, 2 topics + unit data)
+
+No cross-contract calls, no writes to new keys. Removing a persistent entry reduces ledger size, which may earn a small rent refund. This is the cheapest of the three entry points.
+
+**Budget guidance:**
+- Resource fee: set `instructions` to at least **50,000** and `write_bytes` to at least **100**
+- In practice the `simulateTransaction` result will likely be even lower
+
+### Relative cost ranking
+
+```
+execute_payment  >  subscribe  >  cancel
+(cross-contract       (write +       (read +
+ transfer)             TTL extend)    remove)
+```
+
+### How to get exact fee estimates
+
+Never hardcode fee values for production. Always simulate:
+
+```bash
+# Simulate a subscribe call and inspect the fee breakdown
+stellar contract invoke \
+  --id <CONTRACT_ID> \
+  --network testnet \
+  --simulate-only \
+  -- subscribe \
+  --subscriber <SUBSCRIBER_ADDRESS> \
+  --merchant  <MERCHANT_ADDRESS> \
+  --token     <TOKEN_ADDRESS> \
+  --amount    1000000 \
+  --interval  86400
+```
+
+Or via the JavaScript SDK:
 
 ```typescript
-import { SorobanRpc } from "@stellar/stellar-sdk";
+import { SorobanRpc, TransactionBuilder, Networks } from "@stellar/stellar-sdk";
 
-const CONTRACT_ERRORS: Record<number, string> = {
-  1: "AmountMustBePositive",
-  2: "IntervalTooShort",
-  3: "IntervalTooLong",
-  4: "NoActiveSubscription",
-  5: "PaymentNotDue",
-  6: "Unauthorized",
-  7: "TransferFailed",
-};
+const server = new SorobanRpc.Server("https://soroban-testnet.stellar.org");
 
-function parseContractError(result: SorobanRpc.Api.SendTransactionResponse): string | null {
-  const code = (result as any)?.error?.code as number | undefined;
-  return code !== undefined ? (CONTRACT_ERRORS[code] ?? `UnknownError(${code})`) : null;
+// Build the transaction, then simulate before signing
+const simResult = await server.simulateTransaction(tx);
+
+if (SorobanRpc.Api.isSimulationSuccess(simResult)) {
+  console.log("Min resource fee:", simResult.minResourceFee); // in stroops
+  console.log("CPU instructions:", simResult.transactionData.resources().instructions());
+  console.log("Write bytes:",      simResult.transactionData.resources().writeBytes());
 }
 ```
+
+The `minResourceFee` from simulation is the floor. Add a 10–25% buffer on `instructions` for safety — network-level variance (e.g., host version upgrades) can shift costs slightly between simulation and submission.
+
+### Ledger entry rent and TTL
+
+`subscribe` and `execute_payment` both call `extend_ttl` to keep the subscription entry alive:
+
+- Minimum TTL: ~30 days (518,400 ledgers at 5 s/ledger)
+- Maximum TTL: ~365 days (6,307,200 ledgers)
+
+The TTL extension adds a **rent fee** proportional to the number of ledgers being extended and the size of the entry. For most subscriptions the entry is small (~200 bytes), so rent is a minor fraction of the total fee. If a subscription entry expires (TTL reaches zero) before `cancel` is called, it will be evicted from the ledger; a new `subscribe` call will recreate it.
+
+### Fee behavior on failure
+
+Failed calls that return a `ContractError` (e.g., `PaymentNotDue`, `NoActiveSubscription`, `TransferFailed`) **still consume fees** for the work performed up to the point of the error. The transaction is included in the ledger as a failed invocation. Budget accordingly:
+
+| Scenario | Fee relative to success |
+|----------|------------------------|
+| `execute_payment` → `PaymentNotDue` | ~10–20% of full cost (only auth + storage read before early return) |
+| `execute_payment` → `TransferFailed` | ~60–80% of full cost (balance cross-contract call completed, transfer skipped) |
+| `subscribe` → validation error | ~10–15% of full cost (auth + validation only, no write) |
+| `cancel` → `NoActiveSubscription` | ~10% of full cost (auth + storage has check only) |
+
+---
+
+## Error codes
+
+| Code | Name | Trigger |
+|------|------|---------|
+| 1 | `AmountMustBePositive` | `amount ≤ 0` in `subscribe` |
+| 2 | `IntervalTooShort` | `interval < 86400` in `subscribe` |
+| 3 | `IntervalTooLong` | `interval > 31536000` in `subscribe` |
+| 4 | `NoActiveSubscription` | No subscription found for `(subscriber, merchant)` pair |
+| 5 | `PaymentNotDue` | `now < next_payment` in `execute_payment` |
+| 6 | `Unauthorized` | Authorization check failed |
+| 7 | `TransferFailed` | Insufficient subscriber balance at payment time |
+| 8 | `InvalidTimestamp` | Ledger timestamp is zero or would overflow |
+| 9 | `AmountTooLarge` | `amount > 10¹⁸` in `subscribe` |
+| 10 | `SelfSubscription` | `subscriber == merchant` in `subscribe` |
+| 11 | `InvalidTokenAddress` | `token` is the contract's own address in `subscribe` |
 
 ---
 
 ## Event Indexing Architecture
 
-SorobanPay emits structured events via Soroban RPC for off-chain indexing. The contract publishes two core event types:
+SorobanPay emits structured events via Soroban RPC for off-chain indexing. The contract publishes four event types:
 
 - **`subscribe`** — Emitted when a subscription is created or updated. Signals the start of a recurring payment relationship.
 - **`executed`** — Emitted after a successful payment transfer and timestamp advance. Confirms payment collection.
-
-**Cancellation Detection:** The contract does not emit a cancellation event. Instead, off-chain indexers detect cancellations by the absence of `executed` events after a period exceeding the subscription interval.
+- **`payment_transfer_failure`** — Emitted when a payment attempt fails due to insufficient subscriber balance. The subscription remains active and is eligible for retry.
+- **`cancel`** — Emitted after a subscription is successfully removed. Provides an explicit, reliable signal for off-chain indexers to mark the relationship as ended.
 
 ### Key Components
 
@@ -446,8 +732,8 @@ SorobanPay emits structured events via Soroban RPC for off-chain indexing. The c
 ### Event Schema
 
 Each event contains:
-- **Topics:** `(symbol, subscriber_address, merchant_address)` — enables filtering by party or event type
-- **Data:** `amount: i128` — payment amount in token's smallest unit
+- **Topics:** `(symbol, subscriber_address, merchant_address[, token_address])` — enables filtering by party or event type
+- **Data:** `amount: i128` (or `()` for `cancel`) — payment amount in token's smallest unit
 
 ### Recommended Architecture
 
@@ -455,7 +741,7 @@ For most SaaS and merchant dashboard use cases, a **PostgreSQL-backed pull index
 
 1. Poll Soroban RPC every 5–30 seconds for new events.
 2. Decode and persist to tables: `subscriptions`, `payments`, `indexer_state`.
-3. Detect cancellations via batch job: mark subscriptions inactive if no `executed` event in `2 × interval`.
+3. Use `cancel` events to immediately mark subscriptions inactive; use `payment_transfer_failure` events to flag subscriptions for retry logic.
 4. Serve queries via REST/GraphQL API for merchant dashboards.
 
 For high-volume payment streams, consider **event sourcing + CQRS** to maintain an immutable event log and multiple projections (subscription summary, revenue analytics, etc.).
@@ -521,6 +807,8 @@ The TTL constants assume a **5-second average ledger close time**, which is the 
 - **Allowance model**: Subscribers grant a SEP-41 allowance to the contract. Revoking allowance via `token.approve(contract_id, 0)` prevents future payments regardless of on-chain subscription state.
 - **Time-lock**: Payment cannot be collected before `next_payment` — enforced on-chain by the Soroban ledger timestamp.
 - **TTL**: Subscriptions have a ~30-day minimum and ~365-day maximum TTL. Each successful payment resets the 365-day clock. Expired entries are garbage-collected by the Soroban host — they cannot be read or paid against. See [Storage TTL](#storage-ttl) for the full semantics.
+
+For guidance on storing backend secrets safely (database credentials, RPC API keys, webhook secrets), see [docs/security.md](docs/security.md).
 
 ---
 
