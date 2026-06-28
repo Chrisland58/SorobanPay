@@ -109,7 +109,16 @@ npm run dev
 
 Open http://localhost:3000 in a browser with the [Freighter extension](https://www.freighter.app) installed and set to **Testnet**.
 
-### 5. Try a subscription
+### 5. First-time onboarding
+
+1. Install and enable the Freighter wallet extension.
+2. Switch Freighter to **Testnet** and load a funded account.
+3. Connect Freighter in the app by clicking **Connect Freighter Wallet**.
+4. Ensure `NEXT_PUBLIC_CONTRACT_ID` is set in `frontend/.env.local`.
+5. Fill in the merchant address, token contract, amount, and interval.
+6. Submit the form and approve the transaction in Freighter.
+
+### 6. Try a subscription
 
 1. In Freighter, switch to Testnet and fund your wallet via [Friendbot](https://laboratory.stellar.org/#account-creator?network=test).
 2. Open the app, enter a merchant address and amount, and click **Subscribe**.
@@ -389,6 +398,49 @@ Steps to resolve:
 
 ---
 
+## Empty states and missing configuration
+
+### Missing contract ID
+
+If `NEXT_PUBLIC_CONTRACT_ID` is not set or is blank, the app renders a **"Contract not configured"** warning card instead of the subscription form. This is the most common first-run issue.
+
+**Symptom:** Yellow warning card titled "Contract not configured" appears where the form should be.
+
+**Fix:**
+
+1. Deploy the contract and capture the address:
+   ```bash
+   CONTRACT_ID=$(bash deploy/deploy.sh)
+   echo "Contract: $CONTRACT_ID"
+   ```
+
+2. Paste the address into `frontend/.env.local`:
+   ```env
+   NEXT_PUBLIC_CONTRACT_ID=CXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+   ```
+
+3. Restart the dev server:
+   ```bash
+   npm run dev
+   ```
+
+The warning card also displays the current values of `RPC_URL`, `NETWORK_PASSPHRASE`, and `CONTRACT_ID` to help you verify your environment.
+
+### Wallet not connected (disconnected empty state)
+
+When no wallet is connected the app shows a prompt card with:
+- A link to install Freighter if the extension is not detected.
+- A link to the [Quick Start guide](#quick-start-testnet-demo--5-minutes).
+- A reminder to set `NEXT_PUBLIC_CONTRACT_ID` in `.env.local`.
+
+Connect Freighter and approve the site to dismiss this state.
+
+### Payment history (coming soon)
+
+Once the wallet is connected, a **Payment History** placeholder card is shown below the subscription form. This area will display executed payments and subscription activity once on-chain event indexing (polling `getEvents()`) is implemented. Until then it serves as a roadmap indicator.
+
+---
+
 ## Wallet connection UX states
 
 The `SubscriptionForm` component reflects the wallet and transaction lifecycle through distinct visual states. Contributors should maintain these states when modifying the form.
@@ -651,6 +703,11 @@ Failed calls that return a `ContractError` (e.g., `PaymentNotDue`, `NoActiveSubs
 | 4 | `NoActiveSubscription` | No subscription found for `(subscriber, merchant)` pair |
 | 5 | `PaymentNotDue` | `now < next_payment` in `execute_payment` |
 | 6 | `Unauthorized` | Authorization check failed |
+| 7 | `TransferFailed` | Insufficient subscriber balance at payment time |
+| 8 | `InvalidTimestamp` | Ledger timestamp is zero or would overflow |
+| 9 | `AmountTooLarge` | `amount > 10¹⁸` in `subscribe` |
+| 10 | `SelfSubscription` | `subscriber == merchant` in `subscribe` |
+| 11 | `InvalidTokenAddress` | `token` is the contract's own address in `subscribe` |
 
 ---
 

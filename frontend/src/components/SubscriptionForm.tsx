@@ -508,8 +508,8 @@ function classifyError(err: unknown): TxErrorInfo {
   ) {
     return {
       title: "Signing cancelled",
-      summary: "You declined the transaction in Freighter.",
-      fix: 'Click "Authorize Subscription" again and approve the request in the Freighter pop-up.',
+      summary: "The Freighter pop-up was dismissed or the request was rejected.",
+      fix: 'To retry: click "Authorize Subscription" again and approve in the Freighter pop-up. To use a different account, switch accounts in Freighter first, then resubmit.',
       raw,
     };
   }
@@ -708,7 +708,7 @@ function ErrorCard({
 // ─── Component ────────────────────────────────────────────────────────────────
 
 export default function SubscriptionForm() {
-  const { publicKey } = useWallet();
+  const { publicKey, isCheckingFreighter, freighterInstalled } = useWallet();
 
   // Guard: must have a valid contract address before rendering the form
   if (!CONTRACT_ID) return <ContractConfigError />;
@@ -905,14 +905,27 @@ export default function SubscriptionForm() {
           aria-labelledby="form-heading"
           className="space-y-5 sm:space-y-6"
         >
+          {/* Form legend */}
+          <div className="text-xs text-gray-400 font-medium mb-3">
+            <span className="inline-block px-2 py-0.5 bg-blue-900/30 border border-blue-600/40 rounded text-blue-300">
+              Fields marked with <span className="text-red-400 font-bold">*</span> are required
+            </span>
+          </div>
+
           {/* Merchant address */}
           <div>
             <label
               htmlFor="merchantAddress"
-              className={labelCls}
+              className="block text-sm font-semibold text-white mb-2.5 flex items-center gap-2"
             >
-              Merchant address{requiredMark}
-              <span className="sr-only"> (required)</span>
+              <span>Merchant address</span>
+              <span
+                aria-hidden="true"
+                className="inline-flex items-center justify-center w-4 h-4 text-xs font-bold text-red-400 bg-red-900/40 rounded border border-red-600/50"
+              >
+                *
+              </span>
+              <span className="sr-only">(required)</span>
             </label>
             <input
               id="merchantAddress"
@@ -938,13 +951,16 @@ export default function SubscriptionForm() {
                 id="err-merchant"
                 role="alert"
                 className="mt-2 text-xs text-red-400 font-medium"
+              >white mb-2.5 flex items-center gap-2"
+            >
+              <span>Token contract address</span>
+              <span
+                aria-hidden="true"
+                className="inline-flex items-center justify-center w-4 h-4 text-xs font-bold text-red-400 bg-red-900/40 rounded border border-red-600/50"
               >
-                {fieldErrors.merchantAddress}
-              </p>
-            )}
-          </div>
-
-          {/* Token address */}
+                *
+              </span>
+              <span className="sr-only">
           <div>
             <label
               htmlFor="tokenAddress"
@@ -984,12 +1000,20 @@ export default function SubscriptionForm() {
           </div>
 
           {/* Amount */}
-          <div>
-            <label
-              htmlFor="amount"
-              className={labelCls}
+          <div>white mb-2.5 flex items-center gap-2"
             >
-              Amount <span className="text-gray-400 font-normal">(token units)</span>{requiredMark}
+              <span>
+                Amount <span className="text-gray-400 font-normal">(token units)</span>
+              </span>
+              <span
+                aria-hidden="true"
+                className="inline-flex items-center justify-center w-4 h-4 text-xs font-bold text-red-400 bg-red-900/40 rounded border border-red-600/50"
+              >
+                *
+              </span>
+              <span className="sr-only">assName="text-red-400">
+                *
+              </span>
               <span className="sr-only"> (required)</span>
             </label>
             <input
@@ -1022,13 +1046,21 @@ export default function SubscriptionForm() {
             )}
           </div>
 
-          {/* Interval */}
-          <div>
-            <label
-              htmlFor="interval"
-              className={labelCls}
+          {/* Interval */}white mb-2.5 flex items-center gap-2"
             >
-              Interval <span className="text-gray-400 font-normal">(seconds)</span>{requiredMark}
+              <span>
+                Interval <span className="text-gray-400 font-normal">(seconds)</span>
+              </span>
+              <span
+                aria-hidden="true"
+                className="inline-flex items-center justify-center w-4 h-4 text-xs font-bold text-red-400 bg-red-900/40 rounded border border-red-600/50"
+              >
+                *
+              </span>
+              <span className="sr-only">500 font-normal">(seconds)</span>{" "}
+              <span aria-hidden="true" className="text-red-400">
+                *
+              </span>
               <span className="sr-only"> (required)</span>
             </label>
             <input
