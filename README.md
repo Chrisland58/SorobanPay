@@ -109,7 +109,16 @@ npm run dev
 
 Open http://localhost:3000 in a browser with the [Freighter extension](https://www.freighter.app) installed and set to **Testnet**.
 
-### 5. Try a subscription
+### 5. First-time onboarding
+
+1. Install and enable the Freighter wallet extension.
+2. Switch Freighter to **Testnet** and load a funded account.
+3. Connect Freighter in the app by clicking **Connect Freighter Wallet**.
+4. Ensure `NEXT_PUBLIC_CONTRACT_ID` is set in `frontend/.env.local`.
+5. Fill in the merchant address, token contract, amount, and interval.
+6. Submit the form and approve the transaction in Freighter.
+
+### 6. Try a subscription
 
 1. In Freighter, switch to Testnet and fund your wallet via [Friendbot](https://laboratory.stellar.org/#account-creator?network=test).
 2. Open the app, enter a merchant address and amount, and click **Subscribe**.
