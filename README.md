@@ -752,13 +752,61 @@ For detailed guidance on event sources, storage options, indexing patterns, work
 
 ---
 
+## Storage TTL
+
+Soroban persistent storage entries are **not kept forever**. The Soroban host tracks a Time-To-Live (TTL) for every persistent entry measured in ledgers, not wall-clock seconds. When the TTL reaches zero the entry expires and any read of that key returns `None` — the subscription record is effectively gone.
+
+### Why TTL management is critical for subscriptions
+
+A subscription is stored as a single persistent entry keyed by `(subscriber, merchant)`. If that entry expires between payment cycles the next call to `execute_payment` will return `ContractError::NoActiveSubscription`, even though the subscriber never cancelled. For monthly (30-day) or annual (365-day) billing intervals this is a real operational risk without deliberate TTL management.
+
+SorobanPay prevents this with an `extend_ttl` call every time a subscription is written:
+
+- **`subscribe`** — sets or resets the TTL when a subscription is created or updated.
+- **`execute_payment`** — extends the TTL after each successful payment transfer.
+
+Neither `cancel` nor failed payment attempts touch the TTL, since `cancel` removes the entry entirely and a failed payment should not silently keep a problematic record alive.
+
+### TTL constants
+
+| Constant | Ledgers | Approximate wall-clock time |
+|---|---|---|
+| `MIN_TTL_LEDGERS` | 518 400 | ~30 days (30 × 24 × 60 × 60 ÷ 5 s/ledger) |
+| `MAX_TTL_LEDGERS` | 6 307 200 | ~365 days (365 × 24 × 60 × 60 ÷ 5 s/ledger) |
+
+The `extend_ttl(key, threshold, max)` call works as follows: if the entry's remaining TTL is already above `threshold` (MIN\_TTL\_LEDGERS), the host does nothing — avoiding unnecessary fee spend. Otherwise it bumps the TTL up to `max` (MAX\_TTL\_LEDGERS). The net effect is that every active subscription is always guaranteed at least ~30 ledger-days of remaining lifetime, and at most ~365 days are ever charged.
+
+### Expiry semantics
+
+```
+subscribe() ──────────────────────────────────────► TTL = MAX (~365 days)
+                │
+         execute_payment() ──────────────────────► TTL reset to MAX (~365 days)
+                │
+         execute_payment() ──────────────────────► TTL reset to MAX (~365 days)
+                │
+         (no activity for > 365 days)
+                │
+         subscription entry expires ────────────► reads return None
+                │
+         execute_payment() ──────────────────────► ContractError::NoActiveSubscription
+```
+
+For yearly billing (`interval = 31 536 000 s = 365 days`) the storage TTL is refreshed on each payment, so an active annual subscription is never at risk of expiry. A subscription that goes a full year without a successful payment (e.g., the subscriber consistently has insufficient balance) will expire naturally once the 365-day TTL window is exhausted. This is intentional: stale, non-paying subscriptions are automatically garbage-collected by the Soroban host rather than accumulating permanently on-chain.
+
+### Ledger close time assumption
+
+The TTL constants assume a **5-second average ledger close time**, which is the Stellar mainnet target. If the network sustains a faster or slower close time for an extended period the effective wall-clock durations will drift. The ledger counts remain authoritative; the "30 days" and "365 days" labels are approximations.
+
+---
+
 ## Security model
 
 - **Non-custodial**: The contract never holds token balances. Transfers go directly `subscriber → merchant` via SEP-41 `transfer`.
 - **Per-invocation auth**: Every entry point requires a fresh `require_auth()` signature — no stored sessions.
 - **Allowance model**: Subscribers grant a SEP-41 allowance to the contract. Revoking allowance via `token.approve(contract_id, 0)` prevents future payments regardless of on-chain subscription state.
 - **Time-lock**: Payment cannot be collected before `next_payment` — enforced on-chain by the Soroban ledger timestamp.
-- **TTL**: Subscriptions have a ~30-day minimum and ~365-day maximum TTL. Each successful payment resets the 365-day clock.
+- **TTL**: Subscriptions have a ~30-day minimum and ~365-day maximum TTL. Each successful payment resets the 365-day clock. Expired entries are garbage-collected by the Soroban host — they cannot be read or paid against. See [Storage TTL](#storage-ttl) for the full semantics.
 
 For guidance on storing backend secrets safely (database credentials, RPC API keys, webhook secrets), see [docs/security.md](docs/security.md).
 
