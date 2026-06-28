@@ -3,6 +3,38 @@ import prisma from '../lib/prisma';
 import { AuditLogger } from './auditLogger';
 
 const auditLogger = new AuditLogger();
+const SUPPORTED_EVENT_TYPES = new Set(['subscribe', 'executed']);
+
+function decodeScValSymbol(encoded: string): string | null {
+  try {
+    const scVal = xdr.ScVal.fromXDR(encoded, 'base64');
+    return scVal.sym().toString();
+  } catch {
+    return null;
+  }
+}
+
+function decodeScValAddress(encoded: string): string | null {
+  try {
+    const scVal = xdr.ScVal.fromXDR(encoded, 'base64');
+    return scVal.address().toString();
+  } catch {
+    return null;
+  }
+}
+
+function decodeScValAmount(encoded: string): string | null {
+  try {
+    const scVal = xdr.ScVal.fromXDR(encoded, 'base64');
+    try {
+      return scVal.i128().toString();
+    } catch {
+      return scVal.u64().toString();
+    }
+  } catch {
+    return null;
+  }
+}
 
 export class EventIndexer {
   private rpcUrl: string;
@@ -17,14 +49,8 @@ export class EventIndexer {
 
   async fetchAndStoreEvents(startLedger?: number): Promise<void> {
     try {
-      let events: SorobanRpc.GetEventsResponse = {
-        events: [],
-        latestLedger: 0,
-      };
-
-      // Fetch events for the contract
       const eventsResponse = await this.server.getEvents({
-        startLedger: startLedger,
+        startLedger,
         filters: [
           {
             type: 'contract',
@@ -34,17 +60,15 @@ export class EventIndexer {
         limit: 100,
       });
 
-      events = eventsResponse;
-
-      if (!events.events || events.events.length === 0) {
+      const events = eventsResponse.events ?? [];
+      if (events.length === 0) {
         console.log('No new events found');
         return;
       }
 
-      console.log(`Found ${events.events.length} events`);
+      console.log(`Found ${events.length} contract events`);
 
-      // Process and store events
-      for (const event of events.events) {
+      for (const event of events) {
         await this.processEvent(event);
       }
 
@@ -56,64 +80,52 @@ export class EventIndexer {
 
   private async processEvent(event: SorobanRpc.RawEvent): Promise<void> {
     try {
-      // Parse the event topics and value
       const topics = event.topic;
-      const value = event.value;
-
       if (!topics || topics.length < 4) {
-        return; // Skip invalid events
+        return;
       }
 
-      const eventTypeSymbol = xdr.ScVal.fromXDR(topics[0], 'base64');
-      const eventType = eventTypeSymbol.sym().toString();
-
-      const subscriberScVal = xdr.ScVal.fromXDR(topics[1], 'base64');
-      const subscriber = subscriberScVal.address().toString();
-
-      const merchantScVal = xdr.ScVal.fromXDR(topics[2], 'base64');
-      const merchant = merchantScVal.address().toString();
-
-      const tokenScVal = xdr.ScVal.fromXDR(topics[3], 'base64');
-      const token = tokenScVal.address().toString();
-
-      const amountScVal = xdr.ScVal.fromXDR(value, 'base64');
-      let amount: string;
-      try {
-        amount = amountScVal.i128().toString();
-      } catch (e) {
-        // If it's not i128, try u64
-        amount = amountScVal.u64().toString();
+      const eventType = decodeScValSymbol(topics[0]);
+      if (!eventType || !SUPPORTED_EVENT_TYPES.has(eventType)) {
+        return;
       }
 
-      // Check if event already exists
+      const subscriber = decodeScValAddress(topics[1]);
+      const merchant = decodeScValAddress(topics[2]);
+      const token = decodeScValAddress(topics[3]);
+      const amount = decodeScValAmount(event.value);
+
+      if (!subscriber || !merchant || !token || amount === null) {
+        return;
+      }
+
+      const ledgerTimestamp = BigInt(event.ledger);
       const existingEvent = await prisma.event.findFirst({
         where: {
           type: eventType,
-          subscriber: subscriber,
-          merchant: merchant,
-          token: token,
-          amount: amount,
-          ledgerTimestamp: BigInt(event.ledger),
+          subscriber,
+          merchant,
+          token,
+          amount,
+          ledgerTimestamp,
         },
       });
 
       if (existingEvent) {
-        return; // Skip duplicate
+        return;
       }
 
-      // Store the event
       await prisma.event.create({
         data: {
           type: eventType,
-          subscriber: subscriber,
-          merchant: merchant,
-          token: token,
-          amount: amount,
-          ledgerTimestamp: BigInt(event.ledger),
+          subscriber,
+          merchant,
+          token,
+          amount,
+          ledgerTimestamp,
         },
       });
 
-      // Persist audit log for every executed payment
       if (eventType === 'executed') {
         await auditLogger.logPayment({
           eventType,
@@ -121,8 +133,8 @@ export class EventIndexer {
           merchant,
           token,
           amount,
-          transactionHash: event.id, // Soroban event ID is unique per transaction
-          ledger: BigInt(event.ledger),
+          transactionHash: event.id,
+          ledger: ledgerTimestamp,
         });
       }
 
