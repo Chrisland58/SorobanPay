@@ -817,8 +817,8 @@ export default function SubscriptionForm() {
           onCancel={() => setShowConfirm(false)}
         />
       )}
-      <div className="flex items-center justify-between mb-2 gap-3">
-        <h2 className="text-2xl sm:text-3xl font-bold">Create Subscription</h2>
+      <div className="flex items-start justify-between mb-1 gap-3">
+        <h2 className="text-xl sm:text-2xl font-bold leading-tight">Create Subscription</h2>
         <span
           aria-label={publicKey ? "Wallet connected" : "Wallet disconnected"}
           className={`inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-semibold shrink-0 ${
@@ -834,11 +834,9 @@ export default function SubscriptionForm() {
           {publicKey ? "Connected" : "Disconnected"}
         </span>
       </div>
-      <p className="text-gray-400 text-sm mb-3 leading-relaxed">
-        Authorize a recurring on-chain payment using your Freighter wallet.
-      </p>
-      <p className="text-xs text-gray-500 mb-5">
-        Required fields are marked with <span className="text-red-400">*</span>.
+      <p className="text-gray-400 text-sm mt-1 mb-4 leading-relaxed">
+        Authorize a recurring on-chain payment using your Freighter wallet.{" "}
+        <span className="text-gray-500">Fields marked <span className="text-red-400">*</span> are required.</span>
       </p>
 
       {/* Freighter not installed warning (Issue #110) */}
@@ -872,7 +870,7 @@ export default function SubscriptionForm() {
       )}
 
       {/* Contract ID with copy button */}
-      <div className="flex items-center gap-2 mb-8 bg-gray-800/50 border border-gray-700/60 rounded-lg px-3 py-2">
+      <div className="flex items-center gap-2 mb-5 bg-gray-800/50 border border-gray-700/60 rounded-lg px-3 py-2">
         <span className="text-xs text-gray-500 font-medium shrink-0">
           Contract
         </span>
@@ -903,28 +901,15 @@ export default function SubscriptionForm() {
           noValidate
           aria-busy={isSubmitting}
           aria-labelledby="form-heading"
-          className="space-y-5 sm:space-y-6"
+          className="space-y-4"
         >
-          {/* Form legend */}
-          <div className="text-xs text-gray-400 font-medium mb-3">
-            <span className="inline-block px-2 py-0.5 bg-blue-900/30 border border-blue-600/40 rounded text-blue-300">
-              Fields marked with <span className="text-red-400 font-bold">*</span> are required
-            </span>
-          </div>
-
           {/* Merchant address */}
           <div>
             <label
               htmlFor="merchantAddress"
-              className="block text-sm font-semibold text-white mb-2.5 flex items-center gap-2"
+              className={labelCls}
             >
-              <span>Merchant address</span>
-              <span
-                aria-hidden="true"
-                className="inline-flex items-center justify-center w-4 h-4 text-xs font-bold text-red-400 bg-red-900/40 rounded border border-red-600/50"
-              >
-                *
-              </span>
+              Merchant address{requiredMark}
               <span className="sr-only">(required)</span>
             </label>
             <input
