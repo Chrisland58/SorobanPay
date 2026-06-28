@@ -930,21 +930,24 @@ export default function SubscriptionForm() {
             <input
               id="merchantAddress"
               type="text"
-              placeholder="GABC…"
+              placeholder="e.g. GXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
               autoComplete="off"
               value={merchantAddress}
               onChange={(e) => setMerchantAddress(e.target.value)}
               disabled={isSubmitting}
               required
               aria-required="true"
-              aria-describedby={
-                fieldErrors.merchantAddress ? "err-merchant" : undefined
-              }
+              aria-describedby={`help-merchant${fieldErrors.merchantAddress ? " err-merchant" : ""}`}
               aria-invalid={!!fieldErrors.merchantAddress}
               className={fieldClass(!!fieldErrors.merchantAddress)}
             />
-            <p className={hintCls}>
-              Required. The merchant's Soroban account public key.
+            <p id="help-merchant" className={hintCls}>
+              The merchant&apos;s Stellar account public key — starts with{" "}
+              <code className="bg-gray-800 px-1 rounded text-gray-200 text-xs">G</code>,
+              56 characters. Example:{" "}
+              <code className="bg-gray-800 px-1 rounded text-gray-200 text-xs font-mono">
+                GABC…WXYZ
+              </code>
             </p>
             {fieldErrors.merchantAddress && (
               <p
@@ -969,21 +972,24 @@ export default function SubscriptionForm() {
             <input
               id="tokenAddress"
               type="text"
-              placeholder="CABC…"
+              placeholder="e.g. CXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
               autoComplete="off"
               value={tokenAddress}
               onChange={(e) => setTokenAddress(e.target.value)}
               disabled={isSubmitting}
               required
               aria-required="true"
-              aria-describedby={
-                fieldErrors.tokenAddress ? "err-token" : undefined
-              }
+              aria-describedby={`help-token${fieldErrors.tokenAddress ? " err-token" : ""}`}
               aria-invalid={!!fieldErrors.tokenAddress}
               className={fieldClass(!!fieldErrors.tokenAddress)}
             />
-            <p className={hintCls}>
-              Required. The SEP-41 token contract used for recurring payments.
+            <p id="help-token" className={hintCls}>
+              The SEP-41 token contract address — starts with{" "}
+              <code className="bg-gray-800 px-1 rounded text-gray-200 text-xs">C</code>,
+              56 characters. Example (testnet USDC):{" "}
+              <code className="bg-gray-800 px-1 rounded text-gray-200 text-xs font-mono">
+                CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA
+              </code>
             </p>
             {fieldErrors.tokenAddress && (
               <p
