@@ -48,8 +48,9 @@ jobs:
         run: npm run test:integration
         working-directory: backend
 
+  # #191: Frontend type check + unit tests on every push/PR
   frontend:
-    name: Frontend type check
+    name: Frontend type check and unit tests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -65,6 +66,12 @@ jobs:
         run: npm ci
         working-directory: frontend
 
+      # #191: TypeScript type checking — catches type errors before merge
       - name: Type check
         run: npm run type-check
+        working-directory: frontend
+
+      # Unit tests for src/lib (transaction_builder, validation)
+      - name: Unit tests
+        run: ./node_modules/.bin/jest --testPathPattern="src/lib/" --no-coverage
         working-directory: frontend
