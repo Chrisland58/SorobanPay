@@ -68,3 +68,13 @@ jobs:
       - name: Type check
         run: npm run type-check
         working-directory: frontend
+
+  # #193: Integration test for deploy.sh in testnet mode (mocked)
+  deploy-integration:
+    name: deploy.sh integration test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run deploy integration tests
+        run: bash deploy/test_deploy_testnet.sh
