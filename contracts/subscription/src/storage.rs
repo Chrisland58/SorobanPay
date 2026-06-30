@@ -48,5 +48,11 @@ pub const MAX_AMOUNT: i128 = 1_000_000_000_000_000_000; // 1e18 stroops
 /// ~30 days at 5-second ledger close time (518_400 ledgers)
 pub const MIN_TTL_LEDGERS: u32 = 30 * 24 * 60 * 60 / 5;
 
-/// ~365 days at 5-second ledger close time (6_307_200 ledgers)
+/// Maximum TTL ceiling (~365 days at 5 s/ledger = 6 307 200 ledgers).
+///
+/// Used as the `extend_to` argument to `extend_ttl`: when an extension is
+/// needed, the entry's TTL is bumped up to this value. Guarantees that an
+/// active subscription survives a full annual billing cycle without expiring.
+/// Stale subscriptions that go a full year without a successful payment will
+/// expire and be garbage-collected by the Soroban host automatically.
 pub const MAX_TTL_LEDGERS: u32 = 365 * 24 * 60 * 60 / 5;
