@@ -24,8 +24,13 @@ jobs:
       - name: Build (wasm32 release)
         run: cargo build --manifest-path contracts/subscription/Cargo.toml --target wasm32-unknown-unknown --release
 
-      - name: Test
-        run: cargo test --manifest-path contracts/subscription/Cargo.toml
+      - name: Test & summary
+        run: |
+          set -o pipefail
+          cargo test --manifest-path contracts/subscription/Cargo.toml 2>&1 \
+            | tee /tmp/contract-test-output.txt
+          echo "--- Test summary ---"
+          grep -E "^test result|FAILED|ok$" /tmp/contract-test-output.txt || true
 
   contract-coverage:
     name: Rust contract coverage
