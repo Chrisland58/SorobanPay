@@ -11,7 +11,7 @@ ARTIFACT_PATH  = $(TARGET_DIR)/$(TARGET_TRIPLE)/$(PROFILE)/$(ARTIFACT_NAME).wasm
 
 CARGO_FLAGS   = --manifest-path $(CONTRACT_DIR)/Cargo.toml --target $(TARGET_TRIPLE) --$(PROFILE)
 
-.PHONY: build test clean
+.PHONY: build test test-coverage clean
 
 # build: Compile the contract to WASM using the current $(TARGET_TRIPLE) and $(PROFILE)
 # Override at the command line, e.g.:
@@ -28,6 +28,19 @@ build:
 # Note: cargo test cannot cross-compile to WASM; keep this target native.
 test:
 	cargo test --manifest-path $(CONTRACT_DIR)/Cargo.toml
+
+# test-coverage: Run contract tests with llvm-cov and emit lcov + HTML reports.
+# Requires: cargo install cargo-llvm-cov
+# Output:   contracts/target/lcov.info  and  contracts/target/coverage-html/
+test-coverage:
+	cargo llvm-cov \
+		--manifest-path $(CONTRACT_DIR)/Cargo.toml \
+		--lcov --output-path $(TARGET_DIR)/lcov.info
+	cargo llvm-cov \
+		--manifest-path $(CONTRACT_DIR)/Cargo.toml \
+		--html --output-dir $(TARGET_DIR)/coverage-html
+	@echo "Coverage report: $(TARGET_DIR)/coverage-html/index.html"
+	@echo "LCOV data:       $(TARGET_DIR)/lcov.info"
 
 # clean: Remove all build artifacts for the contract
 clean:
