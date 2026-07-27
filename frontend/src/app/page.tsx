@@ -3,9 +3,12 @@
 /**
  * page.tsx — Home page (Dashboard)
  *
- * Renders the wallet connect/disconnect button and the subscription form.
- * Includes an onboarding guide for first-time users and global keyboard
- * shortcut support (react-hotkeys-hook).
+ * Mobile-first responsive layout (UX-114).
+ * - Single-column on mobile, max-w-lg centred on desktop
+ * - Bottom nav bar on mobile (BottomNavBar component)
+ * - Touch targets >= 44px (WCAG 2.5.5)
+ * - No horizontal overflow at 375px
+ * - pb-20 on mobile to clear the bottom nav bar
  *
  * Requirements: 9.1, 9.5, 9.6, 10.1
  * FE-47: Mounted guard prevents React hydration mismatches from wallet state.
@@ -23,8 +26,10 @@
 import { useState, useEffect, useRef } from 'react';
 import Link from 'next/link';
 import SubscriptionForm from '@/components/SubscriptionForm';
+import SubscriptionWizard from '@/components/SubscriptionWizard';
 import OnboardingGuide from '@/components/OnboardingGuide';
 import ShortcutsHelpModal from '@/components/ShortcutsHelpModal';
+import BottomNavBar from '@/components/BottomNavBar';
 import { SkeletonWallet, SkeletonForm } from '@/components/Skeleton';
 import { useWallet } from '@/hooks/useWallet';
 import { useKeyboardShortcuts, SECTION_IDS } from '@/hooks/useKeyboardShortcuts';
@@ -418,9 +423,13 @@ export default function Home() {
                 disabled={isConnecting}
                 aria-keyshortcuts="n"
                 title="Connect Freighter Wallet (press N to focus this area)"
-                className="w-full rounded-lg bg-blue-600 hover:bg-blue-500 disabled:opacity-50
-                           disabled:cursor-not-allowed px-4 py-3 text-sm font-semibold
-                           transition-colors focus:outline-none focus:ring-2 focus:ring-blue-400"
+                className="
+                  w-full rounded-lg bg-blue-600 hover:bg-blue-500
+                  disabled:opacity-50 disabled:cursor-not-allowed
+                  px-4 py-3 text-sm font-semibold
+                  min-h-[48px]
+                  transition-colors focus:outline-none focus:ring-2 focus:ring-blue-400
+                "
               >
                 {isConnecting ? 'Connecting…' : 'Connect Freighter Wallet'}
               </button>
@@ -531,9 +540,9 @@ export default function Home() {
           tabIndex={-1}
         >
           {publicKey ? (
-            <SubscriptionForm />
+            <SubscriptionWizard />
           ) : (
-            <div className="rounded-2xl border border-gray-800 bg-gray-900/40 p-8 text-center space-y-3">
+            <div className="rounded-2xl border border-gray-800 bg-gray-900/40 p-6 sm:p-8 text-center space-y-3">
               <p className="text-2xl" aria-hidden="true">🔒</p>
               <p className="text-gray-300 font-semibold text-sm">
                 Connect your wallet to get started
