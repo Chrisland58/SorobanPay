@@ -140,18 +140,24 @@ model PaymentRetry {
   id            Int       @id @default(autoincrement())
   subscriber    String
   merchant      String
-  amount        String    // token amount at time of failure (informational)
   token         String    @default("")
-  attemptNumber Int       // 1-based: 1st retry, 2nd retry, 3rd retry
-  status        String    @default("pending")
-  scheduledAt   DateTime  // when this attempt should be executed
-  executedAt    DateTime? // when execution was actually attempted
+  amount        String    @default("0")
+  /// 1-based attempt counter (1 = first retry, up to MAX_RETRY_ATTEMPTS).
+  attemptNumber Int
+  scheduledAt   DateTime
+  executedAt    DateTime?
+  /// PENDING | PROCESSING | SUCCEEDED | FAILED | CANCELLED
+  status        String    @default("PENDING")
   error         String?   // last error message if status="failed"
+  errorMessage  String?
+  /// BullMQ job ID — used to cancel the queued job on DELETE.
+  jobId         String?
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
 
+  @@unique([subscriber, merchant, attemptNumber], name: "subscriber_merchant_attempt")
   @@index([subscriber, merchant, status])
-  @@index([scheduledAt, status])
+  @@index([status, scheduledAt])
 }
 
 // BE (payment-retry): Optional per-merchant retry configuration.

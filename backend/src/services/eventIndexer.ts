@@ -238,9 +238,9 @@ export class EventIndexer {
           (err) => console.error('[email] Failed to send payment failure email:', err),
         );
 
-        // Schedule automated payment retries (BE-retry)
-        enqueueRetries(subscriber, merchant, amount ?? '0', token ?? '').catch(
-          (err) => console.error('[retryQueue] Failed to enqueue retries:', err),
+        // Schedule automated payment retries via BullMQ
+        await enqueueRetries(subscriber, merchant, amount ?? '0', token ?? '').catch(
+          (err) => console.error('[retry] Failed to schedule payment retries:', err),
         );
       }
 
