@@ -1,64 +1,83 @@
 version: 2
 updates:
-  # ── Rust (Cargo) — smart contract ─────────────────────────────────────────────
-  - package-ecosystem: cargo
-    directory: /contracts/subscription
-    schedule:
-      interval: weekly
-      day: monday
-      time: "08:00"
-    labels:
-      - dependencies
-      - contract
-    open-pull-requests-limit: 5
-    commit-message:
-      prefix: "chore(contract):"
-
-  # ── npm — frontend ─────────────────────────────────────────────────────────────
+  # ── Frontend (Next.js) ────────────────────────────────────────────────────
   - package-ecosystem: npm
     directory: /frontend
     schedule:
       interval: weekly
       day: monday
-      time: "08:00"
+      time: "03:00"
+      timezone: UTC
+    open-pull-requests-limit: 10
     labels:
       - dependencies
       - frontend
-    open-pull-requests-limit: 10
-    # Skip patch updates (too noisy) — let security-scan.yml catch those
+    # Group all @stellar/* packages into a single PR to reduce noise
+    groups:
+      stellar-sdk:
+        patterns:
+          - "@stellar/*"
+    # Major version bumps require explicit human review
     ignore:
       - dependency-name: "*"
-        update-types: ["version-update:semver-patch"]
+        update-types:
+          - version-update:semver-major
     commit-message:
       prefix: "chore(frontend):"
+      prefix-development: "chore(dev-deps)"
 
-  # ── npm — backend ──────────────────────────────────────────────────────────────
+  # ── Backend ───────────────────────────────────────────────────────────────
   - package-ecosystem: npm
     directory: /backend
     schedule:
       interval: weekly
       day: monday
-      time: "08:00"
+      time: "03:00"
+      timezone: UTC
+    open-pull-requests-limit: 10
     labels:
       - dependencies
       - backend
-    open-pull-requests-limit: 10
     ignore:
       - dependency-name: "*"
-        update-types: ["version-update:semver-patch"]
+        update-types:
+          - version-update:semver-major
     commit-message:
       prefix: "chore(backend):"
+      prefix-development: "chore(dev-deps)"
 
-  # ── GitHub Actions ─────────────────────────────────────────────────────────────
-  - package-ecosystem: github-actions
-    directory: /
+  # ── Soroban smart contract (Cargo) ────────────────────────────────────────
+  - package-ecosystem: cargo
+    directory: /contracts/subscription
     schedule:
       interval: weekly
       day: monday
-      time: "08:00"
+      time: "03:00"
+      timezone: UTC
+    open-pull-requests-limit: 10
+    labels:
+      - dependencies
+      - contract
+    ignore:
+      - dependency-name: "*"
+        update-types:
+          - version-update:semver-major
+    commit-message:
+      prefix: "chore(contract):"
+
+  # ── GitHub Actions ────────────────────────────────────────────────────────
+  # Updated monthly — Actions pinned to major tags change infrequently and a
+  # monthly cadence keeps the review burden low.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+      day: monday
+      time: "03:00"
+      timezone: UTC
+    open-pull-requests-limit: 5
     labels:
       - dependencies
       - ci
-    open-pull-requests-limit: 5
     commit-message:
-      prefix: "chore(ci):"
+      prefix: "chore(ci)"
