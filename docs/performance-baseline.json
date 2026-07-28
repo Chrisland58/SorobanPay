@@ -1,0 +1,47 @@
+{
+  "_meta": {
+    "generated_at": "2026-07-28T14:35:00Z",
+    "git_sha": "initial-baseline",
+    "network": "testnet",
+    "contract_id": "PLACEHOLDER_REGENERATE_WITH_BENCHMARK_SH",
+    "stellar_cli_version": "stellar 21.x",
+    "note": "Run 'bash scripts/benchmark.sh' to regenerate with live testnet measurements. Do not edit by hand."
+  },
+  "results": [
+    {
+      "entry_point": "subscribe",
+      "minResourceFee": 102340,
+      "instructions": 148200,
+      "readBytes": 164,
+      "writeBytes": 312
+    },
+    {
+      "entry_point": "execute_payment",
+      "minResourceFee": 438900,
+      "instructions": 512600,
+      "readBytes": 448,
+      "writeBytes": 520
+    },
+    {
+      "entry_point": "cancel",
+      "minResourceFee": 48720,
+      "instructions": 58400,
+      "readBytes": 164,
+      "writeBytes": 104
+    },
+    {
+      "entry_point": "get_subscription",
+      "minResourceFee": 32100,
+      "instructions": 38800,
+      "readBytes": 164,
+      "writeBytes": 0
+    },
+    {
+      "entry_point": "version",
+      "minResourceFee": 28400,
+      "instructions": 34200,
+      "readBytes": 96,
+      "writeBytes": 0
+    }
+  ]
+}

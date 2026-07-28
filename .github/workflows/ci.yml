@@ -68,3 +68,111 @@ jobs:
       - name: Type check
         run: npm run type-check
         working-directory: frontend
+
+  benchmark-regression:
+    name: Benchmark regression check
+    runs-on: ubuntu-latest
+    # Runs after the contract job so the baseline is always tested against a
+    # freshly-built artefact context.  Alerts (does not fail) if any metric
+    # increases by more than 20 % vs the previous committed baseline.
+    needs: [contract]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install jq
+        run: sudo apt-get install -y jq
+
+      - name: Check baseline file exists
+        id: baseline-check
+        run: |
+          if [ ! -f docs/performance-baseline.json ]; then
+            echo "::warning::docs/performance-baseline.json not found — skipping regression check."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # ---------------------------------------------------------------------------
+      # Regression analysis
+      # ---------------------------------------------------------------------------
+      # Compares docs/performance-baseline.json against the values in the parent
+      # commit (HEAD~1) using git-show.  Because live testnet simulations require a
+      # funded identity (not available in CI), we diff the committed baseline files
+      # directly and warn on increases > 20 %.
+      #
+      # To run live simulations in CI, set CONTRACT_ID as a repository secret and
+      # uncomment:
+      #   SKIP_BUILD=1 CONTRACT_ID=${{ secrets.CONTRACT_ID }} bash scripts/benchmark.sh
+      # ---------------------------------------------------------------------------
+      - name: Compare baseline against parent commit
+        if: steps.baseline-check.outputs.skip == 'false'
+        id: regression
+        run: |
+          set -euo pipefail
+
+          BASELINE="docs/performance-baseline.json"
+          THRESHOLD=1.20   # 20 % increase triggers a warning
+
+          PREV_BASELINE=$(git show HEAD~1:"$BASELINE" 2>/dev/null || echo "")
+
+          if [ -z "$PREV_BASELINE" ]; then
+            echo "::notice::No previous baseline found (first commit or new file). Skipping diff."
+            exit 0
+          fi
+
+          REGRESSIONS=0
+          REPORT=""
+
+          while IFS= read -r entry_point; do
+            CURR_VAL=$(jq -r --arg ep "$entry_point" \
+              '.results[] | select(.entry_point==$ep) | .instructions // 0' \
+              "$BASELINE")
+
+            PREV_VAL=$(echo "$PREV_BASELINE" | jq -r --arg ep "$entry_point" \
+              '.results[] | select(.entry_point==$ep) | .instructions // 0')
+
+            if [ "$PREV_VAL" -gt 0 ] 2>/dev/null; then
+              EXCEEDED=$(awk -v curr="$CURR_VAL" -v prev="$PREV_VAL" -v threshold="$THRESHOLD" \
+                'BEGIN { print (curr > prev * threshold) ? "yes" : "no" }')
+
+              if [ "$EXCEEDED" = "yes" ]; then
+                PCT=$(awk -v curr="$CURR_VAL" -v prev="$PREV_VAL" \
+                  'BEGIN { printf "%.1f", (curr / prev - 1) * 100 }')
+                REPORT="${REPORT}\n  • ${entry_point}: instructions ${PREV_VAL} → ${CURR_VAL} (+${PCT}%)"
+                REGRESSIONS=$((REGRESSIONS + 1))
+              fi
+            fi
+          done < <(jq -r '.results[].entry_point' "$BASELINE")
+
+          if [ "$REGRESSIONS" -gt 0 ]; then
+            echo "::warning title=Benchmark Regression::${REGRESSIONS} entry point(s) exceed the 20% instruction threshold:${REPORT}"
+            echo "  Update the baseline if the increase is intentional:"
+            echo "    bash scripts/benchmark.sh && git add docs/performance-baseline.json docs/performance.md"
+          else
+            echo "All entry points within 20% of baseline — no regression detected."
+          fi
+
+      - name: Validate baseline JSON is well-formed
+        if: steps.baseline-check.outputs.skip == 'false'
+        run: |
+          jq empty docs/performance-baseline.json
+          echo "docs/performance-baseline.json is valid JSON."
+
+      - name: Confirm required entry points are present
+        if: steps.baseline-check.outputs.skip == 'false'
+        run: |
+          REQUIRED="subscribe execute_payment cancel get_subscription version"
+          MISSING=""
+          for ep in $REQUIRED; do
+            FOUND=$(jq -r --arg ep "$ep" \
+              '.results[] | select(.entry_point==$ep) | .entry_point' \
+              docs/performance-baseline.json)
+            if [ -z "$FOUND" ]; then
+              MISSING="$MISSING $ep"
+            fi
+          done
+          if [ -n "$MISSING" ]; then
+            echo "::error::Missing entry points in baseline:$MISSING"
+            exit 1
+          fi
+          echo "All required entry points present in baseline."
