@@ -68,7 +68,7 @@ jobs:
 
       - name: Open GitHub issue on HIGH/CRITICAL findings
         if: failure() && steps.npm_audit_frontend.outputs.exit_code != '0'
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         with:
           script: |
             const fs = require('fs');
@@ -131,7 +131,7 @@ jobs:
 
       - name: Open GitHub issue on HIGH/CRITICAL findings
         if: failure() && steps.npm_audit_backend.outputs.exit_code != '0'
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         with:
           script: |
             let body = '## :rotating_light: npm audit — backend vulnerabilities detected\n\n';
@@ -194,7 +194,7 @@ jobs:
 
       - name: Open GitHub issue on vulnerabilities found
         if: failure() && steps.cargo_audit.outputs.exit_code != '0'
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         with:
           script: |
             let body = '## :rotating_light: cargo audit — contract vulnerabilities detected\n\n';
