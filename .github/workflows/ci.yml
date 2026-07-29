@@ -89,7 +89,7 @@ jobs:
           echo "PASS: Coverage ${COVERAGE}% meets the 95% threshold."
 
       - name: Upload LCOV to Codecov
-        uses: codecov/codecov-action@v4
+        uses: codecov/codecov-action@v7
         with:
           files: contracts/target/lcov.info
           flags: contract
@@ -187,7 +187,7 @@ jobs:
         working-directory: frontend
 
       - name: Upload frontend coverage to Codecov
-        uses: codecov/codecov-action@v4
+        uses: codecov/codecov-action@v7
         with:
           files: frontend/coverage/lcov.info
           flags: frontend
