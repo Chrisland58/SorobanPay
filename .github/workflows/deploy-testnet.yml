@@ -24,7 +24,7 @@ jobs:
     outputs:
       contract_id: ${{ steps.deploy.outputs.contract_id }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install Rust stable + wasm32 target
         uses: dtolnay/rust-toolchain@stable
@@ -82,7 +82,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: deploy-contract
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
