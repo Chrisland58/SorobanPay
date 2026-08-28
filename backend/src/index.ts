@@ -7,12 +7,14 @@ import { EventIndexer } from './services/eventIndexer';
 import { PayoutSummaryGenerator } from './services/payoutSummaryGenerator';
 import { PaymentScheduler } from './services/paymentScheduler';
 import { PaymentStateMachine } from './services/paymentStateMachine';
+import { CloudCostMonitor } from './services/cloudCostMonitor';
 import summariesRouter from './routes/summaries';
 import subscriptionsRouter from './routes/subscriptions';
 import auditLogsRouter from './routes/auditLogs';
 import settlementsRouter from './routes/settlements';
 import paymentsRouter from './routes/payments';
 import scalingRouter from './routes/scaling';
+import costsRouter from './routes/costs';
 import { apiLimiter } from './middleware/rateLimiter';
 
 const app = express();
@@ -30,6 +32,7 @@ app.use('/api/audit-logs', auditLogsRouter);
 app.use('/api/settlements', settlementsRouter);
 app.use('/api/payments', paymentsRouter);
 app.use('/api/scaling', scalingRouter);
+app.use('/api/costs', costsRouter);
 
 // Initialize services
 const rpcUrl = process.env.RPC_URL || 'https://soroban-testnet.stellar.org';
@@ -39,6 +42,7 @@ const networkPassphrase = process.env.NETWORK_PASSPHRASE || 'Test SDF Network ; 
 const eventIndexer = new EventIndexer(rpcUrl, contractId);
 const summaryGenerator = new PayoutSummaryGenerator();
 const paymentStateMachine = new PaymentStateMachine();
+const costMonitor = new CloudCostMonitor();
 
 // Payment scheduler — only active when operator secret is configured
 const operatorSecret = process.env.OPERATOR_SECRET;
@@ -75,6 +79,23 @@ cron.schedule('0 2 * * 0', async () => {
 cron.schedule('* * * * *', async () => {
   const count = await paymentStateMachine.processTimeouts();
   if (count > 0) console.log(`[state-machine] Timed out ${count} payment(s).`);
+});
+
+// Right-sizing analysis — run daily at 3 AM
+cron.schedule('0 3 * * *', async () => {
+  console.log('[cost-monitor] Running right-sizing analysis...');
+  const count = await costMonitor.runRightSizingAnalysis();
+  console.log(`[cost-monitor] Right-sizing: ${count} actionable recommendation(s)`);
+});
+
+// Monthly cost report — generate on the 1st of each month at 4 AM
+cron.schedule('0 4 1 * *', async () => {
+  const now = new Date();
+  // Report for the just-completed month
+  const prevMonth = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 1));
+  const yearMonth = prevMonth.toISOString().slice(0, 7);
+  console.log(`[cost-monitor] Generating monthly report for ${yearMonth}...`);
+  await costMonitor.generateMonthlyReport(yearMonth);
 });
 
 // Start server

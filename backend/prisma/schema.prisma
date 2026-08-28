@@ -191,3 +191,87 @@ model PredictiveScalingSchedule {
   active       Boolean  @default(true)
   createdAt    DateTime @default(now())
 }
+
+// ─── Cloud Cost Monitoring (#707) ─────────────────────────────────────────────
+
+/// One record per service per calendar day.
+model DailySpendRecord {
+  id          Int      @id @default(autoincrement())
+  date        DateTime                    // date only (truncated to 00:00 UTC)
+  service     String                      // e.g. "event-indexer", "api-gateway"
+  provider    String   @default("aws")    // cloud provider
+  region      String   @default("us-east-1")
+  costUsd     Float                       // total spend for the day in USD
+  cpuAvgPct   Float    @default(0)        // average CPU utilisation (%)
+  memAvgPct   Float    @default(0)        // average memory utilisation (%)
+  currentVcpu Float    @default(0)        // provisioned vCPU count
+  currentRam  Float    @default(0)        // provisioned RAM in GiB
+  tags        String   @default("{}")     // JSON map of cost-allocation tags
+  createdAt   DateTime @default(now())
+
+  @@unique([date, service])
+}
+
+/// Right-sizing recommendation per service.
+model RightSizingRecommendation {
+  id                Int      @id @default(autoincrement())
+  service           String   @unique
+  currentVcpu       Float
+  recommendedVcpu   Float
+  currentRamGib     Float
+  recommendedRamGib Float
+  estimatedSavingUsd Float   // monthly saving estimate
+  savingPct         Float    // saving as % of current cost
+  basis             String   // "30d_avg" | "peak_p95" etc.
+  generatedAt       DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+}
+
+/// Monthly cost report snapshot.
+model MonthlyCostReport {
+  id            Int      @id @default(autoincrement())
+  yearMonth     String   @unique    // "2024-01"
+  totalCostUsd  Float
+  breakdown     String              // JSON: service → cost
+  tags          String   @default("{}") // JSON: tag key → cost
+  exportedAt    DateTime?
+  createdAt     DateTime @default(now())
+}
+
+/// Budget configuration per service (or "ALL" for org-wide).
+model BudgetConfig {
+  id              Int      @id @default(autoincrement())
+  service         String   @unique   // service name or "ALL"
+  monthlyLimitUsd Float
+  alertAt80       Boolean  @default(true)
+  alertAt100      Boolean  @default(true)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+}
+
+/// Budget alert fired when a threshold is breached.
+model BudgetAlert {
+  id            Int      @id @default(autoincrement())
+  service       String
+  yearMonth     String
+  threshold     Int                  // 80 or 100
+  spentUsd      Float
+  limitUsd      Float
+  firedAt       DateTime @default(now())
+  acknowledged  Boolean  @default(false)
+
+  @@unique([service, yearMonth, threshold])
+}
+
+/// Reserved instance / savings-plan recommendation.
+model ReservedInstanceRecommendation {
+  id                   Int      @id @default(autoincrement())
+  service              String
+  instanceType         String   // e.g. "t3.medium"
+  recommendedCount     Int
+  onDemandMonthlyCost  Float
+  reservedMonthlyCost  Float
+  estimatedSavingUsd   Float
+  term                 String   @default("1yr")  // "1yr" | "3yr"
+  generatedAt          DateTime @default(now())
+}
