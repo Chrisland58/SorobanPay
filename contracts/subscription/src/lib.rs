@@ -735,6 +735,95 @@ impl SubscriptionProtocol {
         Ok(())
     }
 
+    /// Update an existing subscription's amount and/or interval.
+    ///
+    /// Only the subscriber may update their own subscription. The subscription must already
+    /// exist — use `subscribe` to create a new one.
+    ///
+    /// # Authorization
+    /// Requires a valid signature from `subscriber` in the transaction auth envelope.
+    ///
+    /// # Parameters
+    /// - `subscriber`: Account whose subscription is being updated.
+    /// - `merchant`:   Merchant of the existing subscription.
+    /// - `token`:      SEP-41 token contract address (must match the stored token).
+    /// - `amount`:     New payment amount per interval. Must be > 0 and <= 10^18.
+    /// - `interval`:   New seconds between payments. Must be in [86400, 31536000].
+    ///
+    /// # Errors
+    /// - `ContractError::NoActiveSubscription` — if no subscription exists for the pair.
+    /// - `ContractError::SelfSubscription`     — if `subscriber == merchant`.
+    /// - `ContractError::AmountMustBePositive` — if `amount <= 0`.
+    /// - `ContractError::AmountTooLarge`       — if `amount > 10^18`.
+    /// - `ContractError::IntervalTooShort`     — if `interval < 86400`.
+    /// - `ContractError::IntervalTooLong`      — if `interval > 31536000`.
+    pub fn update_subscription(
+        env: Env,
+        subscriber: Address,
+        merchant: Address,
+        token: Address,
+        amount: i128,
+        interval: u64,
+    ) -> Result<(), ContractError> {
+        // 1. Authorization — subscriber must authorise the update.
+        subscriber.require_auth();
+
+        // 2. Reject self-subscriptions.
+        if subscriber == merchant {
+            return Err(ContractError::SelfSubscription);
+        }
+
+        // 3. Validate amount.
+        if amount <= 0 {
+            return Err(ContractError::AmountMustBePositive);
+        }
+        if amount > MAX_AMOUNT {
+            return Err(ContractError::AmountTooLarge);
+        }
+
+        // 4. Validate interval.
+        if interval < 86_400 {
+            return Err(ContractError::IntervalTooShort);
+        }
+        if interval > 31_536_000 {
+            return Err(ContractError::IntervalTooLong);
+        }
+
+        // 5. Build the key — MUST use the same DataKey variant as subscribe(),
+        //    execute_payment(), and cancel() so we read/write the same storage slot.
+        //    Using any other form (e.g. a hashed or differently-ordered key) would
+        //    cause a storage miss and return NoActiveSubscription even when a
+        //    subscription exists.
+        let key = DataKey::Subscription(subscriber.clone(), merchant.clone());
+
+        // 6. Load existing subscription — error if absent.
+        let mut data: SubscriptionData = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .ok_or(ContractError::NoActiveSubscription)?;
+
+        // 7. Apply the updates (token, amount, interval).
+        //    next_payment is intentionally preserved — updating the subscription
+        //    does not reset the billing clock.
+        data.token    = token.clone();
+        data.amount   = amount;
+        data.interval = interval;
+
+        // 8. Persist the updated record.
+        env.storage().persistent().set(&key, &data);
+
+        // 9. Extend TTL so the entry survives at least MIN_TTL_LEDGERS from now.
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, MIN_TTL_LEDGERS, MAX_TTL_LEDGERS);
+
+        // 10. Emit a subscribe event to signal the update to off-chain indexers.
+        events::emit_subscribe(&env, &subscriber, &merchant, &token, amount);
+
+        Ok(())
+    }
+
     /// Query active subscription details for a subscriber-merchant pair.
     ///
     /// This is a read-only view function that returns subscription state without
