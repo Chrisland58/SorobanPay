@@ -1,246 +1,159 @@
-/**
- * #735 — Analytics and event tracking API routes.
- *
- * Routes:
- *   POST  /api/v1/analytics/events          — Track a custom event
- *   POST  /api/v1/analytics/pageview        — Track a page view
- *   POST  /api/v1/analytics/consent         — Record GDPR consent
- *   GET   /api/v1/analytics/consent         — Get consent for user/session
- *   GET   /api/v1/analytics/dashboard       — Aggregated dashboard stats
- *   GET   /api/v1/analytics/users/:userId   — User event profile
- *   GET   /api/v1/analytics/users/:userId/events — Recent events for user
- */
-
 import { Router, Request, Response } from 'express';
-import {
-  trackEvent,
-  trackPageView,
-  recordConsent,
-  getConsent,
-  getDashboardStats,
-  getUserEventProfile,
-  getRecentEventsForUser,
-} from '../services/analyticsService';
+import prisma from '../lib/prisma';
+
+/**
+ * Analytics router — BE-52 / FE-50
+ *
+ * GET /api/v1/analytics/revenue
+ *   Query params:
+ *     merchant {string} — required merchant Stellar address
+ *     period   {string} — '30d' | '90d' | 'all'  (default: '30d')
+ *
+ * Response:
+ * {
+ *   period: string,
+ *   merchant: string,
+ *   mrr: { month: string, label: string, revenue: string, paymentCount: number }[],
+ *   activeSubscribers: number,
+ *   totalRevenue: string,
+ *   successRate: number,    // 0-100
+ *   executedCount: number,
+ *   failureCount: number,
+ *   events: Event[]        // raw events for client-side computation
+ * }
+ */
 
 const router = Router();
 
-// ---------------------------------------------------------------------------
-// Track custom event
-// ---------------------------------------------------------------------------
+/** Returns a Date representing `days` ago from now, or null for 'all'. */
+function cutoffDate(period: string): Date | null {
+  if (period === 'all') return null;
+  const days = period === '90d' ? 90 : 30;
+  const d = new Date();
+  d.setDate(d.getDate() - days);
+  return d;
+}
 
 /**
- * POST /events
- * Body: { eventName, userId?, anonymousId?, sessionId?, properties?, page?, referrer? }
- * Headers: User-Agent used for tracking
+ * Format a ledger Unix timestamp (seconds, BigInt) to "YYYY-MM" month key.
  */
-router.post('/events', async (req: Request, res: Response) => {
-  const {
-    eventName, userId, anonymousId, sessionId,
-    properties, page, referrer, consentGiven,
-  } = req.body ?? {};
+function ledgerToMonthKey(ledgerTs: bigint): string {
+  const d = new Date(Number(ledgerTs) * 1000);
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  return `${y}-${m}`;
+}
 
-  if (!eventName || typeof eventName !== 'string') {
-    return res.status(400).json({ error: 'eventName is required' });
+/**
+ * Format a "YYYY-MM" key to a short label like "Jan 24".
+ */
+function monthKeyToLabel(key: string): string {
+  const [year, month] = key.split('-').map(Number);
+  const d = new Date(year, month - 1, 1);
+  return d.toLocaleDateString('en-US', { month: 'short', year: '2-digit' });
+}
+
+// GET /v1/analytics/revenue?merchant=...&period=30d|90d|all
+router.get('/revenue', async (req: Request, res: Response) => {
+  const merchant = req.query.merchant as string | undefined;
+  const period = (req.query.period as string) || '30d';
+
+  if (!merchant) {
+    return res.status(400).json({ error: 'merchant query parameter is required' });
   }
 
-  if (!userId && !anonymousId) {
-    return res.status(400).json({ error: 'Either userId or anonymousId is required' });
+  const validPeriods = ['30d', '90d', 'all'];
+  if (!validPeriods.includes(period)) {
+    return res
+      .status(400)
+      .json({ error: `period must be one of: ${validPeriods.join(', ')}` });
   }
 
   try {
-    const ip = String(req.headers['x-forwarded-for'] ?? req.socket.remoteAddress ?? '');
-    const userAgent = String(req.headers['user-agent'] ?? '');
+    const cutoff = cutoffDate(period);
 
-    const eventId = await trackEvent({
-      eventName, userId, anonymousId, sessionId,
-      properties, page, referrer,
-      userAgent, ip,
-      consentGiven: Boolean(consentGiven),
+    // ── Build WHERE clause ─────────────────────────────────────────────────
+    const dateFilter =
+      cutoff !== null
+        ? { ledgerTimestamp: { gte: BigInt(Math.floor(cutoff.getTime() / 1000)) } }
+        : {};
+
+    // Fetch all relevant events for this merchant
+    const events = await prisma.event.findMany({
+      where: {
+        merchant,
+        ...dateFilter,
+      },
+      orderBy: { ledgerTimestamp: 'asc' },
     });
 
-    return res.status(201).json({ success: true, eventId });
-  } catch (err) {
-    console.error('[analytics route] track event error:', err);
-    return res.status(500).json({ error: 'Internal server error' });
-  }
-});
+    // ── MRR by month ───────────────────────────────────────────────────────
+    const mrrMap = new Map<
+      string,
+      { revenue: bigint; paymentCount: number }
+    >();
 
-// ---------------------------------------------------------------------------
-// Track page view
-// ---------------------------------------------------------------------------
-
-/**
- * POST /pageview
- * Body: { page, userId?, anonymousId?, sessionId?, referrer? }
- */
-router.post('/pageview', async (req: Request, res: Response) => {
-  const { page, userId, anonymousId, sessionId, referrer, consentGiven } = req.body ?? {};
-
-  if (!page || typeof page !== 'string') {
-    return res.status(400).json({ error: 'page is required' });
-  }
-
-  try {
-    const ip = String(req.headers['x-forwarded-for'] ?? req.socket.remoteAddress ?? '');
-    const userAgent = String(req.headers['user-agent'] ?? '');
-
-    const eventId = await trackPageView({
-      page, userId, anonymousId, sessionId, referrer,
-      userAgent, ip,
-      consentGiven: Boolean(consentGiven),
-    });
-
-    return res.status(201).json({ success: true, eventId });
-  } catch (err) {
-    console.error('[analytics route] page view error:', err);
-    return res.status(500).json({ error: 'Internal server error' });
-  }
-});
-
-// ---------------------------------------------------------------------------
-// Consent management (GDPR)
-// ---------------------------------------------------------------------------
-
-/**
- * POST /consent
- * Body: { userId?, anonymousId?, analytics, marketing, functional? }
- *
- * Must be called before tracking PII-containing events.
- */
-router.post('/consent', async (req: Request, res: Response) => {
-  const { userId, anonymousId, analytics, marketing, functional } = req.body ?? {};
-
-  if (typeof analytics !== 'boolean' || typeof marketing !== 'boolean') {
-    return res.status(400).json({ error: 'analytics and marketing (boolean) are required' });
-  }
-
-  if (!userId && !anonymousId) {
-    return res.status(400).json({ error: 'Either userId or anonymousId is required' });
-  }
-
-  try {
-    const ip = String(req.headers['x-forwarded-for'] ?? req.socket.remoteAddress ?? '');
-    const userAgent = String(req.headers['user-agent'] ?? '');
-
-    const consentId = await recordConsent({
-      userId, anonymousId, analytics, marketing,
-      functional: functional ?? true,
-      ip, userAgent,
-    });
-
-    return res.status(201).json({
-      success: true,
-      consentId,
-      message: 'Consent recorded',
-    });
-  } catch (err) {
-    console.error('[analytics route] consent error:', err);
-    return res.status(500).json({ error: 'Internal server error' });
-  }
-});
-
-/**
- * GET /consent?userId=&anonymousId=
- */
-router.get('/consent', async (req: Request, res: Response) => {
-  const { userId, anonymousId } = req.query;
-
-  if (!userId && !anonymousId) {
-    return res.status(400).json({ error: 'userId or anonymousId query param required' });
-  }
-
-  try {
-    const record = await getConsent(
-      userId as string | undefined,
-      anonymousId as string | undefined,
-    );
-
-    if (!record) {
-      return res.status(404).json({ error: 'No consent record found' });
+    for (const e of events) {
+      if (e.type !== 'executed') continue;
+      const key = ledgerToMonthKey(e.ledgerTimestamp);
+      const existing = mrrMap.get(key) ?? { revenue: 0n, paymentCount: 0 };
+      mrrMap.set(key, {
+        revenue: existing.revenue + BigInt(e.amount || '0'),
+        paymentCount: existing.paymentCount + 1,
+      });
     }
+
+    const mrr = Array.from(mrrMap.entries())
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([key, val]) => ({
+        month: key,
+        label: monthKeyToLabel(key),
+        revenue: val.revenue.toString(),
+        paymentCount: val.paymentCount,
+      }));
+
+    // ── Total revenue ──────────────────────────────────────────────────────
+    const totalRevenue = events
+      .filter((e) => e.type === 'executed')
+      .reduce((sum, e) => sum + BigInt(e.amount || '0'), 0n)
+      .toString();
+
+    // ── Active subscribers ─────────────────────────────────────────────────
+    const subscriberSet = new Set<string>();
+    for (const e of events) {
+      if (e.type === 'subscribe') subscriberSet.add(e.subscriber);
+    }
+    const activeSubscribers = subscriberSet.size;
+
+    // ── Success rate ───────────────────────────────────────────────────────
+    const executedCount = events.filter((e) => e.type === 'executed').length;
+    const failureCount = events.filter(
+      (e) => e.type === 'payment_transfer_failure',
+    ).length;
+    const total = executedCount + failureCount;
+    const successRate =
+      total > 0 ? Math.round((executedCount / total) * 100) : 100;
+
+    // Serialize BigInt fields for JSON
+    const serializedEvents = events.map((e) => ({
+      ...e,
+      ledgerTimestamp: e.ledgerTimestamp.toString(),
+    }));
 
     return res.json({
-      id:          record.id,
-      analytics:   record.analytics,
-      marketing:   record.marketing,
-      functional:  record.functional,
-      createdAt:   record.createdAt,
-      updatedAt:   record.updatedAt,
+      period,
+      merchant,
+      mrr,
+      activeSubscribers,
+      totalRevenue,
+      successRate,
+      executedCount,
+      failureCount,
+      events: serializedEvents,
     });
-  } catch (err) {
-    console.error('[analytics route] consent get error:', err);
-    return res.status(500).json({ error: 'Internal server error' });
-  }
-});
-
-// ---------------------------------------------------------------------------
-// Dashboard
-// ---------------------------------------------------------------------------
-
-/**
- * GET /dashboard?startDate=&endDate=
- * Returns aggregated analytics for the given date range (default: last 30 days).
- */
-router.get('/dashboard', async (req: Request, res: Response) => {
-  let startDate: Date | undefined;
-  let endDate: Date | undefined;
-
-  if (req.query.startDate) {
-    startDate = new Date(String(req.query.startDate));
-    if (isNaN(startDate.getTime())) {
-      return res.status(400).json({ error: 'Invalid startDate' });
-    }
-  }
-
-  if (req.query.endDate) {
-    endDate = new Date(String(req.query.endDate));
-    if (isNaN(endDate.getTime())) {
-      return res.status(400).json({ error: 'Invalid endDate' });
-    }
-  }
-
-  try {
-    const stats = await getDashboardStats(startDate, endDate);
-    return res.json(stats);
-  } catch (err) {
-    console.error('[analytics route] dashboard error:', err);
-    return res.status(500).json({ error: 'Internal server error' });
-  }
-});
-
-// ---------------------------------------------------------------------------
-// User profiles
-// ---------------------------------------------------------------------------
-
-/**
- * GET /users/:userId
- * Returns event counts per name for a user.
- */
-router.get('/users/:userId', async (req: Request, res: Response) => {
-  const userId = String(req.params.userId);
-
-  try {
-    const profile = await getUserEventProfile(userId);
-    return res.json({ userId, events: profile.map((p: { eventName: string; _count: { eventName: number } }) => ({ eventName: p.eventName, count: p._count.eventName })) });
-  } catch (err) {
-    console.error('[analytics route] user profile error:', err);
-    return res.status(500).json({ error: 'Internal server error' });
-  }
-});
-
-/**
- * GET /users/:userId/events?limit=50
- */
-router.get('/users/:userId/events', async (req: Request, res: Response) => {
-  const userId = String(req.params.userId);
-  const limit = Math.min(parseInt(String(req.query.limit ?? '50'), 10), 200);
-
-  try {
-    const events = await getRecentEventsForUser(userId, limit);
-    return res.json({ userId, count: events.length, events });
-  } catch (err) {
-    console.error('[analytics route] user events error:', err);
-    return res.status(500).json({ error: 'Internal server error' });
+  } catch (error) {
+    console.error('[analytics] Failed to compute revenue metrics:', error);
+    return res.status(500).json({ error: 'Failed to compute analytics data' });
   }
 });
 
