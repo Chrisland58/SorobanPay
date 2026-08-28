@@ -1,14 +1,9 @@
 /**
  * cancel_builder.ts
  *
- * Builds, signs, and submits a `cancel` transaction to the SorobanPay contract.
+ * Builds, signs, and submits the `cancel` contract call for SorobanPay.
  *
- * Flow:
- *   1. Fetch account sequence number from Soroban RPC
- *   2. Build transaction with `cancel` contract call
- *   3. prepareTransaction (simulates and fills resource fees)
- *   4. Sign with Freighter via signTx()
- *   5. Submit and poll for confirmation (up to 60 seconds)
+ * Mirrors the buildAndSubmitSubscribe pattern in transaction_builder.ts.
  */
 
 import {
@@ -19,41 +14,30 @@ import {
 } from '@stellar/stellar-sdk';
 import { SorobanRpc } from '@stellar/stellar-sdk';
 import { signTx } from './wallet_manager';
-import { isValidGAddress } from './validation';
 
-// ── Types ─────────────────────────────────────────────────────────────────────
-
-/** Parameters for cancelling an existing subscription */
 export interface CancelParams {
-  /** Subscriber Stellar G-address — must be the currently connected wallet */
+  /** Subscriber Stellar G-address (the signer) */
   subscriber: string;
   /** Merchant Stellar G-address */
   merchant: string;
 }
 
-/** Result of a successful cancel transaction */
 export interface CancelResult {
-  /** Transaction hash on Stellar network */
   txHash: string;
 }
 
-// ── Constants ─────────────────────────────────────────────────────────────────
-
-const POLL_INTERVAL_MS  = 1_000;
-const MAX_POLL_ATTEMPTS = 60; // 60 seconds total
-
-// ── Main function ─────────────────────────────────────────────────────────────
+const POLL_INTERVAL_MS = 1_000;
+const MAX_POLL_ATTEMPTS = 60;
 
 /**
  * Build, sign, and submit a `cancel` transaction to the SorobanPay contract.
  *
- * @param params            Cancel parameters (subscriber + merchant)
+ * @param params            Subscriber and merchant addresses
  * @param contractId        Deployed SorobanPay contract address
- * @param publicKey         Connected subscriber's public key (from Freighter)
+ * @param publicKey         Subscriber's connected public key (from Freighter)
  * @param networkPassphrase Stellar network passphrase
  * @param rpcUrl            Soroban RPC endpoint URL
  * @returns                 Transaction hash of the confirmed transaction
- * @throws                  On any failure: construction, signing, submission, or timeout
  */
 export async function buildAndSubmitCancel(
   params: CancelParams,
@@ -62,22 +46,13 @@ export async function buildAndSubmitCancel(
   networkPassphrase: string,
   rpcUrl: string,
 ): Promise<CancelResult> {
-  // 0. Validate addresses before making any network calls.
-  if (!isValidGAddress(params.subscriber)) {
-    throw new Error(`Invalid subscriber address: ${params.subscriber}`);
-  }
-  if (!isValidGAddress(params.merchant)) {
-    throw new Error(`Invalid merchant address: ${params.merchant}`);
-  }
-
   const server = new SorobanRpc.Server(rpcUrl, { allowHttp: false });
 
-  // 1. Fetch account sequence number.
+  // 1. Fetch account
   const account = await server.getAccount(publicKey);
 
-  // 2. Build transaction with the `cancel` contract call.
+  // 2. Build transaction
   const contract = new Contract(contractId);
-
   const tx = new TransactionBuilder(account, {
     fee: BASE_FEE,
     networkPassphrase,
@@ -92,7 +67,7 @@ export async function buildAndSubmitCancel(
     .setTimeout(30)
     .build();
 
-  // 3. Prepare transaction (simulation + resource fee injection).
+  // 3. Prepare (simulate + inject resource fees)
   let preparedTx: ReturnType<typeof TransactionBuilder.fromXDR>;
   try {
     preparedTx = await server.prepareTransaction(tx);
@@ -101,11 +76,11 @@ export async function buildAndSubmitCancel(
     throw new Error(`Transaction preparation failed: ${msg}`);
   }
 
-  // 4. Sign with Freighter.
+  // 4. Sign with Freighter
   const signedXdr = await signTx(preparedTx.toXDR(), networkPassphrase);
 
-  // 5. Submit.
-  const parsedTx  = TransactionBuilder.fromXDR(signedXdr, networkPassphrase);
+  // 5. Submit
+  const parsedTx = TransactionBuilder.fromXDR(signedXdr, networkPassphrase);
   const sendResult = await server.sendTransaction(parsedTx);
 
   if (sendResult.status === 'ERROR') {
@@ -114,13 +89,10 @@ export async function buildAndSubmitCancel(
     );
   }
 
-  // 6. Poll for confirmation.
+  // 6. Poll for confirmation
   const txHash = await pollForConfirmation(server, sendResult.hash);
-
   return { txHash };
 }
-
-// ── Polling helper ────────────────────────────────────────────────────────────
 
 async function pollForConfirmation(
   server: SorobanRpc.Server,
@@ -128,23 +100,16 @@ async function pollForConfirmation(
 ): Promise<string> {
   for (let attempt = 0; attempt < MAX_POLL_ATTEMPTS; attempt++) {
     await sleep(POLL_INTERVAL_MS);
-
     const result = await server.getTransaction(hash);
 
     if (result.status === SorobanRpc.Api.GetTransactionStatus.SUCCESS) {
       return hash;
     }
-
     if (result.status === SorobanRpc.Api.GetTransactionStatus.FAILED) {
       const meta = (result as SorobanRpc.Api.GetFailedTransactionResponse).resultMetaXdr;
-      throw new Error(
-        `Transaction failed on-chain: ${meta ?? 'no result meta available'}`,
-      );
+      throw new Error(`Transaction failed on-chain: ${meta ?? 'no result meta available'}`);
     }
-
-    // status === NOT_FOUND — still in mempool, continue polling
   }
-
   throw new Error(
     `Transaction confirmation timeout after ${MAX_POLL_ATTEMPTS} seconds. Hash: ${hash}`,
   );
