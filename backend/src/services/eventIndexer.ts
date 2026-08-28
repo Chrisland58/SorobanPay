@@ -110,6 +110,7 @@ export class EventIndexer {
           token: token,
           amount: amount,
           ledgerTimestamp: BigInt(event.ledger),
+          transactionHash: event.id, // unique Soroban event ID
         },
       });
 

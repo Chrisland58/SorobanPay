@@ -9,6 +9,7 @@ import { PaymentScheduler } from './services/paymentScheduler';
 import summariesRouter from './routes/summaries';
 import subscriptionsRouter from './routes/subscriptions';
 import auditLogsRouter from './routes/auditLogs';
+import settlementsRouter from './routes/settlements';
 import { apiLimiter } from './middleware/rateLimiter';
 
 const app = express();
@@ -23,6 +24,7 @@ app.use(apiLimiter);
 app.use('/api/summaries', summariesRouter);
 app.use('/api/subscriptions', subscriptionsRouter);
 app.use('/api/audit-logs', auditLogsRouter);
+app.use('/api/settlements', settlementsRouter);
 
 // Initialize services
 const rpcUrl = process.env.RPC_URL || 'https://soroban-testnet.stellar.org';

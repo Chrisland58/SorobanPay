@@ -13,14 +13,15 @@ datasource db {
 }
 
 model Event {
-  id            Int      @id @default(autoincrement())
-  type          String   // "subscribe" or "executed"
-  subscriber    String
-  merchant      String
-  token         String
-  amount        String   // Store as string to handle big integers
+  id              Int      @id @default(autoincrement())
+  type            String   // "subscribe" | "executed" | "payment_transfer_failure" | "cancel"
+  subscriber      String
+  merchant        String
+  token           String
+  amount          String   // Store as string to handle big integers
   ledgerTimestamp BigInt
-  createdAt     DateTime @default(now())
+  transactionHash String?  // Soroban event ID; populated by EventIndexer
+  createdAt       DateTime @default(now())
 }
 
 model AuditLog {
@@ -69,4 +70,124 @@ model WebhookDelivery {
   success    Boolean
   error      String?
   createdAt  DateTime @default(now())
+}
+
+// ─── Settlement Aggregation (#712) ───────────────────────────────────────────
+
+model SettlementBatch {
+  id                  Int                    @id @default(autoincrement())
+  batchRef            String                 @unique  // e.g. "SETTLE-2024-01-01-USDC-merchant"
+  merchant            String
+  currency            String                          // token address
+  windowStart         DateTime
+  windowEnd           DateTime
+  grossAmount         String                          // sum of all payments (bigint as string)
+  feeAmount           String                 @default("0")
+  netAmount           String                          // grossAmount - feeAmount
+  paymentCount        Int
+  status              String                 @default("pending")  // pending|processing|partial|confirmed|failed
+  partialPaidAmount   String                 @default("0")        // for partial settlements
+  confirmedAt         DateTime?
+  instructions        String?                          // JSON blob of settlement instructions
+  createdAt           DateTime               @default(now())
+  updatedAt           DateTime               @updatedAt
+
+  payments            SettlementPayment[]
+  statusHistory       SettlementStatusHistory[]
+}
+
+model SettlementPayment {
+  id              Int             @id @default(autoincrement())
+  batchId         Int
+  transactionHash String          @unique
+  subscriber      String
+  merchant        String
+  amount          String
+  currency        String
+  ledgerTimestamp BigInt
+  createdAt       DateTime        @default(now())
+
+  batch           SettlementBatch @relation(fields: [batchId], references: [id])
+}
+
+model SettlementStatusHistory {
+  id          Int             @id @default(autoincrement())
+  batchId     Int
+  fromStatus  String
+  toStatus    String
+  reason      String?
+  createdAt   DateTime        @default(now())
+
+  batch       SettlementBatch @relation(fields: [batchId], references: [id])
+}
+
+// ─── Payment State Machine (#711) ────────────────────────────────────────────
+
+model PaymentRecord {
+  id              Int                    @id @default(autoincrement())
+  paymentRef      String                 @unique   // idempotency key, e.g. "{subscriber}:{merchant}:{ledger}"
+  subscriber      String
+  merchant        String
+  token           String
+  amount          String
+  currentState    String                 @default("pending")
+  // pending|authorised|processing|executed|failed|refunded|cancelled|timed_out
+  lastTransitionAt DateTime              @default(now())
+  createdAt       DateTime               @default(now())
+  updatedAt       DateTime               @updatedAt
+
+  stateHistory    PaymentStateHistory[]
+}
+
+model PaymentStateHistory {
+  id          Int           @id @default(autoincrement())
+  paymentId   Int
+  fromState   String
+  toState     String
+  triggeredBy String                    // event name or actor
+  metadata    String?                   // optional JSON
+  createdAt   DateTime      @default(now())
+
+  payment     PaymentRecord @relation(fields: [paymentId], references: [id])
+}
+
+// ─── Scaling Policies (#709) ──────────────────────────────────────────────────
+
+model ScalingEvent {
+  id          Int      @id @default(autoincrement())
+  service     String                // e.g. "event-indexer", "payment-scheduler"
+  direction   String                // "scale-up" | "scale-down"
+  trigger     String                // "cpu" | "memory" | "queue_depth" | "request_rate" | "predictive"
+  metricValue Float                 // observed metric value at trigger time
+  threshold   Float                 // threshold that was breached
+  fromReplicas Int
+  toReplicas  Int
+  cooldownEndsAt DateTime
+  createdAt   DateTime @default(now())
+}
+
+model ScalingPolicy {
+  id             Int      @id @default(autoincrement())
+  service        String   @unique
+  minReplicas    Int      @default(1)
+  maxReplicas    Int      @default(10)
+  cpuThresholdUp Float    @default(70)   // % to scale up
+  cpuThresholdDown Float  @default(30)   // % to scale down
+  memThresholdUp Float    @default(80)
+  memThresholdDown Float  @default(40)
+  scaleUpCooldownSec  Int @default(180)  // 3 minutes
+  scaleDownCooldownSec Int @default(600) // 10 minutes
+  enabled        Boolean  @default(true)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+}
+
+model PredictiveScalingSchedule {
+  id           Int      @id @default(autoincrement())
+  service      String
+  label        String                   // human label, e.g. "end-of-month settlement"
+  cronExpr     String                   // when to pre-warm
+  targetReplicas Int
+  active       Boolean  @default(true)
+  createdAt    DateTime @default(now())
 }
