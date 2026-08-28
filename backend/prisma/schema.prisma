@@ -1,0 +1,108 @@
+// schema.prisma — SorobanPay backend database schema
+//
+// Run `npx prisma validate` to confirm this file is valid.
+// Run `npx prisma migrate dev` to apply migrations.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─── Tenant ───────────────────────────────────────────────────────────────────
+
+/// A SaaS tenant (merchant) that uses SorobanPay to collect recurring payments.
+model Tenant {
+  id              String          @id @default(cuid())
+  stellarAddress  String          @unique
+  name            String
+  email           String          @unique
+  isActive        Boolean         @default(true)
+  protocolFeeBps  Int             @default(50)   // basis points, default 0.5 %
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+
+  subscriptions   Subscription[]
+  paymentRetries  PaymentRetry[]
+
+  @@map("tenants")
+}
+
+// ─── Subscription ─────────────────────────────────────────────────────────────
+
+/// Off-chain mirror of on-chain SubscriptionData, kept in sync by an event indexer.
+model Subscription {
+  id                String    @id @default(cuid())
+  tenantId          String
+  subscriberAddress String
+  merchantAddress   String
+  tokenAddress      String
+  amount            BigInt
+  intervalSeconds   Int
+  nextPaymentAt     DateTime
+  isPaused          Boolean   @default(false)
+  pausedUntil       DateTime?
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  tenant          Tenant         @relation(fields: [tenantId], references: [id])
+  paymentRetries  PaymentRetry[]
+
+  @@unique([subscriberAddress, merchantAddress])
+  @@map("subscriptions")
+}
+
+// ─── PaymentRetry ─────────────────────────────────────────────────────────────
+//
+// Previously this model existed as two separate blocks in this file (duplicate).
+// They have been merged into a single model keeping the superset of all fields
+// from both original blocks.
+
+/// Tracks failed payment execution attempts and retry scheduling.
+model PaymentRetry {
+  id              String    @id @default(cuid())
+  subscriptionId  String
+  tenantId        String
+
+  // Core retry metadata (from first block)
+  attemptNumber   Int       @default(1)
+  failureReason   String?
+  lastAttemptAt   DateTime  @default(now())
+  nextRetryAt     DateTime?
+  isResolved      Boolean   @default(false)
+  resolvedAt      DateTime?
+
+  // Extended metadata (from second block)
+  txHash          String?
+  errorCode       Int?
+  errorMessage    String?
+  retryCount      Int       @default(0)
+  maxRetries      Int       @default(3)
+  backoffSeconds  Int       @default(3600)
+
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  subscription    Subscription @relation(fields: [subscriptionId], references: [id])
+  tenant          Tenant       @relation(fields: [tenantId], references: [id])
+
+  @@map("payment_retries")
+}
+
+// ─── AdminMetrics (materialized snapshot) ─────────────────────────────────────
+
+/// Snapshot of protocol-wide metrics, refreshed by a scheduled job.
+model AdminMetrics {
+  id                  String   @id @default(cuid())
+  totalSubscriptions  Int      @default(0)
+  activeSubscriptions Int      @default(0)
+  totalVolumeUsd      Decimal  @default(0) @db.Decimal(18, 6)
+  totalFeesCollected  Decimal  @default(0) @db.Decimal(18, 6)
+  activeTenants       Int      @default(0)
+  snapshotAt          DateTime @default(now())
+
+  @@map("admin_metrics")
+}
