@@ -97,3 +97,126 @@ model NotificationPreference {
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 }
+
+// #732: SMS notification service
+model SmsLog {
+  id          Int      @id @default(autoincrement())
+  to          String   // recipient phone number (E.164)
+  body        String
+  templateId  String?
+  variables   String?  // JSON string of template variables
+  provider    String   // "twilio" | "vonage"
+  messageId   String?  // provider message SID/ID
+  status      String   @default("queued") // queued | sent | delivered | failed | undelivered
+  errorCode   String?
+  errorMsg    String?
+  userId      String   // internal user identifier
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+model SmsOptOut {
+  id          Int      @id @default(autoincrement())
+  phoneNumber String   @unique // E.164 format
+  userId      String?
+  createdAt   DateTime @default(now())
+}
+
+// #733: Push notification service
+model PushToken {
+  id        Int      @id @default(autoincrement())
+  userId    String
+  token     String
+  platform  String   // "ios" | "android" | "web"
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([userId, token])
+}
+
+model UserSegment {
+  id          Int      @id @default(autoincrement())
+  name        String   @unique
+  description String?
+  filter      String   // JSON filter criteria
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+model PushNotification {
+  id          Int      @id @default(autoincrement())
+  title       String
+  body        String
+  imageUrl    String?
+  deepLink    String?
+  data        String?  // JSON custom payload
+  segment     String?  // segment name or null (broadcast)
+  userId      String?  // single-user target (overrides segment)
+  scheduledAt DateTime?
+  sentAt      DateTime?
+  status      String   @default("pending") // pending | sending | sent | failed
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+model PushDelivery {
+  id               Int      @id @default(autoincrement())
+  notificationId   Int
+  userId           String
+  token            String
+  platform         String
+  status           String   @default("pending") // pending | delivered | failed
+  errorCode        String?
+  errorMsg         String?
+  sentAt           DateTime?
+  createdAt        DateTime @default(now())
+}
+
+// #734: Data import service
+model ImportJob {
+  id            Int      @id @default(autoincrement())
+  userId        String
+  format        String   // "csv" | "json" | "xml"
+  filename      String
+  status        String   @default("pending") // pending | validating | previewing | processing | done | failed | rolled_back
+  totalRows     Int?
+  processedRows Int      @default(0)
+  errorCount    Int      @default(0)
+  errors        String?  // JSON array of validation errors
+  preview       String?  // JSON preview rows
+  duplicates    String?  // JSON duplicate info
+  strategy      String   @default("skip") // skip | overwrite | merge
+  rollbackData  String?  // JSON snapshot for rollback
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+}
+
+// #735: Analytics and event tracking
+model AnalyticsEvent {
+  id           Int      @id @default(autoincrement())
+  eventName    String
+  userId       String?  // null if anonymous
+  anonymousId  String?
+  sessionId    String?
+  properties   String?  // JSON event properties
+  page         String?
+  referrer     String?
+  userAgent    String?
+  ipHash       String?  // hashed for privacy
+  consentGiven Boolean  @default(false)
+  createdAt    DateTime @default(now())
+}
+
+model ConsentRecord {
+  id          Int      @id @default(autoincrement())
+  userId      String?
+  anonymousId String?
+  analytics   Boolean  @default(false)
+  marketing   Boolean  @default(false)
+  functional  Boolean  @default(true)
+  ipHash      String?
+  userAgent   String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}

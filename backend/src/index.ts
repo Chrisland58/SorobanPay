@@ -22,10 +22,15 @@ import reconcileRouter from './routes/reconcile';
 import subscriptionsRouter from './routes/subscriptions';
 import webhooksRouter from './routes/webhooks';
 import notificationsRouter from './routes/notifications';
+import smsRouter from './routes/sms';
+import pushRouter from './routes/push';
+import dataImportRouter from './routes/dataImport';
+import analyticsRouter from './routes/analytics';
 import versionRouter from './routes/version';
 import { buildHealthRouter } from './routes/health';
 import { reconcile } from './services/reconciler';
 import { PrismaSubscriptionDB, fetchChainEventsFromDB } from './services/reconciler';
+import { processScheduledNotifications } from './services/pushNotificationService';
 
 // ─── Config ─────────────────────────────────────────────────────────────────
 const config = validateConfig();
@@ -52,6 +57,10 @@ app.use('/api/v1/webhooks',      webhooksRouter);
 app.use('/api/v1/summaries',     summariesRouter);
 app.use('/api/v1/reconcile',     reconcileRouter);
 app.use('/api/v1/notifications', notificationsRouter);  // BE-68
+app.use('/api/v1/sms',           smsRouter);            // #732
+app.use('/api/v1/push',          pushRouter);           // #733
+app.use('/api/v1/import',        dataImportRouter);     // #734
+app.use('/api/v1/analytics',     analyticsRouter);      // #735
 
 // ─── Backward-compatible aliases — /api/ (no version prefix) ─────────────────
 // These keep existing integrations working and forward to v1 handlers.
@@ -60,6 +69,10 @@ app.use('/api/webhooks',      webhooksRouter);
 app.use('/api/summaries',     summariesRouter);
 app.use('/api/reconcile',     reconcileRouter);
 app.use('/api/notifications', notificationsRouter);
+app.use('/api/sms',           smsRouter);
+app.use('/api/push',          pushRouter);
+app.use('/api/import',        dataImportRouter);
+app.use('/api/analytics',     analyticsRouter);
 
 // GET /api  →  same version manifest
 app.use('/api', versionRouter);
@@ -113,6 +126,13 @@ cron.schedule('0 * * * *', async () => {
   } catch (err) {
     console.error('[cron] Reconciliation error:', err);
   }
+});
+
+// #733: Process scheduled push notifications every minute
+cron.schedule('* * * * *', async () => {
+  await processScheduledNotifications().catch(err =>
+    console.error('[cron] Scheduled push notifications error:', err)
+  );
 });
 
 // ─── Start ───────────────────────────────────────────────────────────────────
