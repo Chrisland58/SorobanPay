@@ -16,7 +16,11 @@
 
 import { useState, type FormEvent } from 'react';
 import { useWallet } from '@/hooks/useWallet';
-import { buildAndSubmitSubscribe } from '@/lib/transaction_builder';
+import {
+  buildAndSubmitSubscribe,
+  buildAndSubmitPauseSubscription,
+  buildAndSubmitResumeSubscription,
+} from '@/lib/transaction_builder';
 import {
   validateSubscriptionForm,
   isFormValid,
@@ -34,6 +38,9 @@ interface SuccessData {
   amount: string;
   interval: string;
 }
+
+/** State for the pause/resume controls shown inside the success card. */
+type PauseState = 'active' | 'pausing' | 'paused' | 'resuming';
 
 // ─── Shared input className (larger py for ≥48px touch target on mobile) ─────
 const inputCls =
@@ -127,11 +134,64 @@ function ProgressBar() {
 function SuccessCard({
   data,
   onReset,
+  publicKey,
 }: {
   data: SuccessData;
   onReset: () => void;
+  publicKey: string;
 }) {
   const days = Math.round(Number(data.interval) / 86400);
+
+  const [pauseState, setPauseState]   = useState<PauseState>('active');
+  const [pauseError, setPauseError]   = useState<string | null>(null);
+  const [pausedUntilTs, setPausedUntilTs] = useState<number>(0);
+  const [actionTxHash, setActionTxHash]   = useState<string | null>(null);
+
+  async function handlePause() {
+    setPauseError(null);
+    setPauseState('pausing');
+    try {
+      const result = await buildAndSubmitPauseSubscription(
+        { subscriber: publicKey, merchant: data.merchant },
+        0, // indefinite pause
+        CONTRACT_ID,
+        publicKey,
+        NETWORK_PASSPHRASE,
+        RPC_URL,
+      );
+      setActionTxHash(result.txHash);
+      setPausedUntilTs(0);
+      setPauseState('paused');
+    } catch (err) {
+      setPauseError(err instanceof Error ? err.message : String(err));
+      setPauseState('active');
+    }
+  }
+
+  async function handleResume() {
+    setPauseError(null);
+    setPauseState('resuming');
+    try {
+      const result = await buildAndSubmitResumeSubscription(
+        { subscriber: publicKey, merchant: data.merchant },
+        CONTRACT_ID,
+        publicKey,
+        NETWORK_PASSPHRASE,
+        RPC_URL,
+      );
+      setActionTxHash(result.txHash);
+      setPauseState('active');
+    } catch (err) {
+      setPauseError(err instanceof Error ? err.message : String(err));
+      setPauseState('paused');
+    }
+  }
+
+  const isPaused        = pauseState === 'paused' || pauseState === 'resuming';
+  const isBusy          = pauseState === 'pausing' || pauseState === 'resuming';
+  const isResumingNow   = pauseState === 'resuming';
+  const isPausingNow    = pauseState === 'pausing';
+
   return (
     <div
       role="alert"
@@ -157,6 +217,83 @@ function SuccessCard({
         <span className="font-medium">every {days} day{days !== 1 ? 's' : ''}</span>
         <span className="text-gray-400 font-medium break-all">Merchant</span>
         <span className="break-all font-mono text-xs">{data.merchant}</span>
+        <span className="text-gray-400 font-medium">Status</span>
+        <span className={`font-semibold ${isPaused ? 'text-yellow-400' : 'text-green-400'}`}>
+          {isPaused ? '⏸ Paused' : '▶ Active'}
+        </span>
+        {isPaused && pausedUntilTs === 0 && (
+          <>
+            <span className="text-gray-400 font-medium">Paused until</span>
+            <span className="text-yellow-300">Indefinite</span>
+          </>
+        )}
+      </div>
+
+      {/* Pause/resume action tx hash */}
+      {actionTxHash && (
+        <div className="bg-gray-800/50 rounded-lg p-3 border border-gray-700/50">
+          <p className="text-gray-400 text-xs mb-1.5 font-medium">
+            {isPaused ? 'Pause' : 'Resume'} transaction hash
+          </p>
+          <p className="text-gray-200 break-all font-mono text-xs leading-relaxed">{actionTxHash}</p>
+        </div>
+      )}
+
+      {/* Pause/Resume error */}
+      {pauseError && (
+        <div role="alert" className="rounded-lg bg-red-900/50 border border-red-600 p-3 text-xs text-red-200">
+          <p className="font-semibold mb-1">Action failed</p>
+          <p>{pauseError}</p>
+        </div>
+      )}
+
+      {/* Pause / Resume buttons */}
+      <div className="flex gap-3">
+        {!isPaused ? (
+          <button
+            onClick={handlePause}
+            disabled={isBusy}
+            aria-label="Pause subscription"
+            className="flex-1 flex items-center justify-center gap-2 rounded-lg border-2 border-yellow-600/70
+                       text-yellow-300 hover:bg-yellow-900/40 active:bg-yellow-900/60 disabled:opacity-50
+                       disabled:cursor-not-allowed py-3 text-sm font-semibold transition-all duration-150
+                       min-h-[48px] focus:outline-none focus:ring-2 focus:ring-yellow-500"
+          >
+            {isPausingNow ? (
+              <>
+                <svg className="animate-spin h-4 w-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" aria-hidden="true">
+                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
+                </svg>
+                Pausing…
+              </>
+            ) : (
+              <>⏸ Pause</>
+            )}
+          </button>
+        ) : (
+          <button
+            onClick={handleResume}
+            disabled={isBusy}
+            aria-label="Resume subscription"
+            className="flex-1 flex items-center justify-center gap-2 rounded-lg border-2 border-blue-600/70
+                       text-blue-300 hover:bg-blue-900/40 active:bg-blue-900/60 disabled:opacity-50
+                       disabled:cursor-not-allowed py-3 text-sm font-semibold transition-all duration-150
+                       min-h-[48px] focus:outline-none focus:ring-2 focus:ring-blue-500"
+          >
+            {isResumingNow ? (
+              <>
+                <svg className="animate-spin h-4 w-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" aria-hidden="true">
+                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
+                </svg>
+                Resuming…
+              </>
+            ) : (
+              <>▶ Resume</>
+            )}
+          </button>
+        )}
       </div>
 
       {/* Next steps */}
@@ -165,6 +302,7 @@ function SuccessCard({
         <ul className="list-disc list-inside space-y-2 text-gray-300 text-xs leading-relaxed">
           <li>The merchant can collect the first payment immediately.</li>
           <li>Subsequent payments are collectible every {days} day{days !== 1 ? 's' : ''}.</li>
+          <li>Use Pause to temporarily block payment collection.</li>
           <li>
             To cancel, call{' '}
             <code className="bg-gray-800 px-1.5 py-0.5 rounded text-green-300 text-xs">cancel(subscriber, merchant)</code>{' '}
@@ -272,7 +410,7 @@ export default function SubscriptionForm() {
       {isSubmitting && <ProgressBar />}
 
       {/* Success card */}
-      {successData && <SuccessCard data={successData} onReset={resetForm} />}
+      {successData && <SuccessCard data={successData} onReset={resetForm} publicKey={publicKey ?? ''} />}
 
       {/* Transaction error */}
       {txError && (

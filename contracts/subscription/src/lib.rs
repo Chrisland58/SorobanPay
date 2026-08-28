@@ -61,6 +61,8 @@ impl SubscriptionProtocol {
             amount,
             interval,
             next_payment,
+            is_paused:    false,
+            paused_until: 0,
         };
 
         // 5. Persist subscription.
@@ -85,6 +87,7 @@ impl SubscriptionProtocol {
     ///
     /// # Errors
     /// - `ContractError::NoActiveSubscription` — if no subscription exists for the pair.
+    /// - `ContractError::GracePeriodActive`    — if the subscription is currently paused.
     /// - `ContractError::PaymentNotDue`        — if the payment interval has not elapsed.
     /// - Propagated token contract errors      — if the transfer fails (insufficient allowance
     ///                                           or balance). SubscriptionData is NOT modified.
@@ -104,13 +107,24 @@ impl SubscriptionProtocol {
             .get(&key)
             .ok_or(ContractError::NoActiveSubscription)?;
 
-        // 3. Enforce time-lock.
+        // 3. Reject payment if subscription is paused.
         let now = env.ledger().timestamp();
+        if data.is_paused {
+            // Auto-resume if paused_until has elapsed (0 = indefinite pause).
+            if data.paused_until > 0 && now >= data.paused_until {
+                data.is_paused    = false;
+                data.paused_until = 0;
+            } else {
+                return Err(ContractError::GracePeriodActive);
+            }
+        }
+
+        // 4. Enforce time-lock.
         if now < data.next_payment {
             return Err(ContractError::PaymentNotDue);
         }
 
-        // 4. Execute token transfer (subscriber → merchant).
+        // 5. Execute token transfer (subscriber → merchant).
         //    If this panics/errors, no state mutation below will execute.
         token::Client::new(&env, &data.token).transfer(
             &subscriber,
@@ -118,18 +132,18 @@ impl SubscriptionProtocol {
             &data.amount,
         );
 
-        // 5. Advance next_payment — using the `now` captured at invocation start.
+        // 6. Advance next_payment — using the `now` captured at invocation start.
         data.next_payment = now + data.interval;
 
-        // 6. Persist updated subscription.
+        // 7. Persist updated subscription.
         env.storage().persistent().set(&key, &data);
 
-        // 7. Extend TTL.
+        // 8. Extend TTL.
         env.storage()
             .persistent()
             .extend_ttl(&key, MIN_TTL_LEDGERS, MAX_TTL_LEDGERS);
 
-        // 8. Emit event — after all mutations and transfer have succeeded.
+        // 9. Emit event — after all mutations and transfer have succeeded.
         events::emit_executed(&env, &subscriber, &merchant, data.amount);
 
         Ok(())
@@ -162,6 +176,78 @@ impl SubscriptionProtocol {
 
         // 3. Remove subscription from persistent storage.
         env.storage().persistent().remove(&key);
+
+        Ok(())
+    }
+
+    /// Pause an active subscription.
+    ///
+    /// While paused, `execute_payment` returns `GracePeriodActive` and no token
+    /// transfer occurs. If `pause_until` is 0 the pause is indefinite; otherwise
+    /// the subscription auto-resumes when the ledger timestamp reaches `pause_until`.
+    ///
+    /// # Authorization
+    /// Requires a valid signature from `subscriber`.
+    ///
+    /// # Errors
+    /// - `ContractError::NoActiveSubscription` — if no subscription exists.
+    pub fn pause_subscription(
+        env: Env,
+        subscriber: Address,
+        merchant: Address,
+        pause_until: u64,
+    ) -> Result<(), ContractError> {
+        subscriber.require_auth();
+
+        let key = DataKey::Subscription(subscriber.clone(), merchant.clone());
+        let mut data: SubscriptionData = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .ok_or(ContractError::NoActiveSubscription)?;
+
+        data.is_paused    = true;
+        data.paused_until = pause_until;
+
+        env.storage().persistent().set(&key, &data);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, MIN_TTL_LEDGERS, MAX_TTL_LEDGERS);
+
+        Ok(())
+    }
+
+    /// Resume a paused subscription immediately.
+    ///
+    /// Clears the `is_paused` flag and resets `paused_until` to 0.
+    /// If the subscription is not paused, this is a no-op (idempotent).
+    ///
+    /// # Authorization
+    /// Requires a valid signature from `subscriber`.
+    ///
+    /// # Errors
+    /// - `ContractError::NoActiveSubscription` — if no subscription exists.
+    pub fn resume_subscription(
+        env: Env,
+        subscriber: Address,
+        merchant: Address,
+    ) -> Result<(), ContractError> {
+        subscriber.require_auth();
+
+        let key = DataKey::Subscription(subscriber.clone(), merchant.clone());
+        let mut data: SubscriptionData = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .ok_or(ContractError::NoActiveSubscription)?;
+
+        data.is_paused    = false;
+        data.paused_until = 0;
+
+        env.storage().persistent().set(&key, &data);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, MIN_TTL_LEDGERS, MAX_TTL_LEDGERS);
 
         Ok(())
     }

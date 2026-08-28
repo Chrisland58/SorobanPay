@@ -15,6 +15,8 @@ pub struct SubscriptionData {
     pub amount:       i128,      // payment amount per interval (strictly positive)
     pub interval:     u64,       // seconds between payments [86400, 31536000]
     pub next_payment: u64,       // Unix timestamp of next valid payment window
+    pub is_paused:    bool,      // true while subscription is paused
+    pub paused_until: u64,       // Unix timestamp when pause expires (0 = no expiry)
 }
 
 /// ~30 days at 5-second ledger close time (518_400 ledgers)
