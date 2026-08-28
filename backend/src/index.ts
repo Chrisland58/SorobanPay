@@ -6,10 +6,12 @@ import { validateConfig } from './lib/config';
 import { EventIndexer } from './services/eventIndexer';
 import { PayoutSummaryGenerator } from './services/payoutSummaryGenerator';
 import { PaymentScheduler } from './services/paymentScheduler';
+import { PaymentStateMachine } from './services/paymentStateMachine';
 import summariesRouter from './routes/summaries';
 import subscriptionsRouter from './routes/subscriptions';
 import auditLogsRouter from './routes/auditLogs';
 import settlementsRouter from './routes/settlements';
+import paymentsRouter from './routes/payments';
 import { apiLimiter } from './middleware/rateLimiter';
 
 const app = express();
@@ -25,6 +27,7 @@ app.use('/api/summaries', summariesRouter);
 app.use('/api/subscriptions', subscriptionsRouter);
 app.use('/api/audit-logs', auditLogsRouter);
 app.use('/api/settlements', settlementsRouter);
+app.use('/api/payments', paymentsRouter);
 
 // Initialize services
 const rpcUrl = process.env.RPC_URL || 'https://soroban-testnet.stellar.org';
@@ -33,6 +36,7 @@ const networkPassphrase = process.env.NETWORK_PASSPHRASE || 'Test SDF Network ; 
 
 const eventIndexer = new EventIndexer(rpcUrl, contractId);
 const summaryGenerator = new PayoutSummaryGenerator();
+const paymentStateMachine = new PaymentStateMachine();
 
 // Payment scheduler — only active when operator secret is configured
 const operatorSecret = process.env.OPERATOR_SECRET;
@@ -63,6 +67,12 @@ cron.schedule('0 1 * * *', async () => {
 cron.schedule('0 2 * * 0', async () => {
   console.log('Generating weekly summaries...');
   await summaryGenerator.generateWeeklySummaries();
+});
+
+// Process payment state machine timeouts every minute
+cron.schedule('* * * * *', async () => {
+  const count = await paymentStateMachine.processTimeouts();
+  if (count > 0) console.log(`[state-machine] Timed out ${count} payment(s).`);
 });
 
 // Start server
