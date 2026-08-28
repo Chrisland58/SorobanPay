@@ -97,3 +97,24 @@ model NotificationPreference {
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 }
+
+// BE-70: Payment retry tracking — merged from two draft blocks (#754)
+// attemptedAt: when the retry was scheduled/attempted
+// executedAt:  when the retry successfully executed (null until confirmed)
+model PaymentRetry {
+  id           Int       @id @default(autoincrement())
+  subscriber   String
+  merchant     String
+  token        String
+  amount       String
+  attempt      Int       @default(1)
+  status       String    @default("pending") // pending | success | failed
+  attemptedAt  DateTime?
+  executedAt   DateTime?
+  errorMessage String?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  @@index([subscriber, merchant])
+  @@index([status, attemptedAt])
+}

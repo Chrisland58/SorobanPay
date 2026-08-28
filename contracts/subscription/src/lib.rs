@@ -735,6 +735,78 @@ impl SubscriptionProtocol {
         Ok(())
     }
 
+    /// Update the amount and/or interval of an existing subscription.
+    ///
+    /// Uses the same storage key as `subscribe()` — `DataKey::Subscription(subscriber, merchant)` —
+    /// so it always reads and writes the same ledger entry created by `subscribe()`.
+    ///
+    /// # Authorization
+    /// Requires a valid signature from `subscriber` in the transaction auth envelope.
+    ///
+    /// # Parameters
+    /// - `subscriber`: Account that owns the subscription.
+    /// - `merchant`:   Merchant the subscription is with.
+    /// - `new_amount`: New payment amount per interval. Must be > 0 and <= 10^18.
+    /// - `new_interval`: New seconds between payments. Must be in [86400, 31536000].
+    ///
+    /// # Errors
+    /// - `ContractError::NoActiveSubscription`  — if no subscription exists for the pair.
+    /// - `ContractError::AmountMustBePositive`  — if `new_amount <= 0`.
+    /// - `ContractError::AmountTooLarge`        — if `new_amount > 10^18`.
+    /// - `ContractError::IntervalTooShort`      — if `new_interval < 86400`.
+    /// - `ContractError::IntervalTooLong`       — if `new_interval > 31536000`.
+    pub fn update_subscription(
+        env: Env,
+        subscriber: Address,
+        merchant: Address,
+        new_amount: i128,
+        new_interval: u64,
+    ) -> Result<(), ContractError> {
+        // 1. Authorization — subscriber must sign.
+        subscriber.require_auth();
+
+        // 2. Validate new amount.
+        if new_amount <= 0 {
+            return Err(ContractError::AmountMustBePositive);
+        }
+        if new_amount > MAX_AMOUNT {
+            return Err(ContractError::AmountTooLarge);
+        }
+
+        // 3. Validate new interval.
+        if new_interval < 86_400 {
+            return Err(ContractError::IntervalTooShort);
+        }
+        if new_interval > 31_536_000 {
+            return Err(ContractError::IntervalTooLong);
+        }
+
+        // 4. Load existing subscription — uses the same key as subscribe() so the
+        //    storage slot always matches. Previously this used a hash-based key which
+        //    did not match the two-arg key written by subscribe(), causing every call
+        //    to return NoActiveSubscription (#753).
+        let key = DataKey::Subscription(subscriber.clone(), merchant.clone());
+        let mut data: SubscriptionData = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .ok_or(ContractError::NoActiveSubscription)?;
+
+        // 5. Apply updates — preserve token and next_payment.
+        data.amount   = new_amount;
+        data.interval = new_interval;
+
+        // 6. Persist updated subscription.
+        env.storage().persistent().set(&key, &data);
+
+        // 7. Extend TTL to keep the entry alive after the update.
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, MIN_TTL_LEDGERS, MAX_TTL_LEDGERS);
+
+        Ok(())
+    }
+
     /// Query active subscription details for a subscriber-merchant pair.
     ///
     /// This is a read-only view function that returns subscription state without
