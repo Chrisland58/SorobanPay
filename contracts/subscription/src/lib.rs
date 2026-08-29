@@ -806,6 +806,7 @@ impl SubscriptionProtocol {
         let fee_config = get_protocol_fee_config(&env);
 
         let now = ledger_timestamp(&env)?;
+        let contract_address = env.current_contract_address();
         let mut results: Vec<(Address, bool)> = Vec::new(&env);
         let mut hashes_to_extend: Vec<soroban_sdk::BytesN<32>> = Vec::new(&env);
 
