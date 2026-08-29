@@ -5,6 +5,9 @@ All notable changes to SorobanPay are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+For the full release process — including the release note template, versioning
+rules, and step-by-step checklist — see [docs/release-process.md](docs/release-process.md).
+
 ---
 
 ## [Unreleased]
@@ -13,13 +16,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > Every pull request that changes behaviour, adds a feature, or fixes a bug
 > **must** include an entry in this section. The CI `check-changelog` job will
 > fail if this section is empty on a pull request.
+>
+> Entry format:
+> `- **[Component]** Short imperative description. (Closes #<issue>)`
+>
+> Components: `[Contract]`, `[Frontend]`, `[Backend]`, `[Deploy]`, `[Docs]`, `[CI]`
 
 ### Added
 
-- `contracts/subscription/src/lib.rs`: Extracted the `execute_payment` time-lock check into a dedicated `assert_payment_due(now, next_payment)` helper with full inline documentation of the `>=` (inclusive) semantics, timeline diagram, and rationale for why strict equality (`==`) is not used (closes #68).
-- `contracts/subscription/src/lib.rs`: Added `# Time-lock guard` doc sections to both `execute_payment` and `batch_execute_payment` explaining that payment is due when `now >= next_payment`, that `now == next_payment` is on-time (not early), and that `next_payment` advances from actual collection time rather than original schedule.
-- `contracts/subscription/src/error.rs`: Expanded `PaymentNotDue` (code 5) doc comment to state the `>=` semantics explicitly and confirm no state mutation occurs on rejection.
-- `contracts/subscription/src/test.rs`: Added 10 time-lock tests (TL-01 through TL-10): one-second-early rejected (TL-01), exact-boundary allowed (TL-02), one-second-past allowed (TL-03), next_payment advances from collection time (TL-04), on-schedule next_payment arithmetic (TL-05), state unchanged on rejection (TL-06), no event emitted on rejection (TL-07), independent time-locks across subscriptions (TL-08), proptest safety (TL-09), proptest liveness (TL-10).
+- **[Docs]** Document all `deploy/deploy.sh` environment variables (`STELLAR_NETWORK`, `STELLAR_IDENTITY`) and derived values (`RPC_URL`, `PASSPHRASE`) in the script header and `docs/deployment.md`. (Closes #77)
+- **[Docs]** Add issue naming conventions (`Bug:`, `Feature:`, `Docs:`, `Chore:` prefixes) to `CONTRIBUTING.md`. (Closes #78)
+- **[Docs]** Expand README security model section with full sub-sections: non-custodial design, per-invocation auth table, allowance emergency stop, time-lock enforcement, storage TTL, input validation, and read-only backend. (Closes #79)
+- **[Docs]** Add `docs/release-process.md` with versioning rules, changelog hygiene guide, release note template, step-by-step release checklist, and component-specific notes for contract, frontend, and deploy releases. (Closes #80)
 
 ### Changed
 
