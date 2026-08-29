@@ -31,6 +31,54 @@ fn checked_next_payment(ts: u64, interval: u64) -> Result<u64, ContractError> {
     ts.checked_add(interval).ok_or(ContractError::InvalidTimestamp)
 }
 
+/// Enforce the time-lock for a single subscription entry.
+///
+/// # Exact due-time semantics
+///
+/// A payment is due when `now >= next_payment` — meaning the ledger timestamp has
+/// **reached or passed** the scheduled due instant. The condition checked here is
+/// its complement: `now < next_payment` → still early → reject.
+///
+/// ```text
+/// Timeline:
+///
+///   subscribe()          next_payment          next_payment + interval
+///       │                     │                        │
+///   ────┼─────────────────────┼────────────────────────┼──▶  time
+///       │                     │                        │
+///       │◄── PaymentNotDue ──►│◄── payment allowed ───►│
+///                             │
+///                          now == next_payment  →  OK (inclusive boundary)
+///                          now  < next_payment  →  PaymentNotDue
+///                          now  > next_payment  →  OK (past due, merchant collects late)
+/// ```
+///
+/// The boundary is **inclusive**: `now == next_payment` is treated as on-time,
+/// not early. This is important for billing systems that schedule execution at
+/// precisely the due timestamp.
+///
+/// # Why not strict equality (`now == next_payment`)?
+///
+/// Requiring exact equality would create a one-ledger window during which payment
+/// is collectable (roughly 5 seconds at mainnet close times). Any network latency
+/// or scheduling drift would cause the merchant's call to land one ledger late and
+/// be permanently rejected. The `>=` condition avoids this operational fragility:
+/// a missed-cycle payment remains collectable indefinitely until the next call to
+/// `execute_payment`, at which point `next_payment` advances by one interval.
+///
+/// # Returns
+/// `Err(ContractError::PaymentNotDue)` if `now < next_payment`.
+/// `Ok(())` if `now >= next_payment`.
+#[inline]
+fn assert_payment_due(now: u64, next_payment: u64) -> Result<(), ContractError> {
+    // Payment is due when now >= next_payment.
+    // Equivalently: reject when now < next_payment (payment window has not opened yet).
+    if now < next_payment {
+        return Err(ContractError::PaymentNotDue);
+    }
+    Ok(())
+}
+
 /// Add a hashed key to a merchant's subscription index.
 ///
 /// The index stores `Vec<BytesN<32>>` under `DataKey::MerchantIndex(merchant)`.
@@ -266,6 +314,32 @@ impl SubscriptionProtocol {
     ///
     /// # Authorization
     /// Requires a valid signature from `merchant`.
+    ///
+    /// # Time-lock guard
+    ///
+    /// Payment collection is gated by an on-chain time-lock enforced against
+    /// `env.ledger().timestamp()`. The guard uses **inclusive** `>=` semantics:
+    ///
+    /// ```text
+    ///   allowed when:  now >= next_payment  (on time or overdue)
+    ///   rejected when: now <  next_payment  (payment window not yet open)
+    /// ```
+    ///
+    /// This means `execute_payment` called at the exact ledger whose timestamp equals
+    /// `next_payment` will succeed — the boundary is on-time, not early. See
+    /// [`assert_payment_due`] for the full semantic rationale.
+    ///
+    /// On success, `next_payment` is advanced by exactly `interval` seconds:
+    ///
+    /// ```text
+    ///   new_next_payment = now + interval
+    /// ```
+    ///
+    /// Note: `now` is the ledger timestamp at execution time, not the original
+    /// `next_payment`. If a merchant collects a payment late (e.g. 2 hours after
+    /// the due time), the next due date is `now + interval`, not
+    /// `next_payment + interval`. This means the billing window slides forward
+    /// from the actual collection time, not from the original schedule.
     pub fn execute_payment(
         env: Env,
         subscriber: Address,
@@ -282,9 +356,12 @@ impl SubscriptionProtocol {
             .ok_or(ContractError::NoActiveSubscription)?;
 
         let now = ledger_timestamp(&env)?;
-        if now < data.next_payment {
-            return Err(ContractError::PaymentNotDue);
-        }
+
+        // ── Time-lock guard ───────────────────────────────────────────────────────
+        // Payment is allowed when now >= next_payment (inclusive boundary).
+        // Returns PaymentNotDue when now < next_payment.
+        // See assert_payment_due() for the full semantic rationale.
+        assert_payment_due(now, data.next_payment)?;
 
         let token_client = token::Client::new(&env, &data.token);
         let subscriber_balance = token_client.balance(&subscriber);
@@ -295,6 +372,9 @@ impl SubscriptionProtocol {
 
         token_client.transfer(&subscriber, &merchant, &data.amount);
 
+        // Advance next_payment from now (actual collection time), not from next_payment.
+        // This slides the billing window forward from the actual transfer, preventing
+        // drift accumulation for merchants who collect consistently late.
         data.next_payment = now + data.interval;
         env.storage().persistent().set(&key, &data);
         env.storage()
@@ -312,6 +392,13 @@ impl SubscriptionProtocol {
     ///
     /// # Authorization
     /// Requires a valid signature from `merchant` — authenticated once for the batch.
+    ///
+    /// # Time-lock guard (per subscriber)
+    ///
+    /// Each subscriber entry is independently checked against the same `>=` time-lock
+    /// as `execute_payment`. If `now < next_payment` for a subscriber, that entry is
+    /// recorded as `false` in the result vector and the loop continues — the batch
+    /// itself is not aborted. See [`assert_payment_due`] for the semantic detail.
     pub fn batch_execute_payment(
         env: Env,
         merchant: Address,
@@ -344,7 +431,10 @@ impl SubscriptionProtocol {
                 }
             };
 
-            if now < data.next_payment {
+            // ── Time-lock guard (per subscriber) ─────────────────────────────────
+            // Uses the same >= semantics as execute_payment: allowed when now >= next_payment.
+            // A not-due subscriber is skipped (false result) without aborting the batch.
+            if assert_payment_due(now, data.next_payment).is_err() {
                 results.push_back((subscriber.clone(), false));
                 continue;
             }
@@ -359,6 +449,8 @@ impl SubscriptionProtocol {
 
             token_client.transfer(&subscriber, &merchant, &data.amount);
 
+            // Advance next_payment from now (actual collection time), consistent
+            // with execute_payment behaviour.
             data.next_payment = now + data.interval;
             env.storage().persistent().set(&key, &data);
             keys_to_extend.push_back(key);

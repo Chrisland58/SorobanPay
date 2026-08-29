@@ -1772,3 +1772,287 @@ fn test_execute_payment_before_due_does_not_mutate_subscription() {
     assert_eq!(before.next_payment, after.next_payment);
     assert_eq!(before.amount, after.amount);
 }
+
+// ─── Issue #68 — Time-lock guard semantics tests ──────────────────────────────
+//
+// These tests explicitly verify the exact-due-time semantics of the time-lock
+// guard introduced in assert_payment_due(). The key invariant is:
+//
+//   Payment allowed when:  now >= next_payment  (inclusive boundary)
+//   Payment rejected when: now <  next_payment
+//
+// Every test names the exact timestamp relationship it exercises so that any
+// change to the guard condition immediately produces a named, informative failure.
+
+/// TL-01: execute_payment rejected when now == next_payment - 1 (one second early).
+///
+/// This is the strictest early-rejection case. One second before the due time
+/// the time-lock must still be closed.
+#[test]
+fn tl_payment_rejected_one_second_before_due() {
+    let t   = T::new();
+    let ivl = 86_400_u64;
+    let ts  = t.env.ledger().timestamp();
+
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &100_000_i128, &ivl, &false);
+    // next_payment = ts + ivl
+    // Advance to ts + ivl - 1: now < next_payment by exactly 1 second.
+    t.advance(ivl - 1);
+
+    assert_eq!(
+        t.env.ledger().timestamp(), ts + ivl - 1,
+        "ledger must be at next_payment - 1 for this test to be meaningful"
+    );
+
+    let r = t.client.try_execute_payment(&t.subscriber, &t.merchant);
+    assert!(
+        matches!(r, Err(Ok(ContractError::PaymentNotDue))),
+        "execute_payment at now = next_payment - 1 must return PaymentNotDue \
+         (time-lock condition: now < next_payment)"
+    );
+}
+
+/// TL-02: execute_payment allowed when now == next_payment (exact boundary, inclusive).
+///
+/// The time-lock releases at the exact moment `now == next_payment`.
+/// This is the primary semantic assertion: `==` is treated as due, not early.
+#[test]
+fn tl_payment_allowed_at_exact_due_time() {
+    let t   = T::new();
+    let ivl = 86_400_u64;
+    let ts  = t.env.ledger().timestamp();
+
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &100_000_i128, &ivl, &false);
+    // Advance to ts + ivl: now == next_payment exactly.
+    t.advance(ivl);
+
+    assert_eq!(
+        t.env.ledger().timestamp(), ts + ivl,
+        "ledger must be exactly at next_payment for this test to be meaningful"
+    );
+
+    let r = t.client.try_execute_payment(&t.subscriber, &t.merchant);
+    assert!(
+        r.is_ok(),
+        "execute_payment at now == next_payment must succeed; \
+         time-lock uses >= (inclusive), so the boundary second is on-time, not early"
+    );
+}
+
+/// TL-03: execute_payment allowed when now == next_payment + 1 (one second past due).
+///
+/// Payments remain collectable after the due time. Merchants who collect late
+/// must still be able to execute, with next_payment advancing from collection time.
+#[test]
+fn tl_payment_allowed_one_second_past_due() {
+    let t   = T::new();
+    let ivl = 86_400_u64;
+    let ts  = t.env.ledger().timestamp();
+
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &100_000_i128, &ivl, &false);
+    // Advance to ts + ivl + 1: now > next_payment by one second.
+    t.advance(ivl + 1);
+
+    assert_eq!(
+        t.env.ledger().timestamp(), ts + ivl + 1,
+        "ledger must be at next_payment + 1 for this test to be meaningful"
+    );
+
+    let r = t.client.try_execute_payment(&t.subscriber, &t.merchant);
+    assert!(
+        r.is_ok(),
+        "execute_payment at now = next_payment + 1 must succeed; \
+         past-due payments remain collectable"
+    );
+}
+
+/// TL-04: next_payment advances from actual collection time (now), not from next_payment.
+///
+/// When a merchant collects a payment late, the next billing window opens from the
+/// actual ledger timestamp, not from the original scheduled time. This prevents
+/// window drift accumulation (consecutive late collections do not compress the next gap).
+#[test]
+fn tl_next_payment_advances_from_collection_time_not_schedule() {
+    let t    = T::new();
+    let ivl  = 86_400_u64;
+    let late = ivl + 3_600_u64; // collect 1 hour late
+
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &100_000_i128, &ivl, &false);
+    t.advance(late); // advance past due by 1 hour
+    let now = t.env.ledger().timestamp();
+
+    t.client.execute_payment(&t.subscriber, &t.merchant);
+
+    let d = t.get_sub();
+    assert_eq!(
+        d.next_payment, now + ivl,
+        "next_payment must be collection_time + interval (not original_due + interval); \
+         late collection slides the window forward from actual execution time"
+    );
+}
+
+/// TL-05: next_payment after payment at exact due time equals next_payment + interval.
+///
+/// When payment is collected at exactly the scheduled time (now == next_payment),
+/// the new next_payment = now + interval = original_next_payment + interval.
+/// This is the ideal on-schedule case.
+#[test]
+fn tl_next_payment_at_exact_due_time_equals_schedule_plus_interval() {
+    let t   = T::new();
+    let ivl = 86_400_u64;
+    let ts  = t.env.ledger().timestamp();
+
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &100_000_i128, &ivl, &false);
+    let original_due = ts + ivl;
+
+    // Collect at exactly the due time.
+    t.advance(ivl);
+    t.client.execute_payment(&t.subscriber, &t.merchant);
+
+    let d = t.get_sub();
+    assert_eq!(
+        d.next_payment, original_due + ivl,
+        "on-schedule payment must advance next_payment to original_due + interval"
+    );
+}
+
+/// TL-06: time-lock state is not mutated on PaymentNotDue.
+///
+/// A rejected execute_payment must leave next_payment, amount, and interval unchanged.
+/// Idempotent rejection is required so the merchant can safely retry.
+#[test]
+fn tl_state_unchanged_on_payment_not_due() {
+    let t   = T::new();
+    let ivl = 86_400_u64;
+
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &100_000_i128, &ivl, &false);
+    let before = t.get_sub();
+
+    // Do not advance — now is still before next_payment.
+    let r = t.client.try_execute_payment(&t.subscriber, &t.merchant);
+    assert!(matches!(r, Err(Ok(ContractError::PaymentNotDue))));
+
+    let after = t.get_sub();
+    assert_eq!(before.next_payment, after.next_payment,
+        "next_payment must not change on PaymentNotDue");
+    assert_eq!(before.amount, after.amount,
+        "amount must not change on PaymentNotDue");
+    assert_eq!(before.interval, after.interval,
+        "interval must not change on PaymentNotDue");
+}
+
+/// TL-07: no event is emitted on PaymentNotDue.
+///
+/// A rejected time-lock check must be silent — no `payment_transfer_failure`
+/// or any other event should be emitted when the payment window is not yet open.
+#[test]
+fn tl_no_event_emitted_on_payment_not_due() {
+    let t   = T::new();
+    let ivl = 86_400_u64;
+
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &100_000_i128, &ivl, &false);
+    let n_before = t.env.events().all().iter().filter(|e| e.0 == t.contract_id).count();
+
+    // Advance to one second before due.
+    t.advance(ivl - 1);
+    let _ = t.client.try_execute_payment(&t.subscriber, &t.merchant);
+
+    let n_after = t.env.events().all().iter().filter(|e| e.0 == t.contract_id).count();
+    assert_eq!(n_before, n_after,
+        "no event must be emitted when execute_payment returns PaymentNotDue");
+}
+
+/// TL-08: time-lock applies independently across multiple subscriptions.
+///
+/// Two subscriptions with different intervals must each enforce their own
+/// next_payment independently. A subscription with a shorter interval becoming
+/// due must not affect another subscription with a longer interval.
+#[test]
+fn tl_independent_time_locks_across_subscriptions() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin      = Address::generate(&env);
+    let subscriber = Address::generate(&env);
+    let merchant1  = Address::generate(&env);
+    let merchant2  = Address::generate(&env);
+    let token      = env.register_stellar_asset_contract_v2(admin.clone()).address();
+
+    StellarAssetClient::new(&env, &token).mint(&subscriber, &10_000_000_i128);
+
+    let contract_id = env.register(SubscriptionProtocol, ());
+    let client      = SubscriptionProtocolClient::new(&env, &contract_id);
+
+    token::Client::new(&env, &token).approve(
+        &subscriber, &contract_id, &5_000_000_i128,
+        &(env.ledger().sequence() + 100_000_u32),
+    );
+
+    let short_ivl = 86_400_u64;         // 1 day
+    let long_ivl  = 86_400_u64 * 7;    // 7 days
+
+    client.subscribe(&subscriber, &merchant1, &token, &1_000_i128, &short_ivl, &false);
+    client.subscribe(&subscriber, &merchant2, &token, &1_000_i128, &long_ivl,  &false);
+
+    // Advance to just past the short interval, but before the long interval.
+    let now = env.ledger().timestamp();
+    env.ledger().with_mut(|l| l.timestamp = now + short_ivl + 1);
+
+    // Short-interval subscription must be due.
+    let r1 = client.try_execute_payment(&subscriber, &merchant1);
+    assert!(r1.is_ok(), "short-interval subscription must be due after short_ivl + 1");
+
+    // Long-interval subscription must still be locked.
+    let r2 = client.try_execute_payment(&subscriber, &merchant2);
+    assert!(
+        matches!(r2, Err(Ok(ContractError::PaymentNotDue))),
+        "long-interval subscription must still return PaymentNotDue after only short_ivl + 1 seconds"
+    );
+}
+
+proptest! {
+    /// TL-09 (property): for any valid interval and any advance < interval,
+    /// execute_payment always returns PaymentNotDue.
+    ///
+    /// This is the time-lock safety property: no payment is ever collectible
+    /// before the interval has elapsed.
+    #[test]
+    fn tl_prop_payment_not_due_before_interval(
+        interval in 86_400_u64..=31_536_000_u64,
+        // advance is in [0, interval - 1] so we never reach or pass next_payment
+        advance  in 0_u64..86_400_u64, // bounded to keep proptest fast
+    ) {
+        // Only run if advance < interval (always true since advance < 86_400 <= interval)
+        let t = T::new();
+        t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &100_i128, &interval, &false);
+        if advance > 0 {
+            t.advance(advance);
+        }
+        // advance < 86_400 <= interval, so now < next_payment always
+        let r = t.client.try_execute_payment(&t.subscriber, &t.merchant);
+        prop_assert!(
+            matches!(r, Err(Ok(ContractError::PaymentNotDue))),
+            "advance={advance} < interval={interval}: payment must not be due yet"
+        );
+    }
+
+    /// TL-10 (property): for any valid interval and any advance >= interval,
+    /// execute_payment always succeeds (assuming sufficient balance and allowance).
+    ///
+    /// This is the time-lock liveness property: payment is always collectable
+    /// once the interval has elapsed.
+    #[test]
+    fn tl_prop_payment_due_at_or_after_interval(
+        interval in 86_400_u64..=31_536_000_u64,
+        extra    in 0_u64..=86_400_u64, // 0 means exactly at due time
+    ) {
+        let t = T::new();
+        t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &100_i128, &interval, &false);
+        t.advance(interval + extra); // now >= next_payment
+        let r = t.client.try_execute_payment(&t.subscriber, &t.merchant);
+        prop_assert!(
+            r.is_ok(),
+            "interval={interval} extra={extra}: payment must be due when now >= next_payment"
+        );
+    }
+}

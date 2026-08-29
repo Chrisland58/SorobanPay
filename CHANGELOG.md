@@ -16,6 +16,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `contracts/subscription/src/lib.rs`: Extracted the `execute_payment` time-lock check into a dedicated `assert_payment_due(now, next_payment)` helper with full inline documentation of the `>=` (inclusive) semantics, timeline diagram, and rationale for why strict equality (`==`) is not used (closes #68).
+- `contracts/subscription/src/lib.rs`: Added `# Time-lock guard` doc sections to both `execute_payment` and `batch_execute_payment` explaining that payment is due when `now >= next_payment`, that `now == next_payment` is on-time (not early), and that `next_payment` advances from actual collection time rather than original schedule.
+- `contracts/subscription/src/error.rs`: Expanded `PaymentNotDue` (code 5) doc comment to state the `>=` semantics explicitly and confirm no state mutation occurs on rejection.
+- `contracts/subscription/src/test.rs`: Added 10 time-lock tests (TL-01 through TL-10): one-second-early rejected (TL-01), exact-boundary allowed (TL-02), one-second-past allowed (TL-03), next_payment advances from collection time (TL-04), on-schedule next_payment arithmetic (TL-05), state unchanged on rejection (TL-06), no event emitted on rejection (TL-07), independent time-locks across subscriptions (TL-08), proptest safety (TL-09), proptest liveness (TL-10).
+
 ### Changed
 
 ### Deprecated
