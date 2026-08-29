@@ -424,6 +424,45 @@ function SuccessCard({
       role="alert"
       className="mb-6 rounded-xl bg-gradient-to-br from-green-900/60 to-green-800/30 border-2 border-green-600/60 p-5 sm:p-6 text-sm space-y-4 shadow-lg"
     >
+      {/* Cancel confirmation modal */}
+      {showCancelConfirm && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="cancel-confirm-title"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4"
+        >
+          <div className="w-full max-w-sm bg-gray-900 border border-red-700/60 rounded-2xl shadow-2xl p-6 space-y-5 text-white">
+            <h3 id="cancel-confirm-title" className="text-lg font-bold text-red-300">
+              Cancel subscription?
+            </h3>
+            <p className="text-sm text-gray-300">
+              This will permanently remove your subscription with{" "}
+              <span className="font-mono text-xs break-all text-gray-100">{data.merchant}</span>.
+              Future payments will no longer be collectible.
+            </p>
+            <div className="flex gap-3 pt-1">
+              <button
+                onClick={() => setShowCancelConfirm(false)}
+                className="flex-1 rounded-lg border border-gray-600 bg-gray-800/50 text-gray-300 hover:bg-gray-700
+                           py-3 text-sm font-semibold transition-colors
+                           focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-500"
+              >
+                Keep it
+              </button>
+              <button
+                onClick={handleConfirmCancel}
+                className="flex-1 rounded-lg bg-red-700 hover:bg-red-600 active:bg-red-800
+                           py-3 text-sm font-semibold text-white transition-colors
+                           focus:outline-none focus-visible:ring-2 focus-visible:ring-red-400"
+              >
+                Yes, cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Header */}
       <div className="flex items-center gap-3">
         <span className="text-2xl flex-shrink-0" aria-hidden="true">
@@ -439,9 +478,20 @@ function SuccessCard({
         <p className="text-gray-400 text-xs mb-1.5 font-medium">
           Transaction hash
         </p>
-        <p className="text-gray-200 break-all font-mono text-xs leading-relaxed">
-          {data.txHash}
-        </p>
+        <div className="flex items-center gap-2 flex-wrap">
+          <p className="text-gray-200 break-all font-mono text-xs leading-relaxed flex-1">
+            {data.txHash}
+          </p>
+          <a
+            href={`${explorerBase}/${data.txHash}`}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-xs text-blue-400 hover:text-blue-300 underline shrink-0"
+            aria-label="View transaction on Stellar Expert"
+          >
+            View ↗
+          </a>
+        </div>
       </div>
 
       {/* Summary */}
@@ -458,6 +508,41 @@ function SuccessCard({
         </span>
       </div>
 
+      {/* Cancel success state */}
+      {cancelTxHash && (
+        <div
+          role="status"
+          className="rounded-lg bg-orange-900/30 border border-orange-600/50 p-3 space-y-1"
+        >
+          <p className="text-orange-300 font-semibold text-xs">
+            Subscription cancelled on-chain ✓
+          </p>
+          <div className="flex items-center gap-2 flex-wrap">
+            <p className="text-gray-400 break-all font-mono text-xs flex-1">{cancelTxHash}</p>
+            <a
+              href={`${explorerBase}/${cancelTxHash}`}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-xs text-blue-400 hover:text-blue-300 underline shrink-0"
+              aria-label="View cancellation transaction on Stellar Expert"
+            >
+              View ↗
+            </a>
+          </div>
+        </div>
+      )}
+
+      {/* Cancel error state */}
+      {cancelError && (
+        <div
+          role="alert"
+          className="rounded-lg bg-red-900/30 border border-red-600/50 p-3"
+        >
+          <p className="text-red-300 font-semibold text-xs mb-1">Cancel failed</p>
+          <p className="text-gray-300 text-xs break-all">{cancelError}</p>
+        </div>
+      )}
+
       {/* Next steps */}
       <div className="border-t border-green-800/60 pt-4 space-y-2.5">
         <p className="text-green-300 font-semibold text-xs uppercase tracking-widest">
@@ -468,13 +553,6 @@ function SuccessCard({
           <li>
             Subsequent payments are collectible every {days} day
             {days !== 1 ? "s" : ""}.
-          </li>
-          <li>
-            To cancel, call{" "}
-            <code className="bg-gray-800 px-1.5 py-0.5 rounded text-green-300 text-xs">
-              cancel(subscriber, merchant)
-            </code>{" "}
-            on the contract, or revoke the token allowance via your wallet.
           </li>
           <li>
             Your wallet remains non-custodial — the contract never holds your
