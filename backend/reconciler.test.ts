@@ -296,4 +296,14 @@ describe('reconcile()', () => {
     expect(db.get(SUB, MER, TOK2)).toBeDefined();
     expect(result.errors).toHaveLength(0);
   });
+
+  // Stroops rounding tolerance
+  test('considers stored and chain amounts matching within 1 stroop tolerance', () => {
+    const db = makeDB([storedRecord({ amount: AMT + 1n })]);
+
+    const result = reconcile([subscribeEvent({ amount: AMT })], db, IVL);
+
+    expect(result.repairs).toHaveLength(0);
+    expect(result.errors).toHaveLength(0);
+  });
 });

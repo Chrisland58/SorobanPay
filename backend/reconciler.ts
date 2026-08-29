@@ -154,9 +154,13 @@ export function reconcile(
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 function recordsMatch(a: StoredSubscription, b: StoredSubscription): boolean {
+  const diff = a.amount > b.amount ? a.amount - b.amount : b.amount - a.amount;
+  // Tolerate rounding difference of up to 1 stroop from off-chain precision
+  const amountsEquivalent = diff <= 1n;
+
   return (
     a.token === b.token &&
-    a.amount === b.amount &&
+    amountsEquivalent &&
     a.interval === b.interval &&
     a.next_payment === b.next_payment &&
     a.last_payment_at === b.last_payment_at
