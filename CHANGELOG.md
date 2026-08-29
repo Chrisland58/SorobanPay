@@ -5,6 +5,9 @@ All notable changes to SorobanPay are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+For the full release process — including the release note template, versioning
+rules, and step-by-step checklist — see [docs/release-process.md](docs/release-process.md).
+
 ---
 
 ## [Unreleased]
@@ -13,14 +16,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > Every pull request that changes behaviour, adds a feature, or fixes a bug
 > **must** include an entry in this section. The CI `check-changelog` job will
 > fail if this section is empty on a pull request.
+>
+> Entry format:
+> `- **[Component]** Short imperative description. (Closes #<issue>)`
+>
+> Components: `[Contract]`, `[Frontend]`, `[Backend]`, `[Deploy]`, `[Docs]`, `[CI]`
 
 ### Added
 
-- `contracts/subscription/src/lib.rs`: Added SEP-41 allowance pre-check to `execute_payment` — if the subscriber's token allowance for the contract is below the payment amount, the call now returns `ContractError::TransferFailed` and emits `payment_transfer_failure` instead of producing a host-level panic (closes #69).
-- `contracts/subscription/src/lib.rs`: Added same allowance pre-check to `batch_execute_payment` — affected subscribers are marked `false` in the results vector without aborting the batch (closes #69).
-- `contracts/subscription/src/lib.rs`: Added `# Token error mapping` doc sections to both `execute_payment` and `batch_execute_payment` explaining the two-step pre-check order (balance then allowance), the error returned for each, and the residual host-panic scenario.
-- `contracts/subscription/src/error.rs`: Expanded `TransferFailed` (code 7) doc comment to enumerate both mapping cases (insufficient balance, insufficient/revoked allowance) and clarify that `next_payment` is not advanced on failure.
-- `contracts/subscription/src/test.rs`: Added 6 tests for the new allowance error mapping path: revoked allowance returns `TransferFailed`, off-by-one allowance boundary, allowance-equals-amount succeeds, failure event emitted on revoked allowance, batch isolates revoked-allowance failures, batch isolation across mixed subscribers.
+- **[Docs]** Document all `deploy/deploy.sh` environment variables (`STELLAR_NETWORK`, `STELLAR_IDENTITY`) and derived values (`RPC_URL`, `PASSPHRASE`) in the script header and `docs/deployment.md`. (Closes #77)
+- **[Docs]** Add issue naming conventions (`Bug:`, `Feature:`, `Docs:`, `Chore:` prefixes) to `CONTRIBUTING.md`. (Closes #78)
+- **[Docs]** Expand README security model section with full sub-sections: non-custodial design, per-invocation auth table, allowance emergency stop, time-lock enforcement, storage TTL, input validation, and read-only backend. (Closes #79)
+- **[Docs]** Add `docs/release-process.md` with versioning rules, changelog hygiene guide, release note template, step-by-step release checklist, and component-specific notes for contract, frontend, and deploy releases. (Closes #80)
 
 ### Changed
 
