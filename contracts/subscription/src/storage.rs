@@ -91,6 +91,10 @@ pub struct SubscriptionData {
     pub grace_period: u64,
     pub overdue_since: Option<u64>,
     pub payment_nonce: u64,
+    /// Unix timestamp at which a paused subscription auto-resumes on the next
+    /// `execute_payment` call. `None` means the pause is indefinite and requires
+    /// an explicit `resume_subscription` call (issue #795).
+    pub paused_until: Option<u64>,
 }
 
 #[contracttype]

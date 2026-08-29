@@ -205,6 +205,38 @@ pub fn emit_low_allowance(
     );
 }
 
+/// Emit the `paused` event after a subscription has been successfully paused.
+///
+/// Topics:  (symbol("paused"), subscriber, merchant)
+/// Data:    resume_at (Option<u64>) — `Some(ts)` when the pause auto-resumes at
+///          `execute_payment` time, `None` for an indefinite pause requiring an
+///          explicit `resume_subscription` call.
+pub fn emit_paused(env: &Env, subscriber: &Address, merchant: &Address, resume_at: Option<u64>) {
+    env.events().publish(
+        (
+            Symbol::new(env, "paused"),
+            subscriber.clone(),
+            merchant.clone(),
+        ),
+        resume_at,
+    );
+}
+
+/// Emit the `resumed` event after a paused subscription has been reactivated.
+///
+/// Topics:  (symbol("resumed"), subscriber, merchant)
+/// Data:    next_payment (u64) — the recomputed next payment timestamp.
+pub fn emit_resumed(env: &Env, subscriber: &Address, merchant: &Address, next_payment: u64) {
+    env.events().publish(
+        (
+            Symbol::new(env, "resumed"),
+            subscriber.clone(),
+            merchant.clone(),
+        ),
+        next_payment,
+    );
+}
+
 /// Emit the `fee_collected` event after a protocol fee has been successfully transferred
 /// to the fee collector on payment execution.
 ///
