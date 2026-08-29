@@ -81,6 +81,8 @@ interface SuccessData {
   amount: string;
   interval: string;
   issuedAt: string;
+  /** Unix timestamp (seconds) of the last successful payment, or null if none yet (Issue #50). */
+  lastPayment: number | null;
 }
 
 /** State for the pause/resume controls shown inside the success card. */
