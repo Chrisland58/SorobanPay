@@ -244,6 +244,7 @@ impl SubscriptionProtocol {
             interval,
             next_payment,
             is_paused: false,
+            last_payment: None,
         };
 
         // Compact key (#347): sha256(subscriber_xdr ++ merchant_xdr).
@@ -296,6 +297,7 @@ impl SubscriptionProtocol {
         token_client.transfer(&subscriber, &merchant, &data.amount);
 
         data.next_payment = now + data.interval;
+        data.last_payment = Some(now);
         env.storage().persistent().set(&key, &data);
         env.storage()
             .persistent()
@@ -360,6 +362,7 @@ impl SubscriptionProtocol {
             token_client.transfer(&subscriber, &merchant, &data.amount);
 
             data.next_payment = now + data.interval;
+            data.last_payment = Some(now);
             env.storage().persistent().set(&key, &data);
             keys_to_extend.push_back(key);
 

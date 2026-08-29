@@ -45,6 +45,28 @@ export interface SubscribeResult {
   txHash: string;
 }
 
+/**
+ * On-chain subscription state returned by `get_subscription`.
+ * Mirrors `SubscriptionData` in the Soroban contract (schema v2+).
+ */
+export interface SubscriptionState {
+  /** SEP-41 token contract address */
+  token: string;
+  /** Payment amount per interval (in token's smallest unit) */
+  amount: bigint;
+  /** Payment interval in seconds */
+  interval: bigint;
+  /** Unix timestamp of the next valid payment window */
+  nextPayment: bigint;
+  /** Whether the subscription is currently paused */
+  isPaused: boolean;
+  /**
+   * Unix timestamp of the most recent successful payment collection (Issue #50).
+   * `null` when no payment has been collected yet.
+   */
+  lastPayment: bigint | null;
+}
+
 // ── Constants ─────────────────────────────────────────────────────────────────
 
 const POLL_INTERVAL_MS = 1_000;

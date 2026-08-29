@@ -6,7 +6,8 @@ pub const CONTRACT_VERSION: &str = "1.0.0";
 pub const CONTRACT_NAME: &str = "SorobanPay-SubscriptionProtocol";
 
 /// Current on-chain schema version.  Increment when `SubscriptionData` changes.
-pub const CURRENT_SCHEMA_VERSION: u32 = 1;
+/// Bumped to 2 for Issue #50: added `last_payment` (Option<u64>) field.
+pub const CURRENT_SCHEMA_VERSION: u32 = 2;
 
 // ==================== Key helpers ====================
 
@@ -54,16 +55,9 @@ pub enum DataKey {
 ///
 /// ## Schema versioning
 ///
-/// The `ver` field starts at 1 for all new entries written by this version of the
-/// contract. Future migrations can inspect `ver` to decide whether to transform an
-/// entry before using it.
-///
-/// ## Backward compatibility
-///
-/// `grace_period`, `paused_until`, and `overdue_since` are `Option` fields so that
-/// old entries written without these fields (ver 0 / missing) deserialise correctly
-/// as `None`. Use the provided getter methods instead of direct field access to
-/// ensure default values are applied consistently.
+/// `last_payment` was added in schema v2 (Issue #50).  It is `Option<u64>` so that
+/// old entries written by schema v1 (which lack this field) deserialise correctly as
+/// `None`.  `None` means no payment has been collected yet for this subscription.
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct SubscriptionData {
@@ -77,6 +71,12 @@ pub struct SubscriptionData {
     pub next_payment: u64,
     /// True when subscription payments are suspended
     pub is_paused:    bool,
+    /// Unix timestamp of the most recent successful payment collection.
+    ///
+    /// `None` when the subscription has been created but no payment has been
+    /// collected yet (i.e. the first interval has not elapsed).
+    /// Set to the current ledger timestamp on every successful `execute_payment`.
+    pub last_payment: Option<u64>,
 }
 
 /// Safe upper bound for a single subscription payment amount (1 × 10¹⁸ stroops).

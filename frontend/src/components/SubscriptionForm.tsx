@@ -69,6 +69,8 @@ interface SuccessData {
   amount: string;
   interval: string;
   issuedAt: string;
+  /** Unix timestamp (seconds) of the last successful payment, or null if none yet (Issue #50). */
+  lastPayment: number | null;
 }
 
 // ─── Shared input className (larger py for ≥48px touch target on mobile) ─────
@@ -411,6 +413,12 @@ function SuccessCard({
         </span>
         <span className="text-gray-300 font-medium break-all">Merchant</span>
         <span className="break-all font-mono text-xs">{data.merchant}</span>
+        <span className="text-gray-300 font-medium">Last payment</span>
+        <span className="font-medium">
+          {data.lastPayment !== null
+            ? new Date(data.lastPayment * 1000).toLocaleString()
+            : "None yet"}
+        </span>
       </div>
 
       {/* Next steps */}
@@ -922,6 +930,7 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
         amount,
         interval,
         issuedAt: new Date().toISOString(),
+        lastPayment: null,
       });
     } catch (err) {
       setTxError(classifyError(err));
