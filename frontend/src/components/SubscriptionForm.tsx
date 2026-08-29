@@ -77,6 +77,9 @@ interface SuccessData {
   issuedAt: string;
 }
 
+/** State for the pause/resume controls shown inside the success card. */
+type PauseState = 'active' | 'pausing' | 'paused' | 'resuming';
+
 // ─── Shared input className (larger py for ≥48px touch target on mobile) ─────
 const inputCls =
   "w-full rounded-lg bg-gray-800 border border-gray-700 px-4 py-3 text-base " +
