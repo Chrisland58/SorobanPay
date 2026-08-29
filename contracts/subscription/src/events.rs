@@ -154,3 +154,29 @@ pub fn emit_low_allowance(
         (allowance, required),
     );
 }
+
+/// Emit the `insufficient_allowance` event when `execute_payment` is blocked because
+/// the subscriber's token allowance for the contract is below the payment amount.
+///
+/// Unlike `low_allowance` (emitted at subscribe time as a non-fatal warning),
+/// this event is emitted at payment time and is immediately followed by
+/// `ContractError::InsufficientAllowance`, aborting the payment.
+///
+/// Topics:  (symbol("insufficient_allowance"), subscriber, merchant)
+/// Data:    (allowance: i128, required: i128)
+pub fn emit_insufficient_allowance(
+    env: &Env,
+    subscriber: &Address,
+    merchant: &Address,
+    allowance: i128,
+    required: i128,
+) {
+    env.events().publish(
+        (
+            Symbol::new(env, "insufficient_allowance"),
+            subscriber.clone(),
+            merchant.clone(),
+        ),
+        (allowance, required),
+    );
+}

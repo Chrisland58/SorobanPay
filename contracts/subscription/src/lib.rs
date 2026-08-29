@@ -266,6 +266,14 @@ impl SubscriptionProtocol {
     ///
     /// # Authorization
     /// Requires a valid signature from `merchant`.
+    ///
+    /// # Errors
+    /// - `ContractError::NoActiveSubscription` — no subscription found for the pair.
+    /// - `ContractError::PaymentNotDue`        — interval has not elapsed yet.
+    /// - `ContractError::InsufficientAllowance`— subscriber's token allowance for the
+    ///                                           contract is below the payment amount.
+    /// - `ContractError::TransferFailed`       — subscriber's token balance is below
+    ///                                           the payment amount.
     pub fn execute_payment(
         env: Env,
         subscriber: Address,
@@ -286,7 +294,18 @@ impl SubscriptionProtocol {
             return Err(ContractError::PaymentNotDue);
         }
 
+        let contract_address = env.current_contract_address();
         let token_client = token::Client::new(&env, &data.token);
+
+        // Allowance check (Issue #51): verify the subscriber has approved the contract
+        // to spend at least the payment amount before touching the token contract.
+        let allowance = token_client.allowance(&subscriber, &contract_address);
+        if allowance < data.amount {
+            events::emit_insufficient_allowance(&env, &subscriber, &merchant, allowance, data.amount);
+            return Err(ContractError::InsufficientAllowance);
+        }
+
+        // Balance check: verify the subscriber actually holds enough tokens.
         let subscriber_balance = token_client.balance(&subscriber);
         if subscriber_balance < data.amount {
             events::emit_payment_transfer_failure(&env, &subscriber, &merchant, data.amount);
@@ -349,7 +368,17 @@ impl SubscriptionProtocol {
                 continue;
             }
 
+            let contract_address = env.current_contract_address();
             let token_client = token::Client::new(&env, &data.token);
+
+            // Allowance check (Issue #51): skip subscriber if allowance is insufficient.
+            let allowance = token_client.allowance(&subscriber, &contract_address);
+            if allowance < data.amount {
+                events::emit_insufficient_allowance(&env, &subscriber, &merchant, allowance, data.amount);
+                results.push_back((subscriber.clone(), false));
+                continue;
+            }
+
             let balance = token_client.balance(&subscriber);
             if balance < data.amount {
                 events::emit_payment_transfer_failure(&env, &subscriber, &merchant, data.amount);
