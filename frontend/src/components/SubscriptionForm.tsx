@@ -45,7 +45,12 @@ import {
   clearPersistedFormData,
   useFormPersist,
 } from "@/hooks/useFormPersist";
-import { buildAndSubmitSubscribe, buildSignAndSubmitSubscribe } from "@/lib/transaction_builder";
+import {
+  buildAndSubmitSubscribe,
+  buildSignAndSubmitSubscribe,
+  buildAndSubmitPauseSubscription,
+  buildAndSubmitResumeSubscription,
+} from "@/lib/transaction_builder";
 import { useTransactionPoller, buildExplorerUrl } from "@/hooks/useTransactionPoller";
 import {
   validateSubscriptionForm,
@@ -386,11 +391,23 @@ function SuccessCard({
   onReset,
   onCancelSubscription,
   getLabel,
+  isPaused,
+  pausedUntil,
+  onPauseClick,
+  onResumeClick,
+  isPauseResumeSubmitting,
 }: {
   data: SuccessData;
   onReset: () => void;
   onCancelSubscription: () => void;
   getLabel: (address: string) => string | null;
+  /** True once pause_subscription has been confirmed on-chain (Issue #795) */
+  isPaused: boolean;
+  /** Unix timestamp (seconds) the pause auto-resumes at, or null for an indefinite pause */
+  pausedUntil: number | null;
+  onPauseClick: () => void;
+  onResumeClick: () => void;
+  isPauseResumeSubmitting: boolean;
 }) {
   const days = Math.round(Number(data.interval) / 86400);
   const [isDownloading, setIsDownloading] = useState(false);
@@ -427,12 +444,29 @@ function SuccessCard({
       {/* Header */}
       <div className="flex items-center gap-3">
         <span className="text-2xl flex-shrink-0" aria-hidden="true">
-          ✓
+          {isPaused ? "⏸" : "✓"}
         </span>
         <p className="font-semibold text-green-300 text-base sm:text-lg">
           Subscription created successfully!
         </p>
       </div>
+
+      {/* Paused status banner — Issue #795 */}
+      {isPaused && (
+        <div
+          role="status"
+          className="flex flex-wrap items-center gap-2 rounded-lg bg-yellow-900/30 border border-yellow-600/50 px-3 py-2.5"
+        >
+          <span className="text-xs font-bold uppercase tracking-wide text-yellow-300">
+            Paused
+          </span>
+          <span className="text-xs text-yellow-200/80">
+            {pausedUntil
+              ? `Resumes automatically on ${new Date(pausedUntil * 1000).toLocaleString()}`
+              : "Payments are on hold until you resume."}
+          </span>
+        </div>
+      )}
 
       {/* Tx hash */}
       <div className="bg-gray-800/50 rounded-lg p-3 border border-gray-700/50">
@@ -470,6 +504,10 @@ function SuccessCard({
             {days !== 1 ? "s" : ""}.
           </li>
           <li>
+            Need a break? Pause anytime — payments are skipped until you
+            resume, and the subscription itself is never cancelled.
+          </li>
+          <li>
             To cancel, call{" "}
             <code className="bg-gray-800 px-1.5 py-0.5 rounded text-green-300 text-xs">
               cancel(subscriber, merchant)
@@ -489,6 +527,44 @@ function SuccessCard({
           Receipt generation failed: {downloadError}
         </div>
       )}
+
+      {/* Pause / Resume — Issue #795 */}
+      <div className="flex flex-col sm:flex-row gap-3">
+        {isPaused ? (
+          <button
+            type="button"
+            onClick={onResumeClick}
+            disabled={isPauseResumeSubmitting}
+            aria-label="Resume subscription"
+            className="flex-1 flex items-center justify-center gap-2 rounded-lg
+                       bg-blue-600 hover:bg-blue-500 active:bg-blue-700
+                       disabled:opacity-50 disabled:cursor-not-allowed
+                       py-3 text-sm font-semibold text-white transition-all duration-150
+                       min-h-[48px] hover:shadow-lg
+                       focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400
+                       focus-visible:ring-offset-2 focus-visible:ring-offset-gray-900"
+          >
+            <span aria-hidden="true">▶</span>
+            {isPauseResumeSubmitting ? "Resuming…" : "Resume Subscription"}
+          </button>
+        ) : (
+          <button
+            type="button"
+            onClick={onPauseClick}
+            disabled={isPauseResumeSubmitting}
+            aria-label="Pause subscription"
+            className="flex-1 flex items-center justify-center gap-2 rounded-lg
+                       border-2 border-yellow-600/70 text-yellow-300 hover:bg-yellow-900/40 active:bg-yellow-900/60
+                       disabled:opacity-50 disabled:cursor-not-allowed
+                       py-3 text-sm font-semibold transition-all duration-150 min-h-[48px] hover:shadow-lg
+                       focus:outline-none focus-visible:ring-2 focus-visible:ring-yellow-400
+                       focus-visible:ring-offset-2 focus-visible:ring-offset-gray-900"
+          >
+            <span aria-hidden="true">⏸</span>
+            {isPauseResumeSubmitting ? "Pausing…" : "Pause Subscription"}
+          </button>
+        )}
+      </div>
 
       {/* Action buttons */}
       <div className="flex flex-col sm:flex-row gap-3">
@@ -625,6 +701,57 @@ function ConfirmModal({
             className="flex-1 rounded-lg bg-blue-600 hover:bg-blue-500 active:bg-blue-700 py-3 text-sm font-semibold transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400"
           >
             Confirm & Authorize
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── Pause confirmation modal (Issue #795) ─────────────────────────────────────
+
+function PauseConfirmModal({
+  merchantAddress,
+  onConfirm,
+  onCancel,
+}: {
+  merchantAddress: string;
+  onConfirm: () => void;
+  onCancel: () => void;
+}) {
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="pause-confirm-title"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4"
+    >
+      <div className="w-full max-w-md bg-gray-900 border border-gray-700 rounded-2xl shadow-2xl p-6 space-y-5 text-white">
+        <h3 id="pause-confirm-title" className="text-lg font-bold">
+          Pause this subscription?
+        </h3>
+        <p className="text-sm text-gray-400 leading-relaxed">
+          Payments to{" "}
+          <span className="break-all font-mono text-xs text-gray-200">
+            {merchantAddress}
+          </span>{" "}
+          will be skipped while paused — the merchant cannot collect until you
+          resume. No funds move when pausing or resuming, and the subscription
+          itself is not cancelled.
+        </p>
+
+        <div className="flex gap-3 pt-1">
+          <button
+            onClick={onCancel}
+            className="flex-1 rounded-lg border border-gray-600 bg-gray-800/50 text-gray-300 hover:bg-gray-700 active:bg-gray-800 py-3 text-sm font-semibold transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-500"
+          >
+            Go Back
+          </button>
+          <button
+            onClick={onConfirm}
+            className="flex-1 rounded-lg bg-yellow-600 hover:bg-yellow-500 active:bg-yellow-700 py-3 text-sm font-semibold transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-yellow-400"
+          >
+            Pause Subscription
           </button>
         </div>
       </div>
@@ -1136,6 +1263,11 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
   // Cancel subscription confirmation modal
   const [showCancelConfirm, setShowCancelConfirm] = useState(false);
   const [cancelStatus, setCancelStatus] = useState<'idle' | 'pending' | 'done'>('idle');
+  // Pause / resume subscription (Issue #795)
+  const [showPauseConfirm, setShowPauseConfirm] = useState(false);
+  const [isPaused, setIsPaused] = useState(false);
+  const [pausedUntil, setPausedUntil] = useState<number | null>(null);
+  const [isPauseResumeSubmitting, setIsPauseResumeSubmitting] = useState(false);
 
   // ── Transaction poller ──────────────────────────────────────────────────────
   const { state: pollerState, startPolling } = useTransactionPoller({
@@ -1251,6 +1383,9 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
     setTokenAddress("");
     setAmount("");
     setInterval(String(DEFAULT_INTERVAL_SECONDS));
+    setShowPauseConfirm(false);
+    setIsPaused(false);
+    setPausedUntil(null);
     clearPersistedFormData(); // Clear persisted data on success (Issue #115)
   }
 
@@ -1277,6 +1412,81 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
     } catch (err) {
       setTxError(classifyError(err));
       setCancelStatus('idle');
+    }
+  }
+
+  /** Trigger the confirmation modal before pausing (Issue #795) */
+  function handlePauseClick() {
+    setShowPauseConfirm(true);
+  }
+
+  /** Called when the user confirms pausing inside PauseConfirmModal */
+  async function handleConfirmPause() {
+    setShowPauseConfirm(false);
+    if (!publicKey || !successData) return;
+
+    setIsPauseResumeSubmitting(true);
+    try {
+      await buildAndSubmitPauseSubscription(
+        {
+          subscriber: publicKey,
+          merchant: successData.merchant,
+          token: successData.token,
+        },
+        CONTRACT_ID,
+        publicKey,
+        NETWORK_PASSPHRASE,
+        RPC_URL,
+      );
+      setIsPaused(true);
+      setPausedUntil(null);
+      showToast({
+        variant: 'success',
+        message: 'Subscription paused. Payments will be skipped until you resume.',
+      });
+    } catch (err) {
+      const mapped = mapError(err);
+      showToast({
+        variant: 'error',
+        message: mapped.message,
+        action: mapped.action,
+        docsUrl: mapped.docsUrl,
+      });
+    } finally {
+      setIsPauseResumeSubmitting(false);
+    }
+  }
+
+  /** Resume a paused subscription immediately */
+  async function handleResume() {
+    if (!publicKey || !successData) return;
+
+    setIsPauseResumeSubmitting(true);
+    try {
+      await buildAndSubmitResumeSubscription(
+        {
+          subscriber: publicKey,
+          merchant: successData.merchant,
+          token: successData.token,
+        },
+        CONTRACT_ID,
+        publicKey,
+        NETWORK_PASSPHRASE,
+        RPC_URL,
+      );
+      setIsPaused(false);
+      setPausedUntil(null);
+      showToast({ variant: 'success', message: 'Subscription resumed.' });
+    } catch (err) {
+      const mapped = mapError(err);
+      showToast({
+        variant: 'error',
+        message: mapped.message,
+        action: mapped.action,
+        docsUrl: mapped.docsUrl,
+      });
+    } finally {
+      setIsPauseResumeSubmitting(false);
     }
   }
 
@@ -1354,6 +1564,14 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
           interval={interval}
           onConfirm={confirmAndSubmit}
           onCancel={() => setShowConfirm(false)}
+        />
+      )}
+      {/* Pause confirmation modal — Issue #795 */}
+      {showPauseConfirm && successData && (
+        <PauseConfirmModal
+          merchantAddress={successData.merchant}
+          onConfirm={handleConfirmPause}
+          onCancel={() => setShowPauseConfirm(false)}
         />
       )}
       {/* Address book modal */}
@@ -1497,6 +1715,11 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
           onReset={resetForm}
           onCancelSubscription={handleCancelSubscriptionClick}
           getLabel={abGetLabel}
+          isPaused={isPaused}
+          pausedUntil={pausedUntil}
+          onPauseClick={handlePauseClick}
+          onResumeClick={handleResume}
+          isPauseResumeSubmitting={isPauseResumeSubmitting}
         />
       )}
 

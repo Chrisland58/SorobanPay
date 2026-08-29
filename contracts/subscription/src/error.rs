@@ -45,4 +45,9 @@ pub enum ContractError {
     SameMerchant          = 18,
     /// `transfer_subscription` called but a subscription already exists for (subscriber, new_merchant)
     SubscriptionAlreadyExists = 19,
+    /// `execute_payment` called while paused and not yet due to auto-resume, or
+    /// `pause_subscription` called on a subscription that is already paused
+    SubscriptionPaused        = 20,
+    /// `resume_subscription` called on a subscription that is not currently paused
+    SubscriptionNotPaused     = 21,
 }
