@@ -1772,3 +1772,259 @@ fn test_execute_payment_before_due_does_not_mutate_subscription() {
     assert_eq!(before.next_payment, after.next_payment);
     assert_eq!(before.amount, after.amount);
 }
+
+// ─── Issue #61 — cancel: active subscription vs missing subscription ──────────
+
+/// Comprehensive cancel tests covering:
+///   - successful cancellation of an active subscription
+///   - correct error code (NoActiveSubscription = 4) on missing subscription
+///   - cancel of a never-created subscription
+///   - cancel after a previous cancel (double cancel)
+///   - cancel mid-cycle does not transfer funds
+///   - cancel emits the `cancel` event with correct topics
+///   - cancel does not emit extra events
+///   - cancelled subscription cannot be paid against
+
+/// Cancelling an active subscription removes it from storage, returns Ok,
+/// and leaves balances unchanged (cancel itself never transfers funds).
+#[test]
+fn test_cancel_active_subscription_succeeds() {
+    let t = T::new();
+    let amt = 100_000_i128;
+    let ivl = 86_400_u64;
+
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &amt, &ivl);
+    assert!(t.has_sub(), "subscription must exist before cancel");
+
+    let sb_before = t.sub_bal();
+    let mb_before = t.mer_bal();
+
+    let r = t.client.try_cancel(&t.subscriber, &t.merchant);
+    assert!(r.is_ok(), "cancel on active subscription must return Ok");
+
+    assert!(!t.has_sub(), "subscription must be removed after cancel");
+    assert_eq!(t.sub_bal(), sb_before, "cancel must not transfer subscriber funds");
+    assert_eq!(t.mer_bal(), mb_before, "cancel must not credit the merchant");
+}
+
+/// Cancelling a subscription that was never created must return
+/// ContractError::NoActiveSubscription (error code 4).
+#[test]
+fn test_cancel_nonexistent_subscription_returns_error_code_4() {
+    let t = T::new();
+
+    let r = t.client.try_cancel(&t.subscriber, &t.merchant);
+    assert!(
+        matches!(r, Err(Ok(ContractError::NoActiveSubscription))),
+        "cancel on a never-created subscription must return NoActiveSubscription (code 4)"
+    );
+}
+
+/// Cancelling a subscription a second time (double cancel) must return
+/// NoActiveSubscription because the entry was already removed.
+#[test]
+fn test_cancel_already_cancelled_subscription_returns_no_active() {
+    let t = T::new();
+
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &100_i128, &86_400_u64);
+
+    // First cancel — must succeed.
+    t.client.cancel(&t.subscriber, &t.merchant);
+    assert!(!t.has_sub(), "subscription must be removed after first cancel");
+
+    // Second cancel — must fail.
+    let r = t.client.try_cancel(&t.subscriber, &t.merchant);
+    assert!(
+        matches!(r, Err(Ok(ContractError::NoActiveSubscription))),
+        "second cancel must return NoActiveSubscription"
+    );
+}
+
+/// Cancelling mid-cycle (before a payment is due) must not move any tokens.
+/// The subscriber retains their full balance.
+#[test]
+fn test_cancel_mid_cycle_does_not_transfer_funds() {
+    let t   = T::new();
+    let amt = 200_000_i128;
+    let ivl = 86_400_u64;
+
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &amt, &ivl);
+
+    // Advance halfway — payment is not yet due.
+    t.advance(ivl / 2);
+
+    let sb_before = t.sub_bal();
+
+    t.client.cancel(&t.subscriber, &t.merchant);
+
+    assert_eq!(t.sub_bal(), sb_before, "mid-cycle cancel must not debit subscriber");
+    assert_eq!(t.mer_bal(), 0_i128,    "mid-cycle cancel must not credit merchant");
+    assert!(!t.has_sub(),              "subscription must be removed after cancel");
+}
+
+/// After cancel, execute_payment must return NoActiveSubscription regardless
+/// of how far the clock has advanced.
+#[test]
+fn test_execute_payment_after_cancel_returns_no_active_subscription() {
+    let t   = T::new();
+    let ivl = 86_400_u64;
+
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &100_000_i128, &ivl);
+    t.client.cancel(&t.subscriber, &t.merchant);
+
+    // Advance well past what would have been the due date.
+    t.advance(ivl * 2);
+
+    let r = t.client.try_execute_payment(&t.subscriber, &t.merchant);
+    assert!(
+        matches!(r, Err(Ok(ContractError::NoActiveSubscription))),
+        "execute_payment after cancel must return NoActiveSubscription"
+    );
+    assert_eq!(t.sub_bal(), 10_000_000_i128, "no transfer after cancel");
+}
+
+/// A successful cancel must emit exactly one `cancel` event with topics
+/// (symbol("cancel"), subscriber, merchant) and unit data.
+#[test]
+fn test_cancel_emits_cancel_event_with_correct_topics() {
+    let t = T::new();
+
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &100_i128, &86_400_u64);
+
+    // Record event count after subscribe.
+    let n_after_subscribe = t.env.events().all().iter().filter(|e| e.0 == t.contract_id).count();
+
+    t.client.cancel(&t.subscriber, &t.merchant);
+
+    let all = t.env.events().all();
+    let our: Vec<_> = all.iter().filter(|e| e.0 == t.contract_id).collect();
+
+    assert_eq!(
+        our.len(), n_after_subscribe + 1,
+        "cancel must emit exactly one additional event"
+    );
+
+    let cancel_event = our.last().unwrap();
+
+    // Topics: (symbol("cancel"), subscriber, merchant)
+    let expected_topics = (
+        soroban_sdk::Symbol::new(&t.env, "cancel"),
+        t.subscriber.clone(),
+        t.merchant.clone(),
+    )
+        .into_val(&t.env);
+    assert_eq!(cancel_event.1, expected_topics,
+        "cancel event topics must be (symbol('cancel'), subscriber, merchant)");
+
+    // Data: unit type ()
+    let expected_data = ().into_val(&t.env);
+    assert_eq!(cancel_event.2, expected_data, "cancel event data must be unit ()");
+}
+
+/// Cancelling a missing subscription must NOT emit any event — the operation
+/// fails before reaching the event emission point.
+#[test]
+fn test_cancel_nonexistent_emits_no_event() {
+    let t = T::new();
+
+    let n_before = t.env.events().all().len();
+    let _ = t.client.try_cancel(&t.subscriber, &t.merchant);
+    let n_after = t.env.events().all().len();
+
+    assert_eq!(n_after, n_before,
+        "failed cancel must not emit any events");
+}
+
+/// Verify error code numeric value: NoActiveSubscription must be error 4.
+/// External clients (frontends, indexers) depend on stable numeric error codes.
+#[test]
+fn test_no_active_subscription_error_code_is_four() {
+    // ContractError is repr(u32); NoActiveSubscription = 4.
+    assert_eq!(
+        ContractError::NoActiveSubscription as u32,
+        4,
+        "NoActiveSubscription must be error code 4"
+    );
+}
+
+/// Re-subscribing after cancel must work: a fresh subscription is created,
+/// not a resurrection of the removed one.
+#[test]
+fn test_resubscribe_after_cancel_creates_fresh_subscription() {
+    let t = T::new();
+
+    let amt1 = 100_000_i128;
+    let ivl1 = 86_400_u64;
+    let ts1  = t.env.ledger().timestamp();
+
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &amt1, &ivl1);
+    t.client.cancel(&t.subscriber, &t.merchant);
+    assert!(!t.has_sub());
+
+    // Advance time, then re-subscribe with different terms.
+    t.advance(3_600);
+    let ts2  = t.env.ledger().timestamp();
+    let amt2 = 200_000_i128;
+    let ivl2 = 172_800_u64;
+
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &amt2, &ivl2);
+
+    let d = t.get_sub();
+    assert_eq!(d.amount,       amt2,        "re-subscribe amount must be from the new call");
+    assert_eq!(d.interval,     ivl2,        "re-subscribe interval must be from the new call");
+    assert_eq!(d.next_payment, ts2 + ivl2,  "next_payment must be anchored to re-subscribe timestamp");
+
+    // Must not contain values from the cancelled subscription.
+    assert_ne!(d.next_payment, ts1 + ivl1,  "old next_payment must not persist after re-subscribe");
+}
+
+/// Cancel on a different pair must not affect a separate active subscription.
+/// Two independent (subscriber, merchant) pairs must be isolated.
+#[test]
+fn test_cancel_one_pair_does_not_affect_another() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let token = env.register_stellar_asset_contract_v2(admin.clone()).address();
+
+    let subscriber_a = Address::generate(&env);
+    let subscriber_b = Address::generate(&env);
+    let merchant     = Address::generate(&env);
+
+    for sub in [&subscriber_a, &subscriber_b] {
+        StellarAssetClient::new(&env, &token).mint(sub, &1_000_000_i128);
+    }
+
+    let contract_id = env.register(SubscriptionProtocol, ());
+    let client      = SubscriptionProtocolClient::new(&env, &contract_id);
+
+    for sub in [&subscriber_a, &subscriber_b] {
+        token::Client::new(&env, &token).approve(
+            sub,
+            &contract_id,
+            &500_000_i128,
+            &(env.ledger().sequence() + 100_000_u32),
+        );
+        client.subscribe(sub, &merchant, &token, &100_i128, &86_400_u64);
+    }
+
+    // Cancel only subscriber_a's subscription.
+    client.cancel(&subscriber_a, &merchant);
+
+    // subscriber_a's subscription is gone.
+    assert!(
+        !env.storage().persistent().has(
+            &DataKey::Subscription(subscriber_a.clone(), merchant.clone())
+        ),
+        "subscriber_a subscription must be removed"
+    );
+
+    // subscriber_b's subscription must still exist.
+    assert!(
+        env.storage().persistent().has(
+            &DataKey::Subscription(subscriber_b.clone(), merchant.clone())
+        ),
+        "subscriber_b subscription must be unaffected by subscriber_a's cancel"
+    );
+}
