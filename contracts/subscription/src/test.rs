@@ -1,5 +1,8 @@
 #![cfg(test)]
 
+extern crate std;
+use std::vec::Vec;
+
 use soroban_sdk::{
     testutils::{Address as _, Events, Ledger},
     token::{self, StellarAssetClient},
@@ -8,22 +11,23 @@ use soroban_sdk::{
 
 use crate::{
     error::ContractError,
-    storage::{DataKey, SubscriptionData},
+    events::ExecutedEventData,
+    storage::{DataKey, SubscriptionData, SubscriptionStatus},
     SubscriptionProtocol, SubscriptionProtocolClient,
 };
 
 // ─── Test helpers ─────────────────────────────────────────────────────────────
 
-struct T {
+struct T<'a> {
     env:         Env,
-    client:      SubscriptionProtocolClient,
+    client:      SubscriptionProtocolClient<'a>,
     subscriber:  Address,
     merchant:    Address,
     token:       Address,
     contract_id: Address,
 }
 
-impl T {
+impl T<'_> {
     fn new() -> Self {
         let env = Env::default();
         env.mock_all_auths();
@@ -33,11 +37,11 @@ impl T {
         let merchant   = Address::generate(&env);
 
         // Register SAC token and mint 10_000_000 to subscriber
-        let token = env.register_stellar_asset_contract_v2(admin.clone()).address();
+        let token = env.register_stellar_asset_contract(admin.clone());
         StellarAssetClient::new(&env, &token).mint(&subscriber, &10_000_000_i128);
 
         // Deploy subscription contract
-        let contract_id = env.register(SubscriptionProtocol, ());
+        let contract_id = env.register_contract(None, SubscriptionProtocol);
         let client      = SubscriptionProtocolClient::new(&env, &contract_id);
 
         // Approve contract to spend 5_000_000 on behalf of subscriber
@@ -64,6 +68,7 @@ impl T {
         token::Client::new(&self.env, &self.token).balance(&self.merchant)
     }
 
+    /// Returns true if the storage key exists (regardless of status).
     fn has_sub(&self) -> bool {
         self.env
             .storage()
@@ -95,6 +100,7 @@ fn test_full_lifecycle() {
     assert_eq!(d.amount,       amt);
     assert_eq!(d.interval,     ivl);
     assert_eq!(d.next_payment, ts0 + ivl);
+    assert_eq!(d.status,       SubscriptionStatus::Active);
 
     // (b) advance clock
     t.advance(ivl + 1);
@@ -106,9 +112,10 @@ fn test_full_lifecycle() {
     assert_eq!(t.sub_bal(), sb - amt);
     assert_eq!(t.mer_bal(), mb + amt);
 
-    // (d) cancel
+    // (d) cancel — sets status to Cancelled (record still exists)
     t.client.cancel(&t.subscriber, &t.merchant);
-    assert!(!t.has_sub());
+    assert!(t.has_sub(), "cancel preserves the storage record");
+    assert_eq!(t.get_sub().status, SubscriptionStatus::Cancelled);
 }
 
 // ─── Requirement 13.2 — Payment not due ──────────────────────────────────────
@@ -147,8 +154,9 @@ fn test_execute_payment_before_due_time() {
 
     // Verify subscription remains unchanged
     let d = t.get_sub();
-    assert_eq!(d.amount, amt);
+    assert_eq!(d.amount,   amt);
     assert_eq!(d.interval, ivl);
+    assert_eq!(d.status,   SubscriptionStatus::Active);
 }
 
 // ─── Requirement 13.3 — Execute after cancel ─────────────────────────────────
@@ -159,8 +167,9 @@ fn test_execute_after_cancel() {
     t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &100_000_i128, &86_400_u64);
     t.client.cancel(&t.subscriber, &t.merchant);
     t.advance(90_000);
+    // Status is Cancelled, so execute_payment must fail with SubscriptionNotActive.
     let r = t.client.try_execute_payment(&t.subscriber, &t.merchant);
-    assert!(matches!(r, Err(Ok(ContractError::NoActiveSubscription))));
+    assert!(matches!(r, Err(Ok(ContractError::SubscriptionNotActive))));
     assert_eq!(t.sub_bal(), 10_000_000_i128);
 }
 
@@ -206,6 +215,7 @@ fn test_subscribe_overwrites_existing() {
     assert_eq!(d.amount,       999);
     assert_eq!(d.interval,     172_800);
     assert_eq!(d.next_payment, ts2 + 172_800);
+    assert_eq!(d.status,       SubscriptionStatus::Active);
 }
 
 // ─── Extra: Cancel nonexistent ────────────────────────────────────────────────
@@ -232,22 +242,24 @@ fn test_cancel_and_resubscribe() {
     assert_eq!(d1.amount,       amt1);
     assert_eq!(d1.interval,     ivl1);
     assert_eq!(d1.next_payment, ts1 + ivl1);
+    assert_eq!(d1.status,       SubscriptionStatus::Active);
 
     // (b) cancel
     t.client.cancel(&t.subscriber, &t.merchant);
-    assert!(!t.has_sub());
+    assert_eq!(t.get_sub().status, SubscriptionStatus::Cancelled);
 
-    // (c) re-subscribe with different terms
+    // (c) re-subscribe with different terms (overwrites cancelled record)
     let amt2  = 200_000_i128;
     let ivl2  = 172_800_u64;
     let ts2   = t.env.ledger().timestamp();
     t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &amt2, &ivl2);
 
-    // (d) verify new subscription replaces old one
+    // (d) verify new subscription replaces old one with Active status
     let d2 = t.get_sub();
     assert_eq!(d2.amount,       amt2);
     assert_eq!(d2.interval,     ivl2);
     assert_eq!(d2.next_payment, ts2 + ivl2);
+    assert_eq!(d2.status,       SubscriptionStatus::Active);
     assert_ne!(d1.next_payment, d2.next_payment);
 }
 
@@ -272,6 +284,45 @@ fn test_execute_payment_emits_event() {
     t.client.execute_payment(&t.subscriber, &t.merchant);
     let n_after = t.env.events().all().iter().filter(|e| e.0 == t.contract_id).count();
     assert_eq!(n_after, n_before + 1, "execute_payment should emit 1 event");
+}
+
+/// Verify the executed event carries the correct amount and next_payment timestamp.
+#[test]
+fn test_execute_payment_event_data() {
+    let t   = T::new();
+    let amt = 500_i128;
+    let ivl = 86_400_u64;
+    let ts0 = t.env.ledger().timestamp();
+
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &amt, &ivl);
+    t.advance(ivl + 1);
+    let now = t.env.ledger().timestamp();
+    t.client.execute_payment(&t.subscriber, &t.merchant);
+
+    // Filter to events emitted by our contract (not the SAC token contract).
+    let all_events = t.env.events().all();
+    // Find subscribe (first) and executed (second) events from our contract.
+    let mut sub_event_idx:  Option<u32> = None;
+    let mut exec_event_idx: Option<u32> = None;
+    for i in 0..all_events.len() {
+        let ev = all_events.get(i).unwrap();
+        if ev.0 == t.contract_id {
+            if sub_event_idx.is_none() {
+                sub_event_idx = Some(i);
+            } else {
+                exec_event_idx = Some(i);
+            }
+        }
+    }
+    assert!(sub_event_idx.is_some(),  "subscribe event missing");
+    assert!(exec_event_idx.is_some(), "executed event missing");
+
+    let exec_ev = all_events.get(exec_event_idx.unwrap()).unwrap();
+    let event_data: ExecutedEventData = exec_ev.2.clone().into_val(&t.env);
+    assert_eq!(event_data.amount,       amt,       "event amount must match charged amount");
+    assert_eq!(event_data.next_payment, now + ivl, "event next_payment must be advanced by interval");
+    // Sanity: next_payment is strictly after the subscribe timestamp.
+    assert!(event_data.next_payment > ts0 + ivl);
 }
 
 // ─── Requirement 13.11 — No events on failure ────────────────────────────────
@@ -303,13 +354,70 @@ fn test_cancel_emits_no_event() {
     assert_eq!(n, n2, "cancel must not emit any events");
 }
 
+// ─── Issue #66 — SubscriptionStatus ──────────────────────────────────────────
+
+#[test]
+fn test_subscribe_sets_active_status() {
+    let t = T::new();
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &1_000_i128, &86_400_u64);
+    assert_eq!(t.get_sub().status, SubscriptionStatus::Active);
+}
+
+#[test]
+fn test_cancel_sets_cancelled_status() {
+    let t = T::new();
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &1_000_i128, &86_400_u64);
+    t.client.cancel(&t.subscriber, &t.merchant);
+    let d = t.get_sub();
+    assert_eq!(d.status, SubscriptionStatus::Cancelled);
+    // Record is still present in storage.
+    assert!(t.has_sub());
+}
+
+#[test]
+fn test_execute_payment_on_cancelled_subscription_fails() {
+    let t = T::new();
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &1_000_i128, &86_400_u64);
+    t.client.cancel(&t.subscriber, &t.merchant);
+    t.advance(86_401);
+    let r = t.client.try_execute_payment(&t.subscriber, &t.merchant);
+    assert!(matches!(r, Err(Ok(ContractError::SubscriptionNotActive))));
+}
+
+// ─── Issue #67 — Admin guard ──────────────────────────────────────────────────
+
+#[test]
+fn test_initialize_sets_admin() {
+    let t     = T::new();
+    let admin = Address::generate(&t.env);
+    t.client.initialize(&admin);
+    assert_eq!(t.client.get_admin(), Some(admin));
+}
+
+#[test]
+fn test_initialize_twice_fails() {
+    let t      = T::new();
+    let admin1 = Address::generate(&t.env);
+    let admin2 = Address::generate(&t.env);
+    t.client.initialize(&admin1);
+    let r = t.client.try_initialize(&admin2);
+    assert!(matches!(r, Err(Ok(ContractError::AlreadyInitialized))));
+    // First admin is unchanged.
+    assert_eq!(t.client.get_admin(), Some(admin1));
+}
+
+#[test]
+fn test_get_admin_returns_none_before_initialize() {
+    let t = T::new();
+    assert_eq!(t.client.get_admin(), None);
+}
+
 // ─── Property-Based Tests ─────────────────────────────────────────────────────
 
 use proptest::prelude::*;
 
 proptest! {
-    /// Property 1: Subscription data round-trip
-    /// Validates: Req 1.5, 5.1, 13.8, 13.9
+    /// Property 1: Subscription data round-trip (includes status)
     #[test]
     fn prop_subscribe_round_trip(
         amount   in 1_i128..=1_000_000_i128,
@@ -322,10 +430,10 @@ proptest! {
         prop_assert_eq!(d.amount,       amount);
         prop_assert_eq!(d.interval,     interval);
         prop_assert_eq!(d.next_payment, ts + interval);
+        prop_assert_eq!(d.status,       SubscriptionStatus::Active);
     }
 
     /// Property 2: Time-lock — immediate execute_payment always fails
-    /// Validates: Req 2.3, 5.2, 13.6
     #[test]
     fn prop_execute_before_due_always_errors(
         amount   in 1_i128..=1_000_000_i128,
@@ -340,7 +448,6 @@ proptest! {
     }
 
     /// Property 3: Double-payment prevention
-    /// Validates: Req 5.3, 5.4, 13.7
     #[test]
     fn prop_double_payment_prevention(
         amount   in 1_i128..=100_000_i128,
@@ -357,7 +464,6 @@ proptest! {
     }
 
     /// Property 4: Non-positive amount always rejected
-    /// Validates: Req 1.2, 8.1, 13.4
     #[test]
     fn prop_non_positive_amount_rejected(
         amount   in i128::MIN..=0_i128,
@@ -370,7 +476,6 @@ proptest! {
     }
 
     /// Property 5: Interval below 86400 always rejected
-    /// Validates: Req 1.3, 8.2, 13.5
     #[test]
     fn prop_short_interval_rejected(
         amount   in 1_i128..=1_000_000_i128,
@@ -383,7 +488,6 @@ proptest! {
     }
 
     /// Property 6: Interval above 31536000 always rejected
-    /// Validates: Req 1.4, 8.2
     #[test]
     fn prop_long_interval_rejected(
         amount   in 1_i128..=1_000_000_i128,
@@ -395,8 +499,7 @@ proptest! {
         prop_assert!(!t.has_sub());
     }
 
-    /// Property 7: Cancel terminates subscription permanently
-    /// Validates: Req 3.3, 3.5, 8.5
+    /// Property 7: Cancel terminates subscription permanently (status = Cancelled, no payments)
     #[test]
     fn prop_cancel_prevents_future_payments(
         amount   in 1_i128..=100_000_i128,
@@ -407,12 +510,11 @@ proptest! {
         t.client.cancel(&t.subscriber, &t.merchant);
         t.advance(interval + 1);
         let r = t.client.try_execute_payment(&t.subscriber, &t.merchant);
-        prop_assert!(matches!(r, Err(Ok(ContractError::NoActiveSubscription))));
+        prop_assert!(matches!(r, Err(Ok(ContractError::SubscriptionNotActive))));
         prop_assert_eq!(t.sub_bal(), 10_000_000_i128);
     }
 
     /// Property 8: Balance invariant — exact transfer, zero contract balance
-    /// Validates: Req 4.1, 4.2, 4.3
     #[test]
     fn prop_balance_invariant(
         amount   in 1_i128..=100_000_i128,
@@ -434,7 +536,6 @@ proptest! {
     }
 
     /// Property 9: No events on validation failures
-    /// Validates: Req 7.4, 13.11
     #[test]
     fn prop_no_events_on_invalid_amount(
         amount   in i128::MIN..=0_i128,

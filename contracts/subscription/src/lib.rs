@@ -7,13 +7,50 @@ mod storage;
 use soroban_sdk::{contract, contractimpl, token, Address, Env};
 
 use crate::error::ContractError;
-use crate::storage::{DataKey, SubscriptionData, MAX_TTL_LEDGERS, MIN_TTL_LEDGERS};
+use crate::storage::{
+    DataKey, SubscriptionData, SubscriptionStatus, MAX_TTL_LEDGERS, MIN_TTL_LEDGERS,
+};
 
 #[contract]
 pub struct SubscriptionProtocol;
 
 #[contractimpl]
 impl SubscriptionProtocol {
+    // ─── Admin / Initialization ───────────────────────────────────────────────
+
+    /// Initialize the contract by recording an admin/owner address.
+    ///
+    /// Must be called once after deployment. The stored admin address is used to gate
+    /// future upgrade or emergency-pause operations. Calling this a second time returns
+    /// `ContractError::AlreadyInitialized` to prevent ownership takeover.
+    ///
+    /// # Authorization
+    /// Requires a valid signature from `admin` in the transaction auth envelope.
+    ///
+    /// # Errors
+    /// - `ContractError::AlreadyInitialized` — if an admin has already been set.
+    pub fn initialize(env: Env, admin: Address) -> Result<(), ContractError> {
+        // Prevent re-initialization.
+        if env.storage().instance().has(&DataKey::Admin) {
+            return Err(ContractError::AlreadyInitialized);
+        }
+
+        // Require the prospective admin to sign this transaction.
+        admin.require_auth();
+
+        // Persist admin address in instance storage (lives with the contract instance).
+        env.storage().instance().set(&DataKey::Admin, &admin);
+
+        Ok(())
+    }
+
+    /// Return the current contract admin address, or `None` if not yet initialized.
+    pub fn get_admin(env: Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey::Admin)
+    }
+
+    // ─── Subscription entry points ────────────────────────────────────────────
+
     /// Create or update a recurring payment subscription.
     ///
     /// # Authorization
@@ -54,13 +91,14 @@ impl SubscriptionProtocol {
             return Err(ContractError::IntervalTooLong);
         }
 
-        // 4. Build subscription record.
+        // 4. Build subscription record with Active status.
         let next_payment = env.ledger().timestamp() + interval;
         let data = SubscriptionData {
             token,
             amount,
             interval,
             next_payment,
+            status: SubscriptionStatus::Active,
         };
 
         // 5. Persist subscription.
@@ -85,6 +123,7 @@ impl SubscriptionProtocol {
     ///
     /// # Errors
     /// - `ContractError::NoActiveSubscription` — if no subscription exists for the pair.
+    /// - `ContractError::SubscriptionNotActive` — if the subscription status is not `Active`.
     /// - `ContractError::PaymentNotDue`        — if the payment interval has not elapsed.
     /// - Propagated token contract errors      — if the transfer fails (insufficient allowance
     ///                                           or balance). SubscriptionData is NOT modified.
@@ -104,13 +143,18 @@ impl SubscriptionProtocol {
             .get(&key)
             .ok_or(ContractError::NoActiveSubscription)?;
 
-        // 3. Enforce time-lock.
+        // 3. Reject payment on non-Active subscriptions.
+        if data.status != SubscriptionStatus::Active {
+            return Err(ContractError::SubscriptionNotActive);
+        }
+
+        // 4. Enforce time-lock.
         let now = env.ledger().timestamp();
         if now < data.next_payment {
             return Err(ContractError::PaymentNotDue);
         }
 
-        // 4. Execute token transfer (subscriber → merchant).
+        // 5. Execute token transfer (subscriber → merchant).
         //    If this panics/errors, no state mutation below will execute.
         token::Client::new(&env, &data.token).transfer(
             &subscriber,
@@ -118,34 +162,34 @@ impl SubscriptionProtocol {
             &data.amount,
         );
 
-        // 5. Advance next_payment — using the `now` captured at invocation start.
+        // 6. Advance next_payment — using the `now` captured at invocation start.
         data.next_payment = now + data.interval;
 
-        // 6. Persist updated subscription.
+        // 7. Persist updated subscription.
         env.storage().persistent().set(&key, &data);
 
-        // 7. Extend TTL.
+        // 8. Extend TTL.
         env.storage()
             .persistent()
             .extend_ttl(&key, MIN_TTL_LEDGERS, MAX_TTL_LEDGERS);
 
-        // 8. Emit event — after all mutations and transfer have succeeded.
-        events::emit_executed(&env, &subscriber, &merchant, data.amount);
+        // 9. Emit event with charged amount and new next_payment for analytics consumers.
+        events::emit_executed(&env, &subscriber, &merchant, data.amount, data.next_payment);
 
         Ok(())
     }
 
     /// Cancel an active subscription.
     ///
+    /// Sets `status` to `Cancelled` rather than removing the storage entry, preserving
+    /// the record for off-chain indexers and audit trails. The cancelled entry will
+    /// naturally expire via TTL after ~30 days with no further interaction.
+    ///
     /// # Authorization
     /// Requires a valid signature from `subscriber` in the transaction auth envelope.
     ///
     /// # Errors
     /// - `ContractError::NoActiveSubscription` — if no subscription exists for the pair.
-    ///
-    /// # Notes
-    /// No event is emitted on cancellation (per Requirement 7.5).
-    /// Off-chain indexers detect cancellation by the absence of future `executed` events.
     pub fn cancel(
         env: Env,
         subscriber: Address,
@@ -154,16 +198,30 @@ impl SubscriptionProtocol {
         // 1. Authorization.
         subscriber.require_auth();
 
-        // 2. Verify subscription exists before removing.
+        // 2. Load subscription — return error if absent.
         let key = DataKey::Subscription(subscriber.clone(), merchant.clone());
-        if !env.storage().persistent().has(&key) {
-            return Err(ContractError::NoActiveSubscription);
-        }
+        let mut data: SubscriptionData = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .ok_or(ContractError::NoActiveSubscription)?;
 
-        // 3. Remove subscription from persistent storage.
-        env.storage().persistent().remove(&key);
+        // 3. Mark subscription as Cancelled (preserves record for indexers).
+        data.status = SubscriptionStatus::Cancelled;
+        env.storage().persistent().set(&key, &data);
 
         Ok(())
+    }
+
+    /// Return the current subscription data for a (subscriber, merchant) pair, if it exists.
+    pub fn get_subscription(
+        env: Env,
+        subscriber: Address,
+        merchant: Address,
+    ) -> Option<SubscriptionData> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::Subscription(subscriber, merchant))
     }
 }
 
