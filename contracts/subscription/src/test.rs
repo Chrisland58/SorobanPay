@@ -1772,3 +1772,143 @@ fn test_execute_payment_before_due_does_not_mutate_subscription() {
     assert_eq!(before.next_payment, after.next_payment);
     assert_eq!(before.amount, after.amount);
 }
+
+// ─── Issue #62 — Contract version tag and upgrade path ───────────────────────
+
+/// The contract exposes a `version()` entry point that returns the semantic
+/// version string so off-chain systems can verify compatibility before calling
+/// any other function.
+///
+/// Tests added:
+///   - version() returns the expected "1.0.0" Symbol
+///   - contract_name() returns the expected "SorobanPay" Symbol
+///   - storage constants (CONTRACT_VERSION, VERSION_MAJOR/MINOR/PATCH,
+///     CONTRACT_NAME) carry the correct values for use in migration tooling
+///   - version can be queried without any auth (public read)
+///   - version does not mutate state
+
+use crate::storage::{CONTRACT_VERSION, CONTRACT_NAME, VERSION_MAJOR, VERSION_MINOR, VERSION_PATCH};
+
+/// `version()` must return the Symbol "1.0.0" matching the CONTRACT_VERSION constant.
+#[test]
+fn test_version_returns_expected_symbol() {
+    let t = T::new();
+    let v = t.client.version();
+    assert_eq!(
+        v,
+        soroban_sdk::Symbol::new(&t.env, "1.0.0"),
+        "version() must return Symbol('1.0.0')"
+    );
+}
+
+/// `contract_name()` must return the Symbol "SorobanPay".
+#[test]
+fn test_contract_name_returns_expected_symbol() {
+    let t = T::new();
+    let name = t.client.contract_name();
+    assert_eq!(
+        name,
+        soroban_sdk::Symbol::new(&t.env, "SorobanPay"),
+        "contract_name() must return Symbol('SorobanPay')"
+    );
+}
+
+/// The CONTRACT_VERSION string constant must match the "MAJOR.MINOR.PATCH" format
+/// returned by `version()`.  Off-chain upgrade tooling depends on this constant
+/// being in sync with the on-chain entry point.
+#[test]
+fn test_storage_contract_version_constant_matches_entry_point() {
+    let t = T::new();
+    let on_chain_version = t.client.version();
+    let expected = soroban_sdk::Symbol::new(&t.env, CONTRACT_VERSION);
+    assert_eq!(
+        on_chain_version, expected,
+        "CONTRACT_VERSION constant must match the value returned by version()"
+    );
+}
+
+/// Numeric version components must be self-consistent: major=1, minor=0, patch=0.
+/// These are used by migration tooling to compare versions without string parsing.
+#[test]
+fn test_version_numeric_components_are_correct() {
+    assert_eq!(VERSION_MAJOR, 1, "VERSION_MAJOR must be 1");
+    assert_eq!(VERSION_MINOR, 0, "VERSION_MINOR must be 0");
+    assert_eq!(VERSION_PATCH, 0, "VERSION_PATCH must be 0");
+}
+
+/// CONTRACT_NAME constant must equal "SorobanPay-SubscriptionProtocol".
+#[test]
+fn test_contract_name_constant_is_correct() {
+    assert_eq!(
+        CONTRACT_NAME,
+        "SorobanPay-SubscriptionProtocol",
+        "CONTRACT_NAME constant must be 'SorobanPay-SubscriptionProtocol'"
+    );
+}
+
+/// `version()` is a read-only call — it must not create or modify any
+/// storage entry and must not emit any events.
+#[test]
+fn test_version_does_not_mutate_state() {
+    let t = T::new();
+
+    let events_before = t.env.events().all().len();
+    let _v = t.client.version();
+    let events_after = t.env.events().all().len();
+
+    assert_eq!(
+        events_after, events_before,
+        "version() must not emit any events"
+    );
+
+    // No subscription should have been created as a side-effect.
+    assert!(!t.has_sub(), "version() must not create storage entries");
+}
+
+/// `version()` requires no authorization — any caller may query it.
+/// In mock_all_auths mode this is implicit; we verify it succeeds in
+/// a fresh environment with no auths mocked to confirm no auth guard exists.
+#[test]
+fn test_version_requires_no_auth() {
+    let env = Env::default();
+    // Intentionally do NOT call env.mock_all_auths() —
+    // version() must succeed without any authorization.
+    let contract_id = env.register(SubscriptionProtocol, ());
+    let client      = SubscriptionProtocolClient::new(&env, &contract_id);
+
+    let v = client.version();
+    assert_eq!(
+        v,
+        soroban_sdk::Symbol::new(&env, "1.0.0"),
+        "version() must succeed without authorization"
+    );
+}
+
+/// Simulates an off-chain upgrade compatibility check: read the contract version
+/// and verify it starts with the expected major version prefix.
+///
+/// Real migration tooling would compare VERSION_MAJOR to the stored major version
+/// in an upgrade registry. This test documents and exercises that pattern.
+#[test]
+fn test_version_upgrade_compatibility_check_pattern() {
+    let t = T::new();
+
+    // Off-chain systems compare the on-chain version against a supported range.
+    // The contract version must be v1.x.x for this integration to be compatible.
+    let v = t.client.version();
+    let expected_v1 = soroban_sdk::Symbol::new(&t.env, "1.0.0");
+
+    // In production an off-chain client would parse major from the string;
+    // here we verify the full symbol matches the pinned v1.0.0 release.
+    assert_eq!(
+        v, expected_v1,
+        "upgrade path check: contract must be v1.0.0 for this integration"
+    );
+
+    // The numeric constant VERSION_MAJOR provides a machine-readable signal:
+    // if VERSION_MAJOR > 1 a migration is required before calling the contract.
+    assert_eq!(
+        VERSION_MAJOR, 1,
+        "upgrade path check: VERSION_MAJOR must be 1 — increment on breaking changes"
+    );
+}
