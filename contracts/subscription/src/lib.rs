@@ -648,6 +648,10 @@ impl SubscriptionProtocol {
     ///
     /// Hard cap: at most [`BATCH_MAX_SIZE`] (50) subscribers per call.
     ///
+    /// Sets `status` to `Cancelled` rather than removing the storage entry, preserving
+    /// the record for off-chain indexers and audit trails. The cancelled entry will
+    /// naturally expire via TTL after ~30 days with no further interaction.
+    ///
     /// # Authorization
     /// Requires a valid signature from `merchant` — authenticated once for the batch.
     ///
