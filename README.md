@@ -6,6 +6,8 @@
 
 A production-grade, non-custodial recurring payments protocol built on Stellar's Soroban smart contract platform. Enables SaaS billing, creator subscriptions, and recurring donations directly on-chain — no custodial wallets, no pre-authorized transaction arrays.
 
+Deploy with `init(admin)` before creating subscriptions. The admin can set a per-deployment amount cap with `set_max_amount`; subscriptions above it return `AmountExceedsLimit` (error 18). `subscribe` accepts an optional grace period; failed collections record `overdue_since`, and anyone can call `expire_subscription` after the grace period.
+
 ---
 
 ## Architecture
@@ -134,6 +136,150 @@ Open http://localhost:3000 in a browser with the [Freighter extension](https://w
 1. In Freighter, switch to Testnet and fund your wallet via [Friendbot](https://laboratory.stellar.org/#account-creator?network=test).
 2. Open the app, enter a merchant address and amount, and click **Subscribe**.
 3. Approve the transaction in Freighter — the subscription is now live on-chain.
+
+---
+
+## Kubernetes Deployment (backend services)
+
+The `deploy/k8s/` directory contains production-grade Kubernetes manifests for the three SorobanPay backend roles:
+
+| Manifest | Workload | Replicas |
+|---|---|---|
+| `indexer-deployment.yaml` | Event indexer — polls Soroban RPC every 5 min | 1 (Recreate) |
+| `api-deployment.yaml` | REST API — subscriptions, webhooks, admin, reports | 2–10 (HPA) |
+| `webhook-worker-deployment.yaml` | Webhook worker — delivers merchant notifications | 2 (RollingUpdate) |
+
+All three run the same `sorobanpay/backend` Docker image; the `SERVICE_ROLE` env var selects the active mode at startup.
+
+### Prerequisites
+
+| Tool | Install |
+|---|---|
+| `kubectl` ≥ 1.28 | https://kubernetes.io/docs/tasks/tools/ |
+| A Kubernetes cluster | minikube, kind, EKS, GKE, AKS, etc. |
+| [nginx-ingress controller](https://kubernetes.github.io/ingress-nginx/) | `kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.11.1/deploy/static/provider/cloud/deploy.yaml` |
+| [cert-manager](https://cert-manager.io/) (TLS) | `kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.15.1/cert-manager.yaml` |
+| [metrics-server](https://github.com/kubernetes-sigs/metrics-server) (HPA) | `kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml` |
+
+### Quick start — minikube
+
+```bash
+# 1. Start minikube
+minikube start --cpus=4 --memory=4096
+
+# 2. Enable the nginx ingress addon
+minikube addons enable ingress
+
+# 3. Build the backend image inside minikube's Docker daemon
+eval $(minikube docker-env)
+docker build -t sorobanpay/backend:latest backend/
+
+# 4. Set real secret values (do not commit these to source control)
+kubectl create secret generic sorobanpay-secrets \
+  --from-literal=DATABASE_URL="postgresql://sorobanpay:sorobanpay@postgres:5432/sorobanpay?schema=public" \
+  --from-literal=WEBHOOK_SECRET="$(openssl rand -hex 32)" \
+  --from-literal=ADMIN_JWT_SECRET="$(openssl rand -hex 32)" \
+  -n sorobanpay --dry-run=client -o yaml > /tmp/sorobanpay-secrets.yaml
+# Edit /tmp/sorobanpay-secrets.yaml if needed, then apply after the namespace:
+
+# 5. Apply all manifests (namespace first, then the rest via kustomize)
+kubectl apply -f deploy/k8s/namespace.yaml
+kubectl apply /tmp/sorobanpay-secrets.yaml
+kubectl apply -k deploy/k8s/
+
+# 6. Verify the rollout
+kubectl rollout status deployment/sorobanpay-api     -n sorobanpay
+kubectl rollout status deployment/sorobanpay-indexer -n sorobanpay
+kubectl rollout status deployment/sorobanpay-webhook-worker -n sorobanpay
+
+# 7. Check HPA
+kubectl get hpa -n sorobanpay
+
+# 8. Port-forward to test locally (bypasses Ingress)
+kubectl port-forward svc/sorobanpay-api 8080:80 -n sorobanpay
+curl http://localhost:8080/health
+```
+
+### Quick start — existing cluster (production)
+
+```bash
+# 1. Create the namespace
+kubectl apply -f deploy/k8s/namespace.yaml
+
+# 2. Populate secrets from your secret manager (example: plain kubectl)
+kubectl create secret generic sorobanpay-secrets \
+  --from-literal=DATABASE_URL="postgresql://..." \
+  --from-literal=WEBHOOK_SECRET="$(openssl rand -hex 32)" \
+  --from-literal=ADMIN_JWT_SECRET="$(openssl rand -hex 32)" \
+  -n sorobanpay
+
+# 3. Edit deploy/k8s/configmap.yaml — set CONTRACT_ID, RPC_URL, and API_BASE_URL
+
+# 4. Edit deploy/k8s/api-service.yaml — replace api.sorobanpay.example.com with your domain
+
+# 5. Apply everything
+kubectl apply -k deploy/k8s/
+
+# 6. Watch pods come up
+kubectl get pods -n sorobanpay -w
+```
+
+### Updating the image tag
+
+Use `kustomize edit` to pin a specific release without editing manifests by hand:
+
+```bash
+cd deploy/k8s
+kustomize edit set image sorobanpay/backend=sorobanpay/backend:v1.2.3
+kubectl apply -k .
+```
+
+### Directory structure
+
+```
+deploy/k8s/
+├── namespace.yaml                  # sorobanpay namespace
+├── configmap.yaml                  # Non-secret env vars (RPC_URL, CONTRACT_ID, …)
+├── secrets.yaml                    # Placeholder secrets — replace with real values
+├── indexer-deployment.yaml         # Event indexer (1 replica, Recreate)
+├── api-deployment.yaml             # REST API (2 replicas min, HPA to 10)
+├── webhook-worker-deployment.yaml  # Webhook worker (2 replicas)
+├── api-service.yaml                # ClusterIP service + Ingress with TLS
+├── hpa.yaml                        # HPA: CPU ≥ 70% or Memory ≥ 80%
+├── postgres-statefulset.yaml       # PostgreSQL (dev/CI only — use managed DB in prod)
+├── redis-statefulset.yaml          # Redis reference (not yet used — future roadmap)
+└── kustomization.yaml              # Kustomize root — applies all of the above
+```
+
+### Secret management
+
+The provided `secrets.yaml` contains **placeholder base64-encoded values** and must never be applied as-is to a real cluster. Recommended approaches:
+
+- **External Secrets Operator** (recommended): sync from AWS Secrets Manager, GCP Secret Manager, or HashiCorp Vault. Replace `secrets.yaml` with an `ExternalSecret` CRD.
+- **Sealed Secrets**: `kubeseal --format yaml < secrets.yaml > secrets-sealed.yaml` — safe to commit.
+- **`kubectl create secret`**: generate secrets on-the-fly in your CI/CD pipeline, never touching disk.
+
+See [docs/security.md](docs/security.md) for full guidance on managing backend secrets.
+
+### Health probes
+
+All three deployments expose `/health` on port 3001. Kubernetes uses this endpoint for liveness, readiness, and startup probes. The health handler verifies:
+1. Soroban RPC reachability (`getHealth`)
+2. Contract address resolvability (`getContractData`)
+
+A pod will not receive traffic and will be restarted if either check fails consistently. See `backend/src/routes/health.ts` for the implementation.
+
+### Observability
+
+Prometheus annotations are set on all pods:
+
+```
+prometheus.io/scrape: "true"
+prometheus.io/port:   "3001"
+prometheus.io/path:   "/metrics"
+```
+
+If you use the prometheus-operator, create a `ServiceMonitor` targeting the `sorobanpay-api` service. The Grafana dashboard in `deploy/grafana/sorobanpay-dashboard.json` can be imported directly.
 
 ---
 
@@ -601,6 +747,8 @@ Three ways to access the shortcuts reference:
 | `subscribe(subscriber, merchant, token, amount, interval)` | subscriber | Create or update subscription. Amount must be > 0, interval in [86400, 31536000] seconds. |
 | `execute_payment(subscriber, merchant)` | merchant | Collect payment if interval has elapsed. Transfers tokens directly subscriber → merchant. |
 | `cancel(subscriber, merchant)` | subscriber | Remove subscription from persistent storage. |
+| `get_subscription(subscriber, merchant)` | *(none — read-only)* | Return `Some(SubscriptionData)` if an active subscription exists, or `None` if it does not. |
+| `get_subscription_count(merchant)` | *(none — read-only)* | Return the number of active subscriptions indexed for a given merchant. Returns `0` if none. |
 
 ### Examples
 
@@ -666,6 +814,92 @@ const op = contract.call(
   new Address(merchant).toScVal(),
 );
 // Expected: subscription removed; future execute_payment calls return NoActiveSubscription (error 4).
+```
+
+**get_subscription** — read active subscription state without auth:
+
+```bash
+stellar contract invoke \
+  --id $CONTRACT_ID --network testnet \
+  -- get_subscription \
+  --subscriber GABC...ALICE \
+  --merchant   GXYZ...MERCHANT
+```
+
+```typescript
+import {
+  Contract,
+  SorobanRpc,
+  TransactionBuilder,
+  Networks,
+  Address,
+  scValToNative,
+  xdr,
+} from "@stellar/stellar-sdk";
+
+const server = new SorobanRpc.Server("https://soroban-testnet.stellar.org");
+const contract = new Contract(CONTRACT_ID);
+
+// Build a read-only simulation — no signing required.
+const account = await server.getAccount(anyPublicKey);
+const tx = new TransactionBuilder(account, { fee: "100", networkPassphrase: Networks.TESTNET })
+  .addOperation(
+    contract.call(
+      "get_subscription",
+      new Address(subscriber).toScVal(),
+      new Address(merchant).toScVal(),
+    )
+  )
+  .setTimeout(30)
+  .build();
+
+const sim = await server.simulateTransaction(tx);
+
+if (SorobanRpc.Api.isSimulationSuccess(sim) && sim.result) {
+  const raw = scValToNative(sim.result.retval);
+
+  if (raw === null) {
+    console.log("No active subscription for this pair.");
+  } else {
+    // raw is an object matching SubscriptionData:
+    // { token: string, amount: bigint, interval: bigint, next_payment: bigint, is_paused: boolean }
+    console.log("Subscription:", raw);
+    console.log("Amount (stroops):", raw.amount);
+    console.log("Next payment (unix timestamp):", new Date(Number(raw.next_payment) * 1000));
+  }
+}
+// Expected: returns the SubscriptionData struct or null (None) if no subscription exists.
+// No wallet connection or signature needed — safe to call from any read-only context.
+```
+
+**get_subscription_count** — number of active subscriptions for a merchant:
+
+```bash
+stellar contract invoke \
+  --id $CONTRACT_ID --network testnet \
+  -- get_subscription_count \
+  --merchant GXYZ...MERCHANT
+```
+
+```typescript
+const tx = new TransactionBuilder(account, { fee: "100", networkPassphrase: Networks.TESTNET })
+  .addOperation(
+    contract.call(
+      "get_subscription_count",
+      new Address(merchantAddress).toScVal(),
+    )
+  )
+  .setTimeout(30)
+  .build();
+
+const sim = await server.simulateTransaction(tx);
+
+if (SorobanRpc.Api.isSimulationSuccess(sim) && sim.result) {
+  const count = scValToNative(sim.result.retval) as number;
+  console.log(`Merchant has ${count} active subscriber(s).`);
+}
+// Expected: u32 count of active subscriptions indexed for the merchant.
+// Returns 0 when the merchant has no subscribers or the index has expired.
 ```
 
 For the full parameter reference and error cases see [docs/contract-api.md](docs/contract-api.md).
@@ -836,6 +1070,7 @@ Failed calls that return a `ContractError` (e.g., `PaymentNotDue`, `NoActiveSubs
 | 9 | `AmountTooLarge` | `amount > 10¹⁸` in `subscribe` |
 | 10 | `SelfSubscription` | `subscriber == merchant` in `subscribe` |
 | 11 | `InvalidTokenAddress` | `token` is the contract's own address in `subscribe` |
+| 12 | `SubscriptionPaused` | Payment attempted while a subscription is paused |
 
 ---
 
@@ -952,6 +1187,38 @@ Every entry point calls `require_auth()` as its first statement — before any s
 
 Subscribers grant a SEP-41 allowance to the contract address. The contract's `execute_payment` calls `token.transfer(subscriber, merchant, amount)` using that allowance. Revoking the allowance with `token.approve(contract_address, 0)` immediately prevents all future collections — regardless of whether the on-chain subscription record still exists. This gives subscribers a unilateral, no-contract-call emergency stop.
 
+### Protocol fee model
+
+SorobanPay supports an optional on-chain protocol fee configured by the contract admin via `set_protocol_fee(admin, fee_bps, fee_collector)`.
+
+**Fee split mechanics:**
+
+When `fee_bps > 0`, every `execute_payment` call splits the payment into two transfers:
+
+```
+fee             = amount * fee_bps / 10_000   (integer division — rounds down)
+merchant_amount = amount - fee
+
+transfer 1: subscriber → merchant        for merchant_amount
+transfer 2: subscriber → fee_collector   for fee
+```
+
+When `fee_bps = 0` (the default) only one transfer is made and behavior is identical to the no-fee baseline.
+
+**Constraints and abuse prevention:**
+
+| Constraint | Value |
+|-----------|-------|
+| Maximum `fee_bps` | `500` (5 %) |
+| `set_protocol_fee` requires | admin signature |
+| Fee config stored | instance storage (upgradeable by admin only) |
+
+The 500 bps cap prevents admin abuse: even a compromised admin key cannot extract more than 5 % of any payment. The subscriber's allowance model (see below) remains the unilateral emergency stop — revoking the SEP-41 allowance blocks all transfers regardless of fee configuration.
+
+**Integer division truncation:** fee rounds down toward zero. For example, 1 token at 50 bps yields fee = 0 (the merchant receives the full token). The first non-zero fee at 50 bps occurs at 200 tokens (`200 * 50 / 10_000 = 1`).
+
+**Events:** a `fee_collected` event is emitted after each successful fee transfer, with topics `(symbol("fee_collected"), subscriber, merchant, fee_collector)` and data `fee_amount: i128`.
+
 ### Time-lock enforcement
 
 `execute_payment` checks `now >= next_payment` using the Soroban ledger timestamp before attempting any transfer. The timestamp is set by network validators and cannot be manipulated by the transaction submitter. Merchants cannot collect payments early or double-collect within a billing window.
@@ -969,6 +1236,44 @@ Subscription records are persistent storage entries with a TTL of ~30 days minim
 The optional off-chain backend polls `getEvents()` but never submits token transfers. If the backend is compromised, an attacker can read subscription state and payment history — they cannot move tokens or modify on-chain subscriptions.
 
 For guidance on storing backend secrets safely (database credentials, RPC API keys, webhook secrets), see [docs/security.md](docs/security.md).
+
+---
+
+## Documentation
+
+| Document | Description |
+|----------|-------------|
+| [docs/faq.md](docs/faq.md) | Frequently asked questions for integrators |
+| [docs/deployment.md](docs/deployment.md) | Production deployment guide (mainnet, Docker, Kubernetes, monitoring) |
+| [docs/saas-integration-guide.md](docs/saas-integration-guide.md) | End-to-end SaaS billing integration guide with Node.js examples |
+
+---
+
+## Use Cases
+
+- **SaaS billing** — See [docs/saas-integration-guide.md](docs/saas-integration-guide.md) for a complete walkthrough: contract deployment, event indexing, webhooks, plan changes, cancellations, and revenue reporting.
+- **Creator subscriptions** — Fans grant a one-time allowance; creators collect recurring payments on-chain without custodial wallets.
+- **Recurring donations** — DAOs and nonprofits accept on-chain pledges with configurable intervals (daily to annual).
+
+---
+
+## Frontend
+
+### Storybook (component documentation)
+
+```bash
+cd frontend
+npm run storybook
+```
+
+Opens Storybook at http://localhost:6006. Stories are available for all UI components including `SubscriptionForm`, `SuccessCard`, `WalletBadge`, skeleton loaders, and error boundary fallback. Each story includes accessibility checks via the axe-core panel.
+
+Build a static Storybook:
+
+```bash
+cd frontend
+npm run storybook:build
+```
 
 ---
 
@@ -1039,6 +1344,43 @@ npm run dev
 | `contract` | Changes to the Soroban smart contract |
 | `frontend` | Changes to the Next.js frontend |
 | `deployment` | Changes to build or deploy scripts |
+| `dependencies` | Dependency updates (Dependabot) |
+| `security` | Security advisories and vulnerability fixes |
+| `major-update` | Major-version bump requiring manual review |
+
+### Dependency management (Dependabot)
+
+Dependabot is configured to open pull requests for outdated dependencies every Monday:
+
+| Ecosystem | Directory | Schedule | Grouping |
+|-----------|-----------|----------|----------|
+| npm | `frontend/` | Weekly (Monday) | `@stellar/*` grouped into one PR |
+| npm | `backend/` | Weekly (Monday) | — |
+| Cargo | `contracts/subscription/` | Weekly (Monday) | — |
+| GitHub Actions | `/` | Monthly | — |
+
+**Merge policy:**
+
+- **Patch and minor updates** — automatically approved and squash-merged once all CI checks pass. No manual action required.
+- **Major updates** — opened as a PR with the `major-update` label and left for manual review. CI must still pass before merge.
+- **GitHub Actions updates** — automatically approved and squash-merged (Actions use immutable tag or SHA pins; breaking changes do not follow semver).
+
+**Weekly security scanning (OPS-121):**
+
+A separate [security-audit workflow](.github/workflows/security-audit.yml) runs every Monday at 04:00 UTC independently of Dependabot PRs:
+
+- `npm audit --audit-level=high` in both `frontend/` and `backend/`
+- `cargo audit` in `contracts/subscription/`
+
+If any HIGH or CRITICAL advisory is found, the workflow fails and automatically opens a GitHub issue labelled `security` + `dependencies` so the team is alerted immediately. Audit reports are uploaded as workflow artifacts for detailed inspection.
+
+**Responding to security issues:**
+
+1. Check the opened issue for the advisory details and CVE link.
+2. For npm: run `npm audit fix` in the relevant directory, or pin to a safe version manually.
+3. For Cargo: update the crate version in `Cargo.toml`, run `cargo update`, and commit the updated `Cargo.lock`.
+4. If no fix exists yet, add an `[advisories]` ignore entry in `audit.toml` with a written justification and a link to the upstream issue.
+5. Close the GitHub issue once the advisory is resolved.
 
 ---
 
@@ -1046,10 +1388,13 @@ npm run dev
 
 | Guide | Description |
 |---|---|
+| [Soroban Events API](docs/events.md) | Comprehensive guide to all contract events: topics, payloads, integration examples |
+| [Storage TTL and Subscription Lifetime](docs/storage-ttl.md) | Complete guide to storage TTL management, subscription lifecycle, and cost implications |
 | [Storage TTL Management](docs/operations.md) | Detecting at-risk entries, extending TTL programmatically, alert thresholds |
 | [Network Configuration](docs/networks.md) | Testnet vs. mainnet side-by-side, common mistakes, switching guide |
 | [Backend API Cookbook](docs/api-cookbook.md) | 8 recipes: auth, subscriptions, webhooks, CSV export, MRR, TTL health |
 | [Release Process](docs/release-process.md) | Versioning rules, release note template, changelog process, step-by-step checklist |
+| [Freighter Troubleshooting](docs/freighter-troubleshooting.md) | Connection issues, signing failures, rejected transactions, contract errors, diagnostic checklist |
 | [Changelog](CHANGELOG.md) | Version history following Keep a Changelog format |
 
 ---
