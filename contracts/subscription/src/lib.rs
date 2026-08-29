@@ -587,7 +587,18 @@ impl SubscriptionProtocol {
             return Err(ContractError::PaymentNotDue);
         }
 
+        let contract_address = env.current_contract_address();
         let token_client = token::Client::new(&env, &data.token);
+
+        // Allowance check (Issue #51): verify the subscriber has approved the contract
+        // to spend at least the payment amount before touching the token contract.
+        let allowance = token_client.allowance(&subscriber, &contract_address);
+        if allowance < data.amount {
+            events::emit_insufficient_allowance(&env, &subscriber, &merchant, allowance, data.amount);
+            return Err(ContractError::InsufficientAllowance);
+        }
+
+        // Balance check: verify the subscriber actually holds enough tokens.
         let subscriber_balance = token_client.balance(&subscriber);
         if subscriber_balance < data.amount {
             let overdue_since = data.overdue_since.unwrap_or(now);
@@ -701,7 +712,17 @@ impl SubscriptionProtocol {
                 continue;
             }
 
+            let contract_address = env.current_contract_address();
             let token_client = token::Client::new(&env, &data.token);
+
+            // Allowance check (Issue #51): skip subscriber if allowance is insufficient.
+            let allowance = token_client.allowance(&subscriber, &contract_address);
+            if allowance < data.amount {
+                events::emit_insufficient_allowance(&env, &subscriber, &merchant, allowance, data.amount);
+                results.push_back((subscriber.clone(), false));
+                continue;
+            }
+
             let balance = token_client.balance(&subscriber);
             if balance < data.amount {
                 let overdue_since = data.overdue_since.unwrap_or(now);
