@@ -167,3 +167,115 @@ async function pollForConfirmation(
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
+
+// ── Merchant subscription query ───────────────────────────────────────────────
+
+/**
+ * On-chain subscription record as decoded from `get_merchant_subscriptions`.
+ * Mirrors the Rust `SubscriptionData` struct.
+ */
+export interface SubscriptionData {
+  /** SEP-41 token contract address */
+  token: string;
+  /** Payment amount per interval (in token's smallest unit) */
+  amount: bigint;
+  /** Seconds between payments */
+  interval: bigint;
+  /** Unix timestamp when the next payment becomes collectable */
+  nextPayment: bigint;
+  /** True when subscription payments are suspended */
+  isPaused: boolean;
+}
+
+/**
+ * A subscription paired with its subscriber address.
+ * Mirrors the Rust `SubscriptionEntry` struct returned by `get_merchant_subscriptions`.
+ */
+export interface SubscriptionEntry {
+  /** Subscriber Stellar G-address */
+  subscriber: string;
+  /** Full subscription state */
+  data: SubscriptionData;
+}
+
+/**
+ * Query all active subscriptions for a merchant by calling
+ * `get_merchant_subscriptions` on the SorobanPay contract.
+ *
+ * This is a read-only simulation — no transaction is submitted and no wallet
+ * signature is required.
+ *
+ * @param merchantAddress  Merchant Stellar G-address to query
+ * @param contractId       Deployed SorobanPay contract address
+ * @param rpcUrl           Soroban RPC endpoint URL
+ * @param networkPassphrase Stellar network passphrase
+ * @returns                Array of subscriber–subscription pairs (may be empty)
+ */
+export async function getMerchantSubscriptions(
+  merchantAddress: string,
+  contractId: string,
+  rpcUrl: string,
+  networkPassphrase: string,
+): Promise<SubscriptionEntry[]> {
+  if (!isValidGAddress(merchantAddress)) {
+    throw new Error(`Invalid merchant address: ${merchantAddress}`);
+  }
+
+  const server = new SorobanRpc.Server(rpcUrl, { allowHttp: false });
+  const contract = new Contract(contractId);
+
+  // Use a placeholder source account for simulation (no auth needed).
+  const sourceAccount = await server.getAccount(merchantAddress);
+
+  const tx = new TransactionBuilder(sourceAccount, {
+    fee: BASE_FEE,
+    networkPassphrase,
+  })
+    .addOperation(
+      contract.call(
+        'get_merchant_subscriptions',
+        new Address(merchantAddress).toScVal(),
+      )
+    )
+    .setTimeout(30)
+    .build();
+
+  const simResult = await server.simulateTransaction(tx);
+
+  if (!SorobanRpc.Api.isSimulationSuccess(simResult)) {
+    const errMsg =
+      (simResult as SorobanRpc.Api.SimulationError).error ?? 'Simulation failed';
+    throw new Error(`get_merchant_subscriptions simulation error: ${errMsg}`);
+  }
+
+  // Decode the returned Vec<SubscriptionEntry> from the simulation result.
+  const returnVal = simResult.result?.retval;
+  if (!returnVal) {
+    return [];
+  }
+
+  // The return value is a Soroban Vec of Map (struct) entries.
+  // Each map has keys: "subscriber" (Address), "data" (Map of SubscriptionData fields).
+  const { scValToNative } = await import('@stellar/stellar-sdk');
+  const native = scValToNative(returnVal) as Array<{
+    subscriber: string;
+    data: {
+      token: string;
+      amount: bigint;
+      interval: bigint;
+      next_payment: bigint;
+      is_paused: boolean;
+    };
+  }>;
+
+  return native.map((entry) => ({
+    subscriber: entry.subscriber,
+    data: {
+      token: entry.data.token,
+      amount: entry.data.amount,
+      interval: entry.data.interval,
+      nextPayment: entry.data.next_payment,
+      isPaused: entry.data.is_paused,
+    },
+  }));
+}
