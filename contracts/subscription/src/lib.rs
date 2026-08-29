@@ -66,6 +66,57 @@ fn index_remove(env: &Env, merchant: &Address, hash: &BytesN<32>) {
     env.storage().temporary().set(&idx_key, &updated);
 }
 
+/// Add a subscriber address to the merchant's subscriber roster.
+///
+/// The roster is stored under `DataKey::MerchantSubscribers(merchant)` in
+/// persistent storage and enables `get_merchant_subscriptions` to return full
+/// `SubscriptionData` without reversing compact sha-256 keys.
+fn roster_add(env: &Env, merchant: &Address, subscriber: &Address) {
+    let roster_key = DataKey::MerchantSubscribers(merchant.clone());
+    let mut roster: Vec<Address> = env
+        .storage()
+        .persistent()
+        .get(&roster_key)
+        .unwrap_or_else(|| Vec::new(env));
+    // Avoid duplicates (re-subscribe by same pair updates in place).
+    for existing in roster.iter() {
+        if &existing == subscriber {
+            return;
+        }
+    }
+    roster.push_back(subscriber.clone());
+    env.storage().persistent().set(&roster_key, &roster);
+    env.storage()
+        .persistent()
+        .extend_ttl(&roster_key, MIN_TTL_LEDGERS, MAX_TTL_LEDGERS);
+}
+
+/// Remove a subscriber address from the merchant's subscriber roster.
+///
+/// When the last subscriber is removed, the roster entry itself is deleted to
+/// avoid leaving a stale empty key in persistent storage.
+fn roster_remove(env: &Env, merchant: &Address, subscriber: &Address) {
+    let roster_key = DataKey::MerchantSubscribers(merchant.clone());
+    let roster: Vec<Address> = match env.storage().persistent().get(&roster_key) {
+        Some(v) => v,
+        None => return,
+    };
+    let mut updated: Vec<Address> = Vec::new(env);
+    for entry in roster.iter() {
+        if &entry != subscriber {
+            updated.push_back(entry);
+        }
+    }
+    if updated.is_empty() {
+        env.storage().persistent().remove(&roster_key);
+    } else {
+        env.storage().persistent().set(&roster_key, &updated);
+        env.storage()
+            .persistent()
+            .extend_ttl(&roster_key, MIN_TTL_LEDGERS, MAX_TTL_LEDGERS);
+    }
+}
+
 // ─── Contract ─────────────────────────────────────────────────────────────────
 
 #[contract]
@@ -236,6 +287,49 @@ impl SubscriptionProtocol {
             .unwrap_or_else(|| Vec::new(&env))
     }
 
+    /// Return all active subscriptions for a merchant, including full data
+    /// and the subscriber address for each entry.
+    ///
+    /// Iterates the merchant's subscriber roster (`DataKey::MerchantSubscribers`)
+    /// and resolves each subscriber's `SubscriptionData` from persistent storage.
+    /// Entries whose storage key has expired or been removed (e.g. race between
+    /// cancel and this query) are silently skipped.
+    ///
+    /// Read-only; no authorization required.  Merchant dashboards and off-chain
+    /// indexers can call this to display all active subscribers and their payment
+    /// schedules in a single on-chain query.
+    ///
+    /// # Returns
+    /// A `Vec<SubscriptionEntry>` where each element pairs a subscriber address
+    /// with its `SubscriptionData`.  Returns an empty vec if the merchant has no
+    /// active subscriptions or no roster entry exists.
+    pub fn get_merchant_subscriptions(
+        env: Env,
+        merchant: Address,
+    ) -> Vec<SubscriptionEntry> {
+        let roster_key = DataKey::MerchantSubscribers(merchant.clone());
+        let subscribers: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&roster_key)
+            .unwrap_or_else(|| Vec::new(&env));
+
+        let mut entries: Vec<SubscriptionEntry> = Vec::new(&env);
+        for subscriber in subscribers.iter() {
+            let hash = subscription_key(&env, &subscriber, &merchant);
+            let key = DataKey::Subscription(hash);
+            if let Some(data) = env.storage().persistent().get::<DataKey, SubscriptionData>(&key) {
+                entries.push_back(SubscriptionEntry {
+                    subscriber: subscriber.clone(),
+                    data,
+                });
+            }
+            // Entries absent from persistent storage (expired or already cancelled)
+            // are silently skipped to keep the response clean.
+        }
+        entries
+    }
+
     // =========================================================================
     // Core subscription entry points
     // =========================================================================
@@ -335,6 +429,8 @@ impl SubscriptionProtocol {
 
         // Update merchant index for enumeration.
         index_add(&env, &merchant, hash);
+        // Update subscriber roster for merchant dashboard queries.
+        roster_add(&env, &merchant, &subscriber);
 
         events::emit_subscribe(&env, &subscriber, &merchant, &token, amount);
 
@@ -795,6 +891,8 @@ impl SubscriptionProtocol {
 
         // Remove from merchant index so enumeration stays accurate.
         index_remove(&env, &merchant, &hash);
+        // Remove from subscriber roster so merchant dashboard queries stay accurate.
+        roster_remove(&env, &merchant, &subscriber);
 
         events::emit_cancel(&env, &subscriber, &merchant);
 

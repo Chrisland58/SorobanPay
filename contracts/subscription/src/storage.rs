@@ -51,6 +51,12 @@ pub enum DataKey {
     /// Enables enumeration ("all subscriptions for merchant X") on-chain.
     MerchantIndex(Address),
 
+    /// Merchant subscriber roster: maps merchant → Vec<Address> of all
+    /// subscriber addresses for that merchant.  Maintained in parallel with
+    /// `MerchantIndex` and enables `get_merchant_subscriptions` to return
+    /// full `SubscriptionData` without reversing compact sha-256 keys.
+    MerchantSubscribers(Address),
+
     /// On-chain schema version; updated by `migrate(admin)`.
     SchemaVersion,
 
@@ -96,6 +102,19 @@ pub struct SubscriptionData {
 pub struct AdminConfig {
     pub admin: Address,
     pub max_amount: i128,
+}
+
+/// A subscription record paired with its subscriber address.
+///
+/// Returned by `get_merchant_subscriptions` so callers receive both the
+/// subscriber identity and the full subscription state in a single query.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct SubscriptionEntry {
+    /// The subscriber's Stellar account address.
+    pub subscriber: Address,
+    /// The full subscription state for this subscriber-merchant pair.
+    pub data:       SubscriptionData,
 }
 
 /// Safe upper bound for a single subscription payment amount (1 × 10¹⁸ stroops).
