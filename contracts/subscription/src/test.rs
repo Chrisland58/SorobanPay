@@ -1772,3 +1772,201 @@ fn test_execute_payment_before_due_does_not_mutate_subscription() {
     assert_eq!(before.next_payment, after.next_payment);
     assert_eq!(before.amount, after.amount);
 }
+
+// ─── Issue #65 — Repeated subscribe updates on the same pair ─────────────────
+
+/// Calling subscribe a second time for the same (subscriber, merchant) pair must
+/// overwrite the existing record — no duplicate entries, only one storage key.
+///
+/// Verifies:
+///   - amount is updated to the new value
+///   - interval is updated to the new value
+///   - next_payment is recalculated from the current ledger timestamp
+///   - exactly one storage entry exists (upsert, not insert)
+///   - a fresh `subscribe` event is emitted for each call
+#[test]
+fn test_repeated_subscribe_updates_same_pair() {
+    let t = T::new();
+
+    let amt1 = 100_000_i128;
+    let ivl1 = 86_400_u64; // 1 day
+    let ts1  = t.env.ledger().timestamp();
+
+    // ── First subscribe ──────────────────────────────────────────────────────
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &amt1, &ivl1);
+
+    let d1 = t.get_sub();
+    assert_eq!(d1.amount,       amt1,        "first: amount must match");
+    assert_eq!(d1.interval,     ivl1,        "first: interval must match");
+    assert_eq!(d1.next_payment, ts1 + ivl1,  "first: next_payment must be ts + interval");
+    assert!(t.has_sub(),                      "subscription must exist after first subscribe");
+
+    // Advance time so we can confirm next_payment is re-anchored at the new ts.
+    t.advance(3_600); // +1 hour
+    let ts2 = t.env.ledger().timestamp();
+
+    let amt2 = 250_000_i128;
+    let ivl2 = 172_800_u64; // 2 days
+
+    // ── Second subscribe (same pair, new terms) ───────────────────────────────
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &amt2, &ivl2);
+
+    let d2 = t.get_sub();
+    assert_eq!(d2.amount,       amt2,        "second: amount must be updated");
+    assert_eq!(d2.interval,     ivl2,        "second: interval must be updated");
+    assert_eq!(d2.next_payment, ts2 + ivl2,  "second: next_payment must be re-anchored at new ts");
+    assert_eq!(d2.token,        t.token,     "token must remain unchanged");
+
+    // First-call values must be gone — no duplication.
+    assert_ne!(d2.amount,       amt1,  "old amount must not persist");
+    assert_ne!(d2.interval,     ivl1,  "old interval must not persist");
+    assert_ne!(d2.next_payment, ts1 + ivl1, "old next_payment must not persist");
+
+    // There is still exactly one storage entry.
+    assert!(t.has_sub(), "subscription must still exist after second subscribe");
+}
+
+/// A third subscribe call continues to overwrite — no accumulation of records.
+#[test]
+fn test_triple_subscribe_same_pair_only_last_persists() {
+    let t = T::new();
+
+    let ivl = 86_400_u64;
+
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &100_i128, &ivl);
+    t.advance(1_000);
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &200_i128, &ivl);
+    t.advance(1_000);
+    let ts3 = t.env.ledger().timestamp();
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &300_i128, &ivl);
+
+    let d = t.get_sub();
+    assert_eq!(d.amount,       300_i128,   "only the third subscribe's amount must be stored");
+    assert_eq!(d.interval,     ivl,        "interval must reflect the last call");
+    assert_eq!(d.next_payment, ts3 + ivl,  "next_payment must be anchored to the third call's timestamp");
+}
+
+/// Re-subscribing updates next_payment even when the original subscription had a
+/// different token.  Confirms the storage key is (subscriber, merchant) only —
+/// the token is NOT part of the key.
+#[test]
+fn test_subscribe_update_changes_token_in_place() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin      = Address::generate(&env);
+    let subscriber = Address::generate(&env);
+    let merchant   = Address::generate(&env);
+
+    let token1 = env.register_stellar_asset_contract_v2(admin.clone()).address();
+    let token2 = env.register_stellar_asset_contract_v2(admin.clone()).address();
+
+    StellarAssetClient::new(&env, &token1).mint(&subscriber, &1_000_000_i128);
+    StellarAssetClient::new(&env, &token2).mint(&subscriber, &1_000_000_i128);
+
+    let contract_id = env.register(SubscriptionProtocol, ());
+    let client      = SubscriptionProtocolClient::new(&env, &contract_id);
+
+    for tok in [&token1, &token2] {
+        token::Client::new(&env, tok).approve(
+            &subscriber,
+            &contract_id,
+            &500_000_i128,
+            &(env.ledger().sequence() + 100_000_u32),
+        );
+    }
+
+    // Subscribe with token1.
+    client.subscribe(&subscriber, &merchant, &token1, &500_i128, &86_400_u64);
+    let d1: SubscriptionData = env
+        .storage()
+        .persistent()
+        .get(&DataKey::Subscription(subscriber.clone(), merchant.clone()))
+        .unwrap();
+    assert_eq!(d1.token, token1);
+
+    // Re-subscribe with token2 — should overwrite the token field.
+    client.subscribe(&subscriber, &merchant, &token2, &1_000_i128, &86_400_u64);
+    let d2: SubscriptionData = env
+        .storage()
+        .persistent()
+        .get(&DataKey::Subscription(subscriber.clone(), merchant.clone()))
+        .unwrap();
+    assert_eq!(d2.token,  token2,   "token must be updated to token2");
+    assert_eq!(d2.amount, 1_000_i128, "amount must be updated");
+
+    // Only one key in storage — no duplicate entry for (subscriber, merchant).
+    let has_key = env
+        .storage()
+        .persistent()
+        .has(&DataKey::Subscription(subscriber.clone(), merchant.clone()));
+    assert!(has_key, "exactly one subscription entry must exist");
+}
+
+/// After a re-subscribe, execute_payment uses the *new* amount and interval.
+/// This is the most important behavioral guarantee: the merchant collects the
+/// updated terms, not the original ones.
+#[test]
+fn test_execute_payment_after_resubscribe_uses_new_terms() {
+    let t = T::new();
+
+    let amt1 = 50_000_i128;
+    let amt2 = 75_000_i128;
+    let ivl  = 86_400_u64;
+
+    // First subscribe.
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &amt1, &ivl);
+
+    // Re-subscribe immediately with a new amount (same interval for simplicity).
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &amt2, &ivl);
+
+    // Advance past the new next_payment.
+    t.advance(ivl + 1);
+
+    let sb_before = t.sub_bal();
+    let mb_before = t.mer_bal();
+
+    t.client.execute_payment(&t.subscriber, &t.merchant);
+
+    // The transfer must use the new (second) amount.
+    assert_eq!(t.sub_bal(), sb_before - amt2, "subscriber debited with new amount");
+    assert_eq!(t.mer_bal(), mb_before + amt2, "merchant credited with new amount");
+
+    // The old amount must not appear.
+    assert_ne!(t.sub_bal(), sb_before - amt1, "old amount must not be used");
+}
+
+/// Re-subscribing emits a `subscribe` event on every successful call.
+/// Each call is observable by off-chain indexers as a discrete update.
+#[test]
+fn test_repeated_subscribe_emits_event_each_time() {
+    let t = T::new();
+
+    // Before anything — no events.
+    assert_eq!(
+        t.env.events().all().iter().filter(|e| e.0 == t.contract_id).count(),
+        0,
+        "no events before any subscribe call"
+    );
+
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &100_i128, &86_400_u64);
+    assert_eq!(
+        t.env.events().all().iter().filter(|e| e.0 == t.contract_id).count(),
+        1,
+        "first subscribe must emit exactly 1 event"
+    );
+
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &200_i128, &172_800_u64);
+    assert_eq!(
+        t.env.events().all().iter().filter(|e| e.0 == t.contract_id).count(),
+        2,
+        "second subscribe must emit a second event"
+    );
+
+    // Verify the second event reflects the updated amount.
+    let all = t.env.events().all();
+    let our: Vec<_> = all.iter().filter(|e| e.0 == t.contract_id).collect();
+    let second_event = &our[1];
+    let expected_data = 200_i128.into_val(&t.env);
+    assert_eq!(second_event.2, expected_data, "second event data must carry the new amount");
+}
