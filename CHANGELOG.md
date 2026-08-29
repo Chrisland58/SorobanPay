@@ -5,6 +5,9 @@ All notable changes to SorobanPay are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+For the full release process — including the release note template, versioning
+rules, and step-by-step checklist — see [docs/release-process.md](docs/release-process.md).
+
 ---
 
 ## [Unreleased]
@@ -13,23 +16,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > Every pull request that changes behaviour, adds a feature, or fixes a bug
 > **must** include an entry in this section. The CI `check-changelog` job will
 > fail if this section is empty on a pull request.
+>
+> Entry format:
+> `- **[Component]** Short imperative description. (Closes #<issue>)`
+>
+> Components: `[Contract]`, `[Frontend]`, `[Backend]`, `[Deploy]`, `[Docs]`, `[CI]`
 
 ### Added
 
-- `contracts/subscription/src/test.rs`: Added 13 test vectors (TV-01 through TV-13) for the `interval` lower and upper boundaries (closes #70):
-  - TV-01: `interval = 0` rejected as `IntervalTooShort`
-  - TV-02: `interval = 86_399` (one below minimum) rejected as `IntervalTooShort`
-  - TV-03: `interval = 86_400` (exact minimum) accepted; verifies `next_payment = ts + 86_400`, payment one second early rejected, payment at exactly due time succeeds
-  - TV-04: `interval = 86_400` — documents `>=` time-lock semantics at exact due time
-  - TV-05: `interval = 31_536_001` (one above maximum) rejected as `IntervalTooLong`
-  - TV-06: `interval = 31_536_000` (exact maximum) accepted; verifies `next_payment = ts + 31_536_000`, same boundary execution checks as TV-03
-  - TV-07: `interval = 31_536_000` — mirrors TV-04 for the upper boundary
-  - TV-08: `interval = u64::MAX` rejected as `IntervalTooLong` (no overflow path)
-  - TV-09: `next_payment` arithmetic verified correct for both boundary constants
-  - TV-10: no storage entry written for any rejected interval value (0, 86_399, 31_536_001, u64::MAX)
-  - TV-11 (proptest): all values in `[0, 86_399]` always rejected
-  - TV-12 (proptest): all values in `[31_536_001, u64::MAX/2]` always rejected
-  - TV-13 (proptest): all values in `[86_400, 31_536_000]` always accepted with correct `next_payment`
+- **[Docs]** Document all `deploy/deploy.sh` environment variables (`STELLAR_NETWORK`, `STELLAR_IDENTITY`) and derived values (`RPC_URL`, `PASSPHRASE`) in the script header and `docs/deployment.md`. (Closes #77)
+- **[Docs]** Add issue naming conventions (`Bug:`, `Feature:`, `Docs:`, `Chore:` prefixes) to `CONTRIBUTING.md`. (Closes #78)
+- **[Docs]** Expand README security model section with full sub-sections: non-custodial design, per-invocation auth table, allowance emergency stop, time-lock enforcement, storage TTL, input validation, and read-only backend. (Closes #79)
+- **[Docs]** Add `docs/release-process.md` with versioning rules, changelog hygiene guide, release note template, step-by-step release checklist, and component-specific notes for contract, frontend, and deploy releases. (Closes #80)
 
 ### Changed
 
