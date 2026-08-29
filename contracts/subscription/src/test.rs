@@ -1772,3 +1772,227 @@ fn test_execute_payment_before_due_does_not_mutate_subscription() {
     assert_eq!(before.next_payment, after.next_payment);
     assert_eq!(before.amount, after.amount);
 }
+
+// ─── Issue #60 — PaymentNotDue behaviour after ledger timestamp jumps ─────────
+
+/// execute_payment must return PaymentNotDue when the ledger clock has not
+/// advanced enough to reach next_payment, and must succeed the moment the
+/// clock crosses that threshold.
+///
+/// This test group probes timestamp edge cases explicitly, including:
+///   - calling exactly at next_payment (boundary — must succeed)
+///   - calling one second before next_payment (must fail)
+///   - calling one second after next_payment (must succeed)
+///   - large forward jump that skips multiple intervals (must succeed)
+///   - backward timestamp (simulated by subscribing at a large ts then checking
+///     that a lower ts is still rejected as PaymentNotDue)
+///   - zero ledger timestamp is InvalidTimestamp even for past-due subscriptions
+
+/// Calling exactly at next_payment (now == next_payment) must succeed.
+/// The time-lock condition in the contract is `now < next_payment`, so equality
+/// means the payment is due.
+#[test]
+fn test_execute_payment_at_exact_due_timestamp_succeeds() {
+    let t   = T::new();
+    let amt = 100_000_i128;
+    let ivl = 86_400_u64;
+
+    let ts = t.env.ledger().timestamp();
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &amt, &ivl);
+
+    // Advance to exactly next_payment (ts + ivl).
+    t.env.ledger().with_mut(|l| l.timestamp = ts + ivl);
+
+    let sb_before = t.sub_bal();
+    t.client.execute_payment(&t.subscriber, &t.merchant);
+    assert_eq!(t.sub_bal(), sb_before - amt,
+        "payment at exact due timestamp must debit subscriber");
+}
+
+/// Calling one second before next_payment must return PaymentNotDue.
+#[test]
+fn test_execute_payment_one_second_before_due_returns_not_due() {
+    let t   = T::new();
+    let ivl = 86_400_u64;
+    let ts  = t.env.ledger().timestamp();
+
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &100_000_i128, &ivl);
+
+    // Advance to one second before next_payment.
+    t.env.ledger().with_mut(|l| l.timestamp = ts + ivl - 1);
+
+    let r = t.client.try_execute_payment(&t.subscriber, &t.merchant);
+    assert!(
+        matches!(r, Err(Ok(ContractError::PaymentNotDue))),
+        "one second before due must return PaymentNotDue"
+    );
+    assert_eq!(t.sub_bal(), 10_000_000_i128, "no transfer on PaymentNotDue");
+}
+
+/// Calling one second after next_payment must succeed — the window is open.
+#[test]
+fn test_execute_payment_one_second_after_due_succeeds() {
+    let t   = T::new();
+    let amt = 100_000_i128;
+    let ivl = 86_400_u64;
+    let ts  = t.env.ledger().timestamp();
+
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &amt, &ivl);
+
+    t.env.ledger().with_mut(|l| l.timestamp = ts + ivl + 1);
+
+    let sb_before = t.sub_bal();
+    t.client.execute_payment(&t.subscriber, &t.merchant);
+    assert_eq!(t.sub_bal(), sb_before - amt,
+        "one second after due must successfully debit subscriber");
+}
+
+/// After a successful payment the contract advances next_payment to `now + interval`.
+/// A subsequent call that advances the clock to exactly the new next_payment must
+/// succeed, while one that stays one second behind must return PaymentNotDue.
+#[test]
+fn test_execute_payment_next_due_time_is_recalculated_after_collection() {
+    let t   = T::new();
+    let amt = 100_000_i128;
+    let ivl = 86_400_u64;
+
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &amt, &ivl);
+
+    // First collection: advance to exactly due.
+    t.advance(ivl);
+    let t1 = t.env.ledger().timestamp(); // this is the "now" for the first payment
+    t.client.execute_payment(&t.subscriber, &t.merchant);
+
+    // next_payment is now t1 + ivl.
+    let d = t.get_sub();
+    let expected_next = t1 + ivl;
+    assert_eq!(d.next_payment, expected_next, "next_payment must be now + interval after first payment");
+
+    // One second before the new due date — must fail.
+    t.env.ledger().with_mut(|l| l.timestamp = expected_next - 1);
+    let r = t.client.try_execute_payment(&t.subscriber, &t.merchant);
+    assert!(
+        matches!(r, Err(Ok(ContractError::PaymentNotDue))),
+        "one second before new next_payment must return PaymentNotDue"
+    );
+
+    // Advance to exactly the new next_payment — must succeed.
+    t.env.ledger().with_mut(|l| l.timestamp = expected_next);
+    let sb_before = t.sub_bal();
+    t.client.execute_payment(&t.subscriber, &t.merchant);
+    assert_eq!(t.sub_bal(), sb_before - amt, "second payment at exact new due time must succeed");
+}
+
+/// A large forward timestamp jump (simulating a node that missed many ledgers)
+/// that lands well past next_payment must succeed, not cause an error.
+#[test]
+fn test_execute_payment_large_timestamp_jump_succeeds() {
+    let t   = T::new();
+    let amt = 100_000_i128;
+    let ivl = 86_400_u64;
+
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &amt, &ivl);
+
+    // Jump 30× the interval into the future.
+    t.advance(ivl * 30);
+
+    let sb_before = t.sub_bal();
+    t.client.execute_payment(&t.subscriber, &t.merchant);
+    assert_eq!(
+        t.sub_bal(), sb_before - amt,
+        "payment after large timestamp jump must succeed and transfer exactly one amount"
+    );
+
+    // next_payment is now + interval, not a multiple-interval catch-up.
+    let now  = t.env.ledger().timestamp();
+    let d    = t.get_sub();
+    assert_eq!(d.next_payment, now + ivl,
+        "next_payment after large jump must be now + interval (no multi-interval catch-up)");
+}
+
+/// next_payment must NOT advance on a PaymentNotDue failure.
+/// Subscription state must be entirely unchanged.
+#[test]
+fn test_payment_not_due_does_not_mutate_subscription() {
+    let t   = T::new();
+    let ivl = 86_400_u64;
+
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &100_000_i128, &ivl);
+    let before = t.get_sub();
+
+    // Advance halfway through the interval — still not due.
+    t.advance(ivl / 2);
+    let _ = t.client.try_execute_payment(&t.subscriber, &t.merchant);
+
+    let after = t.get_sub();
+    assert_eq!(after.next_payment, before.next_payment,
+        "next_payment must not advance on PaymentNotDue");
+    assert_eq!(after.amount,   before.amount,   "amount must not change");
+    assert_eq!(after.interval, before.interval, "interval must not change");
+    assert_eq!(after.token,    before.token,    "token must not change");
+}
+
+/// PaymentNotDue must not emit any contract events.
+#[test]
+fn test_payment_not_due_emits_no_event() {
+    let t = T::new();
+
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &100_i128, &86_400_u64);
+    let n_before = t.env.events().all().iter().filter(|e| e.0 == t.contract_id).count();
+
+    // Half-interval advance — payment not yet due.
+    t.advance(43_200);
+    let _ = t.client.try_execute_payment(&t.subscriber, &t.merchant);
+
+    let n_after = t.env.events().all().iter().filter(|e| e.0 == t.contract_id).count();
+    assert_eq!(n_after, n_before,
+        "PaymentNotDue must not emit any contract events");
+}
+
+/// execute_payment on a past-due subscription after the ledger timestamp is
+/// corrupted to zero must return InvalidTimestamp, not PaymentNotDue.
+///
+/// This distinguishes the two error codes: InvalidTimestamp guards against
+/// an uninitialised clock; PaymentNotDue guards against premature collection.
+/// If the clock is zero, the timestamp guard fires first.
+#[test]
+fn test_execute_payment_zero_timestamp_on_past_due_returns_invalid_timestamp() {
+    let t   = T::new();
+    let ivl = 86_400_u64;
+
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &100_000_i128, &ivl);
+
+    // Would be PaymentNotDue at timestamp 0 anyway, but the contract must
+    // return InvalidTimestamp because the clock is uninitialised.
+    t.env.ledger().with_mut(|l| l.timestamp = 0);
+
+    let r = t.client.try_execute_payment(&t.subscriber, &t.merchant);
+    assert!(
+        matches!(r, Err(Ok(ContractError::InvalidTimestamp))),
+        "zero ledger timestamp must return InvalidTimestamp, not PaymentNotDue"
+    );
+}
+
+/// Minimum-interval subscription (86 400 s): payment fails one second early
+/// and succeeds at exactly the boundary.
+#[test]
+fn test_payment_not_due_minimum_interval_boundary() {
+    let t   = T::new();
+    let amt = 1_000_i128;
+    let ivl = 86_400_u64; // minimum valid interval
+    let ts  = t.env.ledger().timestamp();
+
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &amt, &ivl);
+
+    // One second before — must fail.
+    t.env.ledger().with_mut(|l| l.timestamp = ts + ivl - 1);
+    let r = t.client.try_execute_payment(&t.subscriber, &t.merchant);
+    assert!(matches!(r, Err(Ok(ContractError::PaymentNotDue))),
+        "one second before minimum interval boundary must return PaymentNotDue");
+
+    // Exactly at boundary — must succeed.
+    t.env.ledger().with_mut(|l| l.timestamp = ts + ivl);
+    let sb = t.sub_bal();
+    t.client.execute_payment(&t.subscriber, &t.merchant);
+    assert_eq!(t.sub_bal(), sb - amt, "payment at exact minimum boundary must succeed");
+}
