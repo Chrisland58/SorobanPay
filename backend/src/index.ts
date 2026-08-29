@@ -176,6 +176,13 @@ cron.schedule('0 * * * *', async () => {
   }
 });
 
+// #733: Process scheduled push notifications every minute
+cron.schedule('* * * * *', async () => {
+  await processScheduledNotifications().catch(err =>
+    console.error('[cron] Scheduled push notifications error:', err)
+  );
+});
+
 // ─── Start ───────────────────────────────────────────────────────────────────
 app.listen(PORT, () => {
   console.log(`[server] SorobanPay backend running on port ${PORT}`);
