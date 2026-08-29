@@ -16,6 +16,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `contracts/subscription/src/lib.rs`: Added SEP-41 allowance pre-check to `execute_payment` — if the subscriber's token allowance for the contract is below the payment amount, the call now returns `ContractError::TransferFailed` and emits `payment_transfer_failure` instead of producing a host-level panic (closes #69).
+- `contracts/subscription/src/lib.rs`: Added same allowance pre-check to `batch_execute_payment` — affected subscribers are marked `false` in the results vector without aborting the batch (closes #69).
+- `contracts/subscription/src/lib.rs`: Added `# Token error mapping` doc sections to both `execute_payment` and `batch_execute_payment` explaining the two-step pre-check order (balance then allowance), the error returned for each, and the residual host-panic scenario.
+- `contracts/subscription/src/error.rs`: Expanded `TransferFailed` (code 7) doc comment to enumerate both mapping cases (insufficient balance, insufficient/revoked allowance) and clarify that `next_payment` is not advanced on failure.
+- `contracts/subscription/src/test.rs`: Added 6 tests for the new allowance error mapping path: revoked allowance returns `TransferFailed`, off-by-one allowance boundary, allowance-equals-amount succeeds, failure event emitted on revoked allowance, batch isolates revoked-allowance failures, batch isolation across mixed subscribers.
+
 ### Changed
 
 ### Deprecated

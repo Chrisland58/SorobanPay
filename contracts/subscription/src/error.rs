@@ -17,7 +17,21 @@ pub enum ContractError {
     PaymentNotDue         = 5,
     /// Authorization check failed
     Unauthorized          = 6,
-    /// `execute_payment` token transfer failed (insufficient balance or allowance)
+    /// `execute_payment` or `batch_execute_payment` token transfer failed.
+    ///
+    /// This error is returned when either of the two pre-transfer checks fails:
+    /// 1. **Insufficient balance**: `token.balance(subscriber) < amount` — the subscriber
+    ///    does not have enough tokens to cover the payment amount.
+    /// 2. **Insufficient allowance**: `token.allowance(subscriber, contract) < amount` —
+    ///    the subscriber has revoked or never set the SEP-41 allowance for this contract.
+    ///
+    /// In both cases a `payment_transfer_failure` event is emitted before returning this
+    /// error, and the subscription state (`next_payment`) is NOT advanced, keeping the
+    /// subscription eligible for retry on the next payment cycle.
+    ///
+    /// Note: if `transfer` itself panics for a reason not caught by the pre-checks
+    /// (e.g. a token contract bug), the host aborts the transaction entirely and this
+    /// error is not returned.
     TransferFailed        = 7,
     /// Ledger timestamp is zero or would overflow when computing next_payment
     InvalidTimestamp      = 8,

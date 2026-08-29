@@ -1772,3 +1772,269 @@ fn test_execute_payment_before_due_does_not_mutate_subscription() {
     assert_eq!(before.next_payment, after.next_payment);
     assert_eq!(before.amount, after.amount);
 }
+
+// ─── Issue #69 — Token error mapping tests ────────────────────────────────────
+//
+// These tests verify that both precondition checks introduced in execute_payment
+// and batch_execute_payment surface as ContractError::TransferFailed rather than
+// untyped host panics, and that they emit the payment_transfer_failure event.
+
+/// execute_payment returns TransferFailed when subscriber revokes allowance after subscribe.
+///
+/// This is the most important new error mapping path: a subscriber can stop
+/// recurring payments by calling token.approve(contract, 0) without cancel().
+/// The contract must map the resulting host-level panic to ContractError::TransferFailed.
+#[test]
+fn test_execute_payment_revoked_allowance_returns_transfer_failed() {
+    let t   = T::new();
+    let amt = 100_000_i128;
+    let ivl = 86_400_u64;
+
+    // Subscribe (allowance is 5_000_000 from T::new()).
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &amt, &ivl, &false);
+    let sub_before = t.get_sub();
+
+    // Subscriber revokes allowance — simulates stopping payments without cancel().
+    token::Client::new(&t.env, &t.token).approve(
+        &t.subscriber,
+        &t.contract_id,
+        &0_i128,
+        &(t.env.ledger().sequence() + 100_000_u32),
+    );
+
+    t.advance(ivl + 1);
+    let sb = t.sub_bal();
+    let mb = t.mer_bal();
+
+    // execute_payment must return TransferFailed (mapped from revoked allowance),
+    // NOT a host panic.
+    let r = t.client.try_execute_payment(&t.subscriber, &t.merchant);
+    assert!(
+        matches!(r, Err(Ok(ContractError::TransferFailed))),
+        "execute_payment must return TransferFailed when allowance is zero (revoked)"
+    );
+
+    // No funds must have moved.
+    assert_eq!(t.sub_bal(), sb, "subscriber balance must be unchanged");
+    assert_eq!(t.mer_bal(), mb, "merchant balance must be unchanged");
+
+    // Subscription state must be unchanged — eligible for retry.
+    let sub_after = t.get_sub();
+    assert_eq!(sub_after.next_payment, sub_before.next_payment,
+        "next_payment must not advance when allowance pre-check fails");
+}
+
+/// execute_payment returns TransferFailed when allowance is set to exactly amount - 1.
+///
+/// Pins the exact off-by-one: allowance == amount - 1 must fail;
+/// allowance == amount must succeed.
+#[test]
+fn test_execute_payment_allowance_one_below_amount_returns_transfer_failed() {
+    let t   = T::new();
+    let amt = 100_000_i128;
+    let ivl = 86_400_u64;
+
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &amt, &ivl, &false);
+
+    // Set allowance to exactly amount - 1.
+    token::Client::new(&t.env, &t.token).approve(
+        &t.subscriber,
+        &t.contract_id,
+        &0_i128,
+        &(t.env.ledger().sequence() + 100_000_u32),
+    );
+    token::Client::new(&t.env, &t.token).approve(
+        &t.subscriber,
+        &t.contract_id,
+        &(amt - 1),
+        &(t.env.ledger().sequence() + 100_000_u32),
+    );
+
+    t.advance(ivl + 1);
+    let r = t.client.try_execute_payment(&t.subscriber, &t.merchant);
+    assert!(
+        matches!(r, Err(Ok(ContractError::TransferFailed))),
+        "allowance = amount - 1 must return TransferFailed"
+    );
+}
+
+/// execute_payment succeeds when allowance equals exactly amount.
+///
+/// Verifies the allowance check uses >= (not >): allowance == amount is sufficient.
+#[test]
+fn test_execute_payment_allowance_exactly_amount_succeeds() {
+    let t   = T::new();
+    let amt = 100_000_i128;
+    let ivl = 86_400_u64;
+
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &amt, &ivl, &false);
+
+    // Set allowance to exactly the payment amount (minimum sufficient).
+    token::Client::new(&t.env, &t.token).approve(
+        &t.subscriber,
+        &t.contract_id,
+        &0_i128,
+        &(t.env.ledger().sequence() + 100_000_u32),
+    );
+    token::Client::new(&t.env, &t.token).approve(
+        &t.subscriber,
+        &t.contract_id,
+        &amt,
+        &(t.env.ledger().sequence() + 100_000_u32),
+    );
+
+    t.advance(ivl + 1);
+    let r = t.client.try_execute_payment(&t.subscriber, &t.merchant);
+    assert!(
+        r.is_ok(),
+        "allowance exactly equal to amount must allow execute_payment to succeed"
+    );
+}
+
+/// execute_payment emits payment_transfer_failure event when allowance pre-check fails.
+///
+/// Verifies the event is emitted before TransferFailed is returned, consistent
+/// with the behaviour when the balance pre-check fails.
+#[test]
+fn test_execute_payment_revoked_allowance_emits_failure_event() {
+    let t   = T::new();
+    let amt = 100_000_i128;
+    let ivl = 86_400_u64;
+
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &amt, &ivl, &false);
+
+    token::Client::new(&t.env, &t.token).approve(
+        &t.subscriber,
+        &t.contract_id,
+        &0_i128,
+        &(t.env.ledger().sequence() + 100_000_u32),
+    );
+
+    t.advance(ivl + 1);
+    let n_before = t.env.events().all().iter().filter(|e| e.0 == t.contract_id).count();
+    let _ = t.client.try_execute_payment(&t.subscriber, &t.merchant);
+    let n_after = t.env.events().all().iter().filter(|e| e.0 == t.contract_id).count();
+
+    assert_eq!(
+        n_after, n_before + 1,
+        "exactly one payment_transfer_failure event must be emitted when allowance pre-check fails"
+    );
+}
+
+/// batch_execute_payment marks subscriber false when allowance is revoked.
+///
+/// Verifies the batch allowance pre-check returns false for the affected entry
+/// while the batch itself succeeds (does not abort), and a failure event is emitted.
+#[test]
+fn test_batch_execute_payment_revoked_allowance_marked_false() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin      = Address::generate(&env);
+    let subscriber = Address::generate(&env);
+    let merchant   = Address::generate(&env);
+    let token      = env.register_stellar_asset_contract_v2(admin.clone()).address();
+
+    StellarAssetClient::new(&env, &token).mint(&subscriber, &1_000_000_i128);
+
+    let contract_id = env.register(SubscriptionProtocol, ());
+    let client      = SubscriptionProtocolClient::new(&env, &contract_id);
+
+    // Grant initial allowance and subscribe.
+    token::Client::new(&env, &token).approve(
+        &subscriber,
+        &contract_id,
+        &500_000_i128,
+        &(env.ledger().sequence() + 100_000_u32),
+    );
+    client.subscribe(&subscriber, &merchant, &token, &100_000_i128, &86_400_u64, &false);
+
+    // Revoke allowance.
+    token::Client::new(&env, &token).approve(
+        &subscriber,
+        &contract_id,
+        &0_i128,
+        &(env.ledger().sequence() + 100_000_u32),
+    );
+
+    // Advance past due.
+    let now = env.ledger().timestamp();
+    env.ledger().with_mut(|l| l.timestamp = now + 86_401);
+
+    let mut subs = Vec::new(&env);
+    subs.push_back(subscriber.clone());
+    let results = client.batch_execute_payment(&merchant, &subs);
+
+    // The entry must be false — revoked allowance is a mapped failure, not a batch abort.
+    assert_eq!(results.len(), 1);
+    let (addr, ok) = results.get(0).unwrap();
+    assert_eq!(addr, subscriber);
+    assert!(!ok, "batch entry must be false when allowance is revoked");
+
+    // subscriber balance must be unchanged.
+    assert_eq!(
+        token::Client::new(&env, &token).balance(&subscriber),
+        1_000_000_i128,
+        "subscriber balance must be unchanged when allowance pre-check fails in batch"
+    );
+}
+
+/// batch_execute_payment: one subscriber with revoked allowance does not affect others.
+///
+/// Verifies that the allowance-check failure for one subscriber is isolated — other
+/// subscribers in the same batch with valid allowances still get paid.
+#[test]
+fn test_batch_execute_payment_allowance_failure_isolated() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin    = Address::generate(&env);
+    let merchant = Address::generate(&env);
+    let token    = env.register_stellar_asset_contract_v2(admin.clone()).address();
+
+    let sub_ok     = Address::generate(&env);
+    let sub_revoke = Address::generate(&env);
+
+    for s in [&sub_ok, &sub_revoke] {
+        StellarAssetClient::new(&env, &token).mint(s, &1_000_000_i128);
+    }
+
+    let contract_id = env.register(SubscriptionProtocol, ());
+    let client      = SubscriptionProtocolClient::new(&env, &contract_id);
+
+    let amt = 100_000_i128;
+    let ivl = 86_400_u64;
+
+    for s in [&sub_ok, &sub_revoke] {
+        token::Client::new(&env, &token).approve(
+            s, &contract_id, &500_000_i128,
+            &(env.ledger().sequence() + 100_000_u32),
+        );
+        client.subscribe(s, &merchant, &token, &amt, &ivl, &false);
+    }
+
+    // Revoke allowance only for sub_revoke.
+    token::Client::new(&env, &token).approve(
+        &sub_revoke, &contract_id, &0_i128,
+        &(env.ledger().sequence() + 100_000_u32),
+    );
+
+    let now = env.ledger().timestamp();
+    env.ledger().with_mut(|l| l.timestamp = now + ivl + 1);
+
+    let mut subs = Vec::new(&env);
+    subs.push_back(sub_ok.clone());
+    subs.push_back(sub_revoke.clone());
+    let results = client.batch_execute_payment(&merchant, &subs);
+
+    // sub_ok must succeed; sub_revoke must be false.
+    assert_eq!(results.len(), 2);
+    let (_, ok0) = results.get(0).unwrap();
+    let (_, ok1) = results.get(1).unwrap();
+    assert!(ok0,  "sub_ok must succeed with valid allowance");
+    assert!(!ok1, "sub_revoke must fail with revoked allowance");
+
+    // sub_ok was debited; sub_revoke was not.
+    assert_eq!(token::Client::new(&env, &token).balance(&sub_ok),     1_000_000 - amt);
+    assert_eq!(token::Client::new(&env, &token).balance(&sub_revoke), 1_000_000_i128);
+}

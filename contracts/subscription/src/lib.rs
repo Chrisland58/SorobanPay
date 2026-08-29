@@ -266,6 +266,27 @@ impl SubscriptionProtocol {
     ///
     /// # Authorization
     /// Requires a valid signature from `merchant`.
+    ///
+    /// # Token error mapping
+    ///
+    /// Soroban's `token::Client` methods panic at the host level on failure rather than
+    /// returning a typed error — meaning an unguarded `transfer` call that fails will
+    /// abort the entire transaction without emitting a `ContractError` the caller can
+    /// inspect. To surface actionable failure reasons we pre-validate every observable
+    /// precondition before calling into the token contract:
+    ///
+    /// | Precondition | Check | Error returned |
+    /// |---|---|---|
+    /// | Subscriber has enough balance | `token.balance(subscriber) >= amount` | `TransferFailed` + `payment_transfer_failure` event |
+    /// | Contract has sufficient allowance | `token.allowance(subscriber, contract) >= amount` | `TransferFailed` + `payment_transfer_failure` event |
+    ///
+    /// If both pre-checks pass and `transfer` still panics (e.g. token contract bug,
+    /// deactivated token, or host version change), the host-level abort propagates as a
+    /// transaction failure. This is unavoidable without a try/catch primitive in Soroban.
+    ///
+    /// The two-step check order (balance first, allowance second) matches the SEP-41
+    /// spec's own precedence: a zero balance is a more informative signal than a
+    /// missing allowance when both are absent simultaneously.
     pub fn execute_payment(
         env: Env,
         subscriber: Address,
@@ -286,9 +307,26 @@ impl SubscriptionProtocol {
             return Err(ContractError::PaymentNotDue);
         }
 
+        let contract_address = env.current_contract_address();
         let token_client = token::Client::new(&env, &data.token);
+
+        // ── Pre-check 1: subscriber balance ──────────────────────────────────────
+        // Maps an insufficient-balance host panic to a clean ContractError::TransferFailed.
+        // This is the most common failure mode for recurring payments and provides the
+        // most actionable signal to off-chain retry logic.
         let subscriber_balance = token_client.balance(&subscriber);
         if subscriber_balance < data.amount {
+            events::emit_payment_transfer_failure(&env, &subscriber, &merchant, data.amount);
+            return Err(ContractError::TransferFailed);
+        }
+
+        // ── Pre-check 2: token allowance ──────────────────────────────────────────
+        // Maps a revoked or expired SEP-41 allowance to ContractError::TransferFailed
+        // rather than a host-level panic. A subscriber may revoke the allowance at any
+        // time (via token.approve(contract, 0)) to stop future payments without calling
+        // cancel(). This pre-check ensures that case surfaces as a typed error.
+        let allowance = token_client.allowance(&subscriber, &contract_address);
+        if allowance < data.amount {
             events::emit_payment_transfer_failure(&env, &subscriber, &merchant, data.amount);
             return Err(ContractError::TransferFailed);
         }
@@ -312,6 +350,24 @@ impl SubscriptionProtocol {
     ///
     /// # Authorization
     /// Requires a valid signature from `merchant` — authenticated once for the batch.
+    ///
+    /// # Token error mapping
+    ///
+    /// Each subscriber entry is processed independently. A failure for one subscriber
+    /// does not abort the batch — the entry is recorded as `false` in the result vector
+    /// and the loop continues to the next subscriber.
+    ///
+    /// Two token preconditions are checked before every `transfer` call to map host-level
+    /// panics to observable, per-subscriber outcomes:
+    ///
+    /// | Precondition | Check | Result for entry |
+    /// |---|---|---|
+    /// | Balance sufficient | `token.balance(subscriber) >= amount` | `false` + `payment_transfer_failure` event |
+    /// | Allowance sufficient | `token.allowance(subscriber, contract) >= amount` | `false` + `payment_transfer_failure` event |
+    ///
+    /// If a pre-check fails, the subscriber's entry is marked `false` and the batch
+    /// continues; `next_payment` is not advanced for that subscriber, keeping the
+    /// subscription eligible for retry on the next merchant-initiated batch.
     pub fn batch_execute_payment(
         env: Env,
         merchant: Address,
@@ -329,6 +385,7 @@ impl SubscriptionProtocol {
         events::emit_batch_execute_initiated(&env, &merchant, subscribers.len() as u32);
 
         let now = ledger_timestamp(&env)?;
+        let contract_address = env.current_contract_address();
         let mut results: Vec<(Address, bool)> = Vec::new(&env);
         let mut keys_to_extend: Vec<DataKey> = Vec::new(&env);
 
@@ -350,8 +407,23 @@ impl SubscriptionProtocol {
             }
 
             let token_client = token::Client::new(&env, &data.token);
+
+            // Pre-check 1: subscriber balance.
+            // Maps an insufficient-balance condition to a false result + failure event
+            // rather than a host panic that would abort the entire batch transaction.
             let balance = token_client.balance(&subscriber);
             if balance < data.amount {
+                events::emit_payment_transfer_failure(&env, &subscriber, &merchant, data.amount);
+                results.push_back((subscriber.clone(), false));
+                continue;
+            }
+
+            // Pre-check 2: token allowance.
+            // A subscriber may revoke the allowance (via token.approve(contract, 0))
+            // between the subscribe call and the batch execution. Catching this here
+            // prevents the host panic that an unguarded transfer call would produce.
+            let allowance = token_client.allowance(&subscriber, &contract_address);
+            if allowance < data.amount {
                 events::emit_payment_transfer_failure(&env, &subscriber, &merchant, data.amount);
                 results.push_back((subscriber.clone(), false));
                 continue;
