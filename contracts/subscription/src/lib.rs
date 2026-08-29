@@ -33,6 +33,54 @@ fn checked_next_payment(ts: u64, interval: u64) -> Result<u64, ContractError> {
         .ok_or(ContractError::InvalidTimestamp)
 }
 
+/// Enforce the time-lock for a single subscription entry.
+///
+/// # Exact due-time semantics
+///
+/// A payment is due when `now >= next_payment` — meaning the ledger timestamp has
+/// **reached or passed** the scheduled due instant. The condition checked here is
+/// its complement: `now < next_payment` → still early → reject.
+///
+/// ```text
+/// Timeline:
+///
+///   subscribe()          next_payment          next_payment + interval
+///       │                     │                        │
+///   ────┼─────────────────────┼────────────────────────┼──▶  time
+///       │                     │                        │
+///       │◄── PaymentNotDue ──►│◄── payment allowed ───►│
+///                             │
+///                          now == next_payment  →  OK (inclusive boundary)
+///                          now  < next_payment  →  PaymentNotDue
+///                          now  > next_payment  →  OK (past due, merchant collects late)
+/// ```
+///
+/// The boundary is **inclusive**: `now == next_payment` is treated as on-time,
+/// not early. This is important for billing systems that schedule execution at
+/// precisely the due timestamp.
+///
+/// # Why not strict equality (`now == next_payment`)?
+///
+/// Requiring exact equality would create a one-ledger window during which payment
+/// is collectable (roughly 5 seconds at mainnet close times). Any network latency
+/// or scheduling drift would cause the merchant's call to land one ledger late and
+/// be permanently rejected. The `>=` condition avoids this operational fragility:
+/// a missed-cycle payment remains collectable indefinitely until the next call to
+/// `execute_payment`, at which point `next_payment` advances by one interval.
+///
+/// # Returns
+/// `Err(ContractError::PaymentNotDue)` if `now < next_payment`.
+/// `Ok(())` if `now >= next_payment`.
+#[inline]
+fn assert_payment_due(now: u64, next_payment: u64) -> Result<(), ContractError> {
+    // Payment is due when now >= next_payment.
+    // Equivalently: reject when now < next_payment (payment window has not opened yet).
+    if now < next_payment {
+        return Err(ContractError::PaymentNotDue);
+    }
+    Ok(())
+}
+
 /// Add a hashed key to a merchant's subscription index.
 ///
 /// The index stores `Vec<BytesN<32>>` under `DataKey::MerchantIndex(merchant)`.
@@ -743,6 +791,9 @@ impl SubscriptionProtocol {
             }
         }
 
+        // Advance next_payment from now (actual collection time), not from next_payment.
+        // This slides the billing window forward from the actual transfer, preventing
+        // drift accumulation for merchants who collect consistently late.
         data.next_payment = now + data.interval;
         data.overdue_since = None;
         data.payment_nonce = data.payment_nonce.checked_add(1).ok_or(ContractError::InvalidTimestamp)?;
@@ -822,7 +873,10 @@ impl SubscriptionProtocol {
                 }
             };
 
-            if now < data.next_payment {
+            // ── Time-lock guard (per subscriber) ─────────────────────────────────
+            // Uses the same >= semantics as execute_payment: allowed when now >= next_payment.
+            // A not-due subscriber is skipped (false result) without aborting the batch.
+            if assert_payment_due(now, data.next_payment).is_err() {
                 results.push_back((subscriber.clone(), false));
                 continue;
             }
@@ -866,6 +920,8 @@ impl SubscriptionProtocol {
                 }
             }
 
+            // Advance next_payment from now (actual collection time), consistent
+            // with execute_payment behaviour.
             data.next_payment = now + data.interval;
             data.overdue_since = None;
             data.payment_nonce = data.payment_nonce.checked_add(1).ok_or(ContractError::InvalidTimestamp)?;

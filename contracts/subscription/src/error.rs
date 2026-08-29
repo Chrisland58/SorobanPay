@@ -13,7 +13,18 @@ pub enum ContractError {
     IntervalTooLong       = 3,
     /// `execute_payment` or `cancel` called with no active subscription for the pair
     NoActiveSubscription  = 4,
-    /// `execute_payment` called before next_payment timestamp has elapsed
+    /// `execute_payment` called before the subscription's `next_payment` timestamp has elapsed.
+    ///
+    /// The time-lock guard uses **inclusive** `>=` semantics: a payment is due when
+    /// `ledger_timestamp >= next_payment`. This error is returned when
+    /// `ledger_timestamp < next_payment` — i.e., the payment window has not yet opened.
+    ///
+    /// Calling `execute_payment` at the exact ledger whose timestamp equals `next_payment`
+    /// is allowed (on-time, not early). See [`assert_payment_due`] in `lib.rs` for the
+    /// full rationale.
+    ///
+    /// This error does **not** mutate subscription state — `next_payment` is unchanged and
+    /// no event is emitted.
     PaymentNotDue         = 5,
     /// Authorization check failed
     Unauthorized          = 6,
