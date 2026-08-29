@@ -1772,3 +1772,394 @@ fn test_execute_payment_before_due_does_not_mutate_subscription() {
     assert_eq!(before.next_payment, after.next_payment);
     assert_eq!(before.amount, after.amount);
 }
+
+// ─── Issue #70 — Interval boundary test vectors ───────────────────────────────
+//
+// The following tests form an explicit, self-contained test vector suite for
+// the lower and upper bounds of the allowed `interval` range [86_400, 31_536_000].
+//
+// CONTRACT SPECIFICATION (from lib.rs):
+//   - Minimum interval: 86_400 seconds (1 day)     — IntervalTooShort if below
+//   - Maximum interval: 31_536_000 seconds (365 days) — IntervalTooLong if above
+//
+// TEST VECTOR DESIGN:
+//   For each boundary we verify four things:
+//     1. The boundary value itself is accepted (subscribe succeeds, data stored correctly)
+//     2. next_payment is computed as `subscribe_timestamp + interval` exactly
+//     3. execute_payment at exactly next_payment succeeds (time-lock releases at `>=`)
+//     4. execute_payment one second before next_payment is rejected (PaymentNotDue)
+//
+// These vectors pin the exact numeric constants so any future change to MIN/MAX
+// constants in storage.rs will immediately surface as a test failure here.
+
+/// TV-01: interval = 0 (well below minimum) — must be rejected IntervalTooShort.
+///
+/// This is the most extreme lower-bound rejection case.
+/// next_payment would be identical to subscribe time, enabling free re-execution.
+#[test]
+fn tv_interval_zero_rejected() {
+    let t = T::new();
+    let r = t.client.try_subscribe(&t.subscriber, &t.merchant, &t.token, &100_i128, &0_u64);
+    assert!(
+        matches!(r, Err(Ok(ContractError::IntervalTooShort))),
+        "interval 0 must be rejected as IntervalTooShort (minimum is 86_400)"
+    );
+    assert!(
+        !t.has_sub(),
+        "no subscription must be stored for interval 0"
+    );
+    assert_eq!(
+        t.env.events().all().len(),
+        0,
+        "no event must be emitted on rejection"
+    );
+}
+
+/// TV-02: interval = 86_399 (one second below minimum) — must be rejected IntervalTooShort.
+///
+/// This pins the exact off-by-one at the lower boundary.
+#[test]
+fn tv_interval_one_below_minimum_rejected() {
+    let t = T::new();
+    let r = t.client.try_subscribe(&t.subscriber, &t.merchant, &t.token, &100_i128, &86_399_u64);
+    assert!(
+        matches!(r, Err(Ok(ContractError::IntervalTooShort))),
+        "interval 86_399 must be rejected as IntervalTooShort (minimum is 86_400)"
+    );
+    assert!(!t.has_sub(), "no subscription must be stored for interval 86_399");
+}
+
+/// TV-03: interval = 86_400 (exact minimum) — must be accepted.
+///
+/// Verifies:
+///   (a) subscribe succeeds and stores interval = 86_400
+///   (b) next_payment = subscribe_timestamp + 86_400
+///   (c) execute_payment at exactly next_payment succeeds (boundary is inclusive)
+///   (d) execute_payment one second before next_payment returns PaymentNotDue
+#[test]
+fn tv_interval_exact_minimum_accepted_and_executable() {
+    let t   = T::new();
+    let ivl = 86_400_u64;
+    let amt = 1_000_i128;
+    let ts  = t.env.ledger().timestamp();
+
+    // (a) Subscribe at the exact minimum interval.
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &amt, &ivl, &false);
+    assert!(t.has_sub(), "subscription must be stored for interval = minimum (86_400)");
+
+    let d = t.get_sub();
+    assert_eq!(d.interval, ivl, "stored interval must equal the minimum constant 86_400");
+
+    // (b) next_payment must be exactly subscribe_timestamp + 86_400.
+    assert_eq!(
+        d.next_payment, ts + ivl,
+        "next_payment must be subscribe_ts + 86_400 for the minimum interval"
+    );
+
+    // (c) One second before due — must be rejected.
+    t.advance(ivl - 1);
+    let early = t.client.try_execute_payment(&t.subscriber, &t.merchant);
+    assert!(
+        matches!(early, Err(Ok(ContractError::PaymentNotDue))),
+        "execute_payment one second before next_payment must return PaymentNotDue \
+         (now = subscribe_ts + 86_399, next_payment = subscribe_ts + 86_400)"
+    );
+    let sb_unchanged = t.sub_bal();
+    let mb_unchanged = t.mer_bal();
+
+    // (d) Advance to exactly next_payment — must succeed (>= semantics).
+    t.advance(1); // total advance = ivl, now == next_payment
+    let on_time = t.client.try_execute_payment(&t.subscriber, &t.merchant);
+    assert!(
+        on_time.is_ok(),
+        "execute_payment at exactly next_payment (now == subscribe_ts + 86_400) must succeed; \
+         time-lock releases at >= next_payment"
+    );
+
+    // Verify token transfer occurred.
+    assert_eq!(
+        t.sub_bal(), sb_unchanged - amt,
+        "subscriber must be debited amount on successful payment at minimum interval"
+    );
+    assert_eq!(
+        t.mer_bal(), mb_unchanged + amt,
+        "merchant must be credited amount on successful payment at minimum interval"
+    );
+
+    // next_payment must have advanced by exactly one interval.
+    let d2 = t.get_sub();
+    assert_eq!(
+        d2.next_payment, ts + ivl + ivl,
+        "after successful payment, next_payment must advance by exactly 86_400 seconds"
+    );
+}
+
+/// TV-04: interval = 86_400 — execute_payment at exactly next_payment uses >= semantics.
+///
+/// Dedicated test for the exact boundary of the time-lock: `now >= next_payment` allows
+/// the call. This explicitly documents that `==` (now exactly equals next_payment) is
+/// treated as due, not early.
+#[test]
+fn tv_interval_minimum_payment_at_exact_due_time_succeeds() {
+    let t   = T::new();
+    let ivl = 86_400_u64;
+    let ts  = t.env.ledger().timestamp();
+
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &500_i128, &ivl, &false);
+    let expected_due = ts + ivl;
+
+    // Advance to exactly the due timestamp (now == next_payment).
+    t.advance(ivl);
+    assert_eq!(
+        t.env.ledger().timestamp(),
+        expected_due,
+        "ledger timestamp must equal next_payment for this test to be meaningful"
+    );
+
+    let r = t.client.try_execute_payment(&t.subscriber, &t.merchant);
+    assert!(
+        r.is_ok(),
+        "execute_payment when now == next_payment must succeed; \
+         time-lock condition is now < next_payment (i.e., payment allowed when now >= next_payment)"
+    );
+}
+
+/// TV-05: interval = 31_536_001 (one second above maximum) — must be rejected IntervalTooLong.
+///
+/// Pins the exact off-by-one at the upper boundary.
+#[test]
+fn tv_interval_one_above_maximum_rejected() {
+    let t = T::new();
+    let r = t.client.try_subscribe(
+        &t.subscriber,
+        &t.merchant,
+        &t.token,
+        &100_i128,
+        &31_536_001_u64,
+    );
+    assert!(
+        matches!(r, Err(Ok(ContractError::IntervalTooLong))),
+        "interval 31_536_001 must be rejected as IntervalTooLong (maximum is 31_536_000)"
+    );
+    assert!(!t.has_sub(), "no subscription must be stored for interval 31_536_001");
+}
+
+/// TV-06: interval = 31_536_000 (exact maximum, 365 days) — must be accepted.
+///
+/// Verifies:
+///   (a) subscribe succeeds and stores interval = 31_536_000
+///   (b) next_payment = subscribe_timestamp + 31_536_000
+///   (c) execute_payment at exactly next_payment succeeds
+///   (d) execute_payment one second before next_payment returns PaymentNotDue
+#[test]
+fn tv_interval_exact_maximum_accepted_and_executable() {
+    let t   = T::new();
+    let ivl = 31_536_000_u64;
+    let amt = 1_000_i128;
+    let ts  = t.env.ledger().timestamp();
+
+    // (a) Subscribe at the exact maximum interval.
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &amt, &ivl, &false);
+    assert!(t.has_sub(), "subscription must be stored for interval = maximum (31_536_000)");
+
+    let d = t.get_sub();
+    assert_eq!(d.interval, ivl, "stored interval must equal the maximum constant 31_536_000");
+
+    // (b) next_payment must be exactly subscribe_timestamp + 31_536_000.
+    assert_eq!(
+        d.next_payment, ts + ivl,
+        "next_payment must be subscribe_ts + 31_536_000 for the maximum interval"
+    );
+
+    // (c) One second before due — must be rejected.
+    t.advance(ivl - 1);
+    let early = t.client.try_execute_payment(&t.subscriber, &t.merchant);
+    assert!(
+        matches!(early, Err(Ok(ContractError::PaymentNotDue))),
+        "execute_payment one second before next_payment must return PaymentNotDue \
+         (now = subscribe_ts + 31_535_999, next_payment = subscribe_ts + 31_536_000)"
+    );
+
+    // (d) Advance to exactly next_payment — must succeed (>= semantics).
+    t.advance(1); // total advance = ivl, now == next_payment
+    let sb_before = t.sub_bal();
+    let mb_before = t.mer_bal();
+
+    let on_time = t.client.try_execute_payment(&t.subscriber, &t.merchant);
+    assert!(
+        on_time.is_ok(),
+        "execute_payment at exactly next_payment (now == subscribe_ts + 31_536_000) must succeed"
+    );
+
+    assert_eq!(
+        t.sub_bal(), sb_before - amt,
+        "subscriber must be debited on successful payment at maximum interval"
+    );
+    assert_eq!(
+        t.mer_bal(), mb_before + amt,
+        "merchant must be credited on successful payment at maximum interval"
+    );
+
+    // next_payment advances by one maximum interval.
+    let d2 = t.get_sub();
+    assert_eq!(
+        d2.next_payment, ts + ivl + ivl,
+        "after successful payment, next_payment must advance by exactly 31_536_000 seconds"
+    );
+}
+
+/// TV-07: interval = 31_536_000 — execute_payment at exactly next_payment uses >= semantics.
+///
+/// Mirror of TV-04 for the upper boundary. Documents that `now == next_payment`
+/// is always due, regardless of interval magnitude.
+#[test]
+fn tv_interval_maximum_payment_at_exact_due_time_succeeds() {
+    let t   = T::new();
+    let ivl = 31_536_000_u64;
+    let ts  = t.env.ledger().timestamp();
+
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &500_i128, &ivl, &false);
+    let expected_due = ts + ivl;
+
+    // Advance to exactly the due timestamp.
+    t.advance(ivl);
+    assert_eq!(
+        t.env.ledger().timestamp(),
+        expected_due,
+        "ledger timestamp must equal next_payment for this test to be meaningful"
+    );
+
+    let r = t.client.try_execute_payment(&t.subscriber, &t.merchant);
+    assert!(
+        r.is_ok(),
+        "execute_payment when now == next_payment must succeed at the maximum interval; \
+         time-lock condition is now < next_payment"
+    );
+}
+
+/// TV-08: interval = u64::MAX — must be rejected IntervalTooLong.
+///
+/// Validates that extreme u64 values do not bypass the upper-bound guard or
+/// trigger an integer overflow in `next_payment` computation.
+#[test]
+fn tv_interval_u64_max_rejected() {
+    let t = T::new();
+    let r = t.client.try_subscribe(
+        &t.subscriber,
+        &t.merchant,
+        &t.token,
+        &100_i128,
+        &u64::MAX,
+    );
+    assert!(
+        matches!(r, Err(Ok(ContractError::IntervalTooLong))),
+        "interval u64::MAX must be rejected as IntervalTooLong before any overflow can occur"
+    );
+    assert!(!t.has_sub(), "no subscription must be stored for interval u64::MAX");
+}
+
+/// TV-09: boundary next_payment values are arithmetically correct for both extremes.
+///
+/// Subscribes twice (same pair, overwrite) — first at minimum interval, then at maximum.
+/// Asserts the stored `next_payment` is `subscribe_timestamp + interval` for each,
+/// confirming that the integer arithmetic path is correct for both boundary constants.
+#[test]
+fn tv_next_payment_arithmetic_correct_at_both_boundaries() {
+    let t = T::new();
+
+    // --- Minimum interval ---
+    let ts_min = t.env.ledger().timestamp();
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &100_i128, &86_400_u64, &false);
+    let d_min = t.get_sub();
+    assert_eq!(
+        d_min.next_payment, ts_min + 86_400,
+        "next_payment arithmetic incorrect for minimum interval (86_400)"
+    );
+
+    // --- Maximum interval (overwrite same pair) ---
+    t.advance(1); // nudge clock so timestamps differ
+    let ts_max = t.env.ledger().timestamp();
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &100_i128, &31_536_000_u64, &false);
+    let d_max = t.get_sub();
+    assert_eq!(
+        d_max.next_payment, ts_max + 31_536_000,
+        "next_payment arithmetic incorrect for maximum interval (31_536_000)"
+    );
+
+    // The two next_payment values must differ because interval values differ
+    // (clock nudge is only 1 second vs 31_449_600 second interval difference).
+    assert_ne!(
+        d_min.next_payment, d_max.next_payment,
+        "next_payment values for min and max intervals must differ"
+    );
+}
+
+/// TV-10: no subscription is stored for any rejected interval value.
+///
+/// Runs all four rejection paths (zero, below-min, above-max, u64::MAX) and
+/// asserts no persistent storage entry is created in any of them.
+#[test]
+fn tv_no_storage_written_on_interval_rejection() {
+    let rejected_intervals: &[u64] = &[0, 86_399, 31_536_001, u64::MAX];
+
+    for &ivl in rejected_intervals {
+        let t = T::new();
+        let _ = t.client.try_subscribe(&t.subscriber, &t.merchant, &t.token, &100_i128, &ivl);
+        assert!(
+            !t.has_sub(),
+            "no subscription storage entry must exist after rejected interval {ivl}"
+        );
+        assert_eq!(
+            t.env.events().all().len(), 0,
+            "no event must be emitted after rejected interval {ivl}"
+        );
+    }
+}
+
+proptest! {
+    /// TV-11 (property): any interval in [0, 86_399] is always rejected as IntervalTooShort.
+    ///
+    /// Exhaustively covers the entire sub-minimum range, not just the pinned values above.
+    #[test]
+    fn tv_prop_all_below_minimum_rejected(interval in 0_u64..86_400_u64) {
+        let t = T::new();
+        let r = t.client.try_subscribe(&t.subscriber, &t.merchant, &t.token, &100_i128, &interval);
+        prop_assert!(
+            matches!(r, Err(Ok(ContractError::IntervalTooShort))),
+            "interval {interval} is below minimum 86_400 and must be rejected as IntervalTooShort"
+        );
+        prop_assert!(!t.has_sub());
+    }
+
+    /// TV-12 (property): any interval in [31_536_001, u64::MAX/2] is always rejected as IntervalTooLong.
+    ///
+    /// Covers the entire above-maximum range up to a safe proptest ceiling.
+    #[test]
+    fn tv_prop_all_above_maximum_rejected(interval in 31_536_001_u64..=u64::MAX / 2) {
+        let t = T::new();
+        let r = t.client.try_subscribe(&t.subscriber, &t.merchant, &t.token, &100_i128, &interval);
+        prop_assert!(
+            matches!(r, Err(Ok(ContractError::IntervalTooLong))),
+            "interval {interval} is above maximum 31_536_000 and must be rejected as IntervalTooLong"
+        );
+        prop_assert!(!t.has_sub());
+    }
+
+    /// TV-13 (property): any interval in [86_400, 31_536_000] is always accepted.
+    ///
+    /// The complement of TV-11 and TV-12: the entire valid range must never trigger
+    /// IntervalTooShort or IntervalTooLong.
+    #[test]
+    fn tv_prop_valid_range_always_accepted(interval in 86_400_u64..=31_536_000_u64) {
+        let t  = T::new();
+        let ts = t.env.ledger().timestamp();
+        t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &100_i128, &interval, &false);
+        prop_assert!(t.has_sub(), "interval {interval} is within valid range and must be accepted");
+        let d = t.get_sub();
+        prop_assert_eq!(d.interval, interval);
+        prop_assert_eq!(
+            d.next_payment, ts + interval,
+            "next_payment must equal subscribe_ts + interval for any valid interval"
+        );
+    }
+}
