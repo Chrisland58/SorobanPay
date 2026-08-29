@@ -582,6 +582,117 @@ See [docs/events.md](docs/events.md) for the full event reference, RPC query exa
 
 ---
 
+## Contract interface stability and upgrade policy
+
+> **Current contract version:** `1.0.0`  
+> **Schema version:** `1`  
+> **Entry point:** `get_version()` → `"1.0.0"` | `get_schema_version()` → `1`
+
+Soroban contracts are **immutable once deployed**. A contract address is forever bound to the WASM bytecode uploaded at deployment time. "Upgrading" the contract always means deploying a new contract address and migrating clients to it — there is no in-place code replacement.
+
+### What is stable in v1.x.x
+
+The following are guaranteed stable across all `v1.x.x` releases:
+
+| Surface | Stability guarantee |
+|---------|-------------------|
+| Entry point names (`subscribe`, `execute_payment`, `cancel`, `batch_execute_payment`, `get_subscription`) | **Stable** — never removed or renamed in v1 |
+| Parameter order for all entry points | **Stable** — positional args will not shift |
+| Parameter types for all entry points | **Stable** — `Address`, `i128`, `u64`, `bool` types are locked |
+| Error code numbers (1–17) | **Stable** — codes will not be reassigned |
+| Event topic structure (`subscribe`, `executed`, `cancel`, `payment_transfer_failure`) | **Stable** — topic 0 discriminant and topic order are locked |
+| `SubscriptionData` field names returned by `get_subscription` | **Stable** — fields may be added but never removed |
+| SEP-41 token interface assumptions | **Stable** — `balance`, `transfer`, `allowance` signatures are fixed |
+
+### What may change in minor versions (v1.1.x, v1.2.x, …)
+
+A **minor bump** (e.g. `1.0.0 → 1.1.0`) signals additive, backwards-compatible changes:
+
+- **New entry points** — additional functions on the same contract.
+- **New optional parameters** — added at the end of an existing entry point's parameter list. Existing callers that pass positional arguments to the functions up to the current last parameter are unaffected.
+- **New event types** — off-chain indexers must ignore unknown event topics gracefully.
+- **New error codes** — higher-numbered codes may be added; existing codes 1–17 remain.
+- **New `SubscriptionData` fields** — the struct may gain new fields; off-chain code must not assume a fixed field count.
+
+**Minimum required change for existing clients after a minor bump:** none. Existing transactions continue to work without modification.
+
+### What triggers a major version (v2.0.0)
+
+A **major bump** (`1.x.x → 2.0.0`) means a breaking change. Examples that would force a major bump:
+
+- Removing or renaming an entry point.
+- Changing the type of an existing parameter.
+- Reordering parameters of an existing entry point.
+- Removing or reassigning an error code.
+- Changing the topic structure of an existing event.
+- Changing the storage key scheme in a way that invalidates existing persistent entries.
+
+Major versions always require:
+1. Deploying a new contract address.
+2. Running the migration path described in [docs/versioning.md](docs/versioning.md).
+3. Coordinating client upgrades (frontend, backend, off-chain indexers).
+
+### How to add a new entry point without breaking existing clients
+
+Follow this checklist when extending the contract interface:
+
+1. **Add new entry point at the bottom** of `#[contractimpl] impl SubscriptionProtocol`. Never reorder existing functions (the XDR ABI is position-independent but reordering is a footgun for tooling).
+2. **Use a new, distinct function name.** Never overload an existing entry point.
+3. **Append new parameters after all existing ones** if extending an existing function signature. Never insert parameters in the middle — that shifts positional offsets for every existing caller.
+4. **Register new error codes with unused numbers** (currently ≥ 18). Never reuse a retired code.
+5. **Emit new events with a new `Symbol` topic discriminant.** Off-chain consumers that filter for known topics will silently ignore unknown events — this is safe.
+6. **Increment `CONTRACT_VERSION`** in `contracts/subscription/src/storage.rs`:
+   - New entry point → bump minor: `"1.0.0"` → `"1.1.0"`.
+   - New fields on `SubscriptionData` → bump minor and increment `CURRENT_SCHEMA_VERSION`.
+   - Breaking change → bump major: `"1.x.x"` → `"2.0.0"`.
+7. **Update `docs/contract-api.md`** with the new entry point's full parameter table, error cases, and CLI/TypeScript examples.
+8. **Update `CHANGELOG.md`** under the `[Unreleased]` heading.
+
+### How to add a new field to `SubscriptionData`
+
+`SubscriptionData` is stored as XDR on the ledger. Because Soroban serializes `#[contracttype]` structs by **field order**, append-only additions are safe on a fresh deployment but would silently corrupt reads from existing entries on an upgraded contract. The safe procedure is:
+
+1. **Only add fields at the end** of the struct definition in `storage.rs`.
+2. **Increment `CURRENT_SCHEMA_VERSION`** (currently `1` → `2`).
+3. **Provide a `migrate(admin)` migration path** that reads existing entries under the old schema and rewrites them with default values for the new field, if entries must survive across deployments.
+4. For a **fresh deployment** (new contract address, no existing state), no migration is needed — all entries will be created with the full new struct from day one.
+
+### Frontend and off-chain client compatibility
+
+The frontend (`frontend/src/lib/transaction_builder.ts`) calls `subscribe` with five positional ScVal arguments. When the contract interface changes:
+
+| Change type | Frontend impact | Required action |
+|-------------|----------------|----------------|
+| New entry point added | None | No frontend change needed unless the new feature is surfaced in UI |
+| New optional parameter appended to `subscribe` | None — existing five-arg call still valid | Pass new arg only when the UI exposes it |
+| Parameter type change | **Breaking** — ScVal encoding must be updated | Bump major version; update `buildAndSubmitSubscribe` |
+| Parameter removed | **Breaking** | Bump major version; remove from builder |
+| New event type emitted | None for transaction builder | Backend indexer must handle unknown event topics |
+
+To verify client–contract compatibility at runtime, call the read-only version helpers before submitting a transaction:
+
+```typescript
+import { Contract, SorobanRpc } from "@stellar/stellar-sdk";
+
+const server = new SorobanRpc.Server(rpcUrl);
+const contract = new Contract(contractId);
+
+// Read version string from on-chain entry point
+const versionResult = await server.simulateTransaction(
+  buildVersionQueryTx(contract, account, networkPassphrase)
+);
+// Expected: "1.0.0"
+const version = scValToNative(versionResult.result?.retval);
+const [major] = String(version).split(".").map(Number);
+if (major !== 1) {
+  throw new Error(`Unsupported contract version: ${version}. This client requires v1.x.x.`);
+}
+```
+
+See [docs/versioning.md](docs/versioning.md) for the full migration guide, including how to run `migrate(admin)` after deploying a schema-version bump.
+
+---
+
 ## Transaction fees and execution budgets
 
 Soroban charges fees based on **CPU instructions**, **memory bytes**, and **ledger entry reads/writes**. All three entry points are computationally O(1) — they touch a fixed number of storage entries and make no loops — but they differ meaningfully in cost because `execute_payment` crosses into an external token contract.
@@ -897,6 +1008,8 @@ npm run dev
 
 | Guide | Description |
 |---|---|
+| [Contract API Reference](docs/contract-api.md) | Full parameter tables, error cases, and CLI/TypeScript examples for every entry point |
+| [Contract Versioning & Migration](docs/versioning.md) | Upgrade checklist, schema migration, breaking vs. additive changes |
 | [Storage TTL Management](docs/operations.md) | Detecting at-risk entries, extending TTL programmatically, alert thresholds |
 | [Network Configuration](docs/networks.md) | Testnet vs. mainnet side-by-side, common mistakes, switching guide |
 | [Backend API Cookbook](docs/api-cookbook.md) | 8 recipes: auth, subscriptions, webhooks, CSV export, MRR, TTL health |

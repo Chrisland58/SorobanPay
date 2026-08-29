@@ -16,6 +16,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `README.md`: Added "Contract interface stability and upgrade policy" section documenting the current API contract (stable surfaces in v1.x.x), what constitutes a minor vs. major version bump, checklists for adding new entry points or `SubscriptionData` fields without breaking existing clients, and a runtime version-compatibility check example (closes #71).
+- `docs/contract-api.md`: Expanded from three entry points to a full reference covering all eleven entry points (`initialize`, `get_version`, `get_schema_version`, `migrate`, `subscribe`, `execute_payment`, `batch_execute_payment`, `cancel`, `get_subscription`, `compute_subscription_key`, `get_merchant_subscription_keys`). Documents the `strict` parameter added to `subscribe`, all 17 error codes, and `SubscriptionData` field definitions.
+
 ### Changed
 
 ### Deprecated
