@@ -38,21 +38,30 @@ fn checked_next_payment(ts: u64, interval: u64) -> Result<u64, ContractError> {
 /// The index stores `Vec<BytesN<32>>` under `DataKey::MerchantIndex(merchant)`.
 /// On subscribe we append; on cancel we remove. This allows on-chain enumeration
 /// of all subscriptions for a given merchant.
+///
+/// Uses **persistent** storage (with TTL extension) so the index survives across
+/// ledger windows and is not silently evicted by the host.
 fn index_add(env: &Env, merchant: &Address, hash: BytesN<32>) {
     let idx_key = DataKey::MerchantIndex(merchant.clone());
     let mut index: Vec<BytesN<32>> = env
         .storage()
-        .temporary()
+        .persistent()
         .get(&idx_key)
         .unwrap_or_else(|| Vec::new(env));
     index.push_back(hash);
-    env.storage().temporary().set(&idx_key, &index);
+    env.storage().persistent().set(&idx_key, &index);
+    env.storage()
+        .persistent()
+        .extend_ttl(&idx_key, MIN_TTL_LEDGERS, MAX_TTL_LEDGERS);
 }
 
 /// Remove a hashed key from a merchant's subscription index.
+///
+/// When the last subscription is removed, the index entry itself is deleted from
+/// persistent storage to avoid leaving a stale empty-vec key on the ledger.
 fn index_remove(env: &Env, merchant: &Address, hash: &BytesN<32>) {
     let idx_key = DataKey::MerchantIndex(merchant.clone());
-    let mut index: Vec<BytesN<32>> = match env.storage().temporary().get(&idx_key) {
+    let index: Vec<BytesN<32>> = match env.storage().persistent().get(&idx_key) {
         Some(v) => v,
         None => return,
     };
@@ -63,7 +72,16 @@ fn index_remove(env: &Env, merchant: &Address, hash: &BytesN<32>) {
             updated.push_back(entry);
         }
     }
-    env.storage().temporary().set(&idx_key, &updated);
+    if updated.is_empty() {
+        // Compaction: remove the index entry entirely rather than storing an
+        // empty vec, avoiding a stale zero-length key in persistent storage.
+        env.storage().persistent().remove(&idx_key);
+    } else {
+        env.storage().persistent().set(&idx_key, &updated);
+        env.storage()
+            .persistent()
+            .extend_ttl(&idx_key, MIN_TTL_LEDGERS, MAX_TTL_LEDGERS);
+    }
 }
 
 /// Add a subscriber address to the merchant's subscriber roster.
@@ -282,7 +300,7 @@ impl SubscriptionProtocol {
     pub fn get_merchant_subscription_keys(env: Env, merchant: Address) -> Vec<BytesN<32>> {
         let idx_key = DataKey::MerchantIndex(merchant);
         env.storage()
-            .temporary()
+            .persistent()
             .get(&idx_key)
             .unwrap_or_else(|| Vec::new(&env))
     }
@@ -870,6 +888,11 @@ impl SubscriptionProtocol {
     }
 
     /// Cancel an active subscription.
+    ///
+    /// Removes the subscription record from **persistent** storage and updates
+    /// the merchant's subscription index.  When this is the merchant's last
+    /// active subscription, the index entry itself is removed entirely from
+    /// persistent storage (compaction), leaving no stale keys on the ledger.
     ///
     /// # Authorization
     /// Requires a valid signature from `subscriber`.
