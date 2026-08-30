@@ -890,52 +890,33 @@ function decodeBatchOutcomes(
   }
 }
 
-// ── pause_subscription / resume_subscription builders (Issue #795) ────────────
+// ── update_subscription builder (Issue #768) ──────────────────────────────────
 
-/** Parameters for pausing an active subscription */
-export interface PauseSubscriptionParams {
+/** Parameters for updating an existing subscription's amount and/or interval */
+export interface UpdateSubscriptionParams {
   /** Subscriber Stellar G-address (must match the connected wallet) */
   subscriber: string;
   /** Merchant Stellar G-address */
   merchant: string;
-  /** Token contract C-address */
-  token: string;
-  /**
-   * Optional unix timestamp (seconds) at which `execute_payment` should
-   * automatically clear the pause. Omit to require an explicit
-   * `resume_subscription` call to reactivate.
-   */
-  resumeAt?: number;
+  /** Replacement payment amount, in the token's smallest unit. Must be > 0. */
+  newAmount: number;
+  /** Replacement interval in seconds. Must be in [86400, 31536000]. */
+  newInterval: number;
 }
 
-/** Parameters for resuming a paused subscription */
-export interface ResumeSubscriptionParams {
-  /** Subscriber Stellar G-address (must match the connected wallet) */
-  subscriber: string;
-  /** Merchant Stellar G-address */
-  merchant: string;
-  /** Token contract C-address */
-  token: string;
-}
-
-/** Result of a successful pause_subscription transaction */
-export interface PauseSubscriptionResult {
-  txHash: string;
-}
-
-/** Result of a successful resume_subscription transaction */
-export interface ResumeSubscriptionResult {
+/** Result of a successful update_subscription transaction */
+export interface UpdateSubscriptionResult {
   txHash: string;
 }
 
 /**
- * Build, sign, and submit a `pause_subscription` transaction.
+ * Build, sign, and submit an `update_subscription` transaction.
  *
- * The connected subscriber wallet must authorize this call. While paused,
- * `execute_payment` rejects collection attempts on-chain — no funds move
- * while a subscription is paused.
+ * Unlike cancel + re-subscribe, the contract preserves the subscription's
+ * current `next_payment` — the subscriber's billing cycle is not disrupted
+ * by an amount/interval change.
  *
- * @param params            Subscriber, merchant, token, and optional auto-resume time
+ * @param params            Subscriber, merchant, and the replacement amount/interval
  * @param contractId        Deployed SorobanPay contract address
  * @param publicKey         Connected subscriber's public key (from Freighter)
  * @param networkPassphrase Stellar network passphrase
@@ -943,104 +924,33 @@ export interface ResumeSubscriptionResult {
  * @returns                 Transaction hash of the confirmed transaction
  * @throws                  On validation failure, signing rejection, or RPC errors
  */
-export async function buildAndSubmitPauseSubscription(
-  params: PauseSubscriptionParams,
+export async function buildAndSubmitUpdateSubscription(
+  params: UpdateSubscriptionParams,
   contractId: string,
   publicKey: string,
   networkPassphrase: string,
   rpcUrl: string,
-): Promise<PauseSubscriptionResult> {
+): Promise<UpdateSubscriptionResult> {
+  // Validate before any network calls — same rules as subscribe().
   if (!isValidGAddress(params.subscriber)) {
     throw new Error(`Invalid subscriber address: ${params.subscriber}`);
   }
   if (!isValidGAddress(params.merchant)) {
     throw new Error(`Invalid merchant address: ${params.merchant}`);
   }
-  if (!isValidCAddress(params.token)) {
-    throw new Error(`Invalid token contract address: ${params.token}`);
+  if (!Number.isInteger(params.newAmount) || params.newAmount <= 0) {
+    throw new Error('Amount must be a positive whole number');
   }
-
-  const server = new SorobanRpc.Server(rpcUrl, { allowHttp: false });
-  const account = await server.getAccount(publicKey);
-  const contract = new Contract(contractId);
-
-  // Contract signature is `Option<u64>` — `Some(ts)` encodes as a u64 ScVal,
-  // `None` as ScVal::Void (there is no separate "option" wire type).
-  const resumeAtScVal =
-    params.resumeAt != null
-      ? nativeToScVal(BigInt(params.resumeAt), { type: 'u64' })
-      : xdr.ScVal.scvVoid();
-
-  const tx = new TransactionBuilder(account, {
-    fee: BASE_FEE,
-    networkPassphrase,
-  })
-    .addOperation(
-      contract.call(
-        'pause_subscription',
-        new Address(params.subscriber).toScVal(),
-        new Address(params.merchant).toScVal(),
-        new Address(params.token).toScVal(),
-        resumeAtScVal,
-      ),
-    )
-    .setTimeout(30)
-    .build();
-
-  let preparedTx: ReturnType<typeof TransactionBuilder.fromXDR>;
-  try {
-    preparedTx = await server.prepareTransaction(tx);
-  } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : String(err);
-    throw new Error(`Transaction preparation failed: ${msg}`);
-  }
-
-  const signedXdr = await signTx(preparedTx.toXDR(), networkPassphrase);
-  const parsedTx = TransactionBuilder.fromXDR(signedXdr, networkPassphrase);
-  const sendResult = await server.sendTransaction(parsedTx);
-
-  if (sendResult.status === 'ERROR') {
+  if (
+    !Number.isInteger(params.newInterval) ||
+    params.newInterval < 86_400 ||
+    params.newInterval > 31_536_000
+  ) {
     throw new Error(
-      `Transaction submission failed: ${sendResult.errorResult?.toXDR('base64') ?? 'unknown error'}`,
+      'Interval must be a whole number of seconds between 86,400 (1 day) and 31,536,000 (365 days)',
     );
   }
 
-  const txHash = await pollForConfirmation(server, sendResult.hash);
-  return { txHash };
-}
-
-/**
- * Build, sign, and submit a `resume_subscription` transaction.
- *
- * The connected subscriber wallet must authorize this call. Reactivates a
- * paused subscription immediately — ahead of any `paused_until` timestamp —
- * and the contract recomputes `next_payment` so no charge is due right away.
- *
- * @param params            Subscriber, merchant, and token addresses
- * @param contractId        Deployed SorobanPay contract address
- * @param publicKey         Connected subscriber's public key (from Freighter)
- * @param networkPassphrase Stellar network passphrase
- * @param rpcUrl            Soroban RPC endpoint URL
- * @returns                 Transaction hash of the confirmed transaction
- * @throws                  On validation failure, signing rejection, or RPC errors
- */
-export async function buildAndSubmitResumeSubscription(
-  params: ResumeSubscriptionParams,
-  contractId: string,
-  publicKey: string,
-  networkPassphrase: string,
-  rpcUrl: string,
-): Promise<ResumeSubscriptionResult> {
-  if (!isValidGAddress(params.subscriber)) {
-    throw new Error(`Invalid subscriber address: ${params.subscriber}`);
-  }
-  if (!isValidGAddress(params.merchant)) {
-    throw new Error(`Invalid merchant address: ${params.merchant}`);
-  }
-  if (!isValidCAddress(params.token)) {
-    throw new Error(`Invalid token contract address: ${params.token}`);
-  }
-
   const server = new SorobanRpc.Server(rpcUrl, { allowHttp: false });
   const account = await server.getAccount(publicKey);
   const contract = new Contract(contractId);
@@ -1051,10 +961,11 @@ export async function buildAndSubmitResumeSubscription(
   })
     .addOperation(
       contract.call(
-        'resume_subscription',
+        'update_subscription',
         new Address(params.subscriber).toScVal(),
         new Address(params.merchant).toScVal(),
-        new Address(params.token).toScVal(),
+        nativeToScVal(BigInt(params.newAmount), { type: 'i128' }),
+        nativeToScVal(BigInt(params.newInterval), { type: 'u64' }),
       ),
     )
     .setTimeout(30)
