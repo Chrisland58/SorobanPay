@@ -44,6 +44,7 @@ import {
   useFormPersist,
 } from "@/hooks/useFormPersist";
 import { buildAndSubmitSubscribe } from "@/lib/transaction_builder";
+import { checkAllowance, type AllowanceResult } from "@/lib/allowance_checker";
 import { normalizeRpcError } from "@/lib/rpc_error_normalizer";
 import {
   validateSubscriptionForm,
@@ -520,6 +521,51 @@ function SuccessCard({
   );
 }
 
+// ─── Allowance warning banner ──────────────────────────────────────────────────
+
+/**
+ * Shown when the subscriber's current token allowance is below the requested
+ * payment amount. This is a soft warning — the user can still submit, and the
+ * on-chain contract will emit a `low_allowance` event.
+ */
+function AllowanceWarning({
+  allowance,
+  shortfall,
+}: {
+  allowance: bigint;
+  shortfall: bigint;
+}) {
+  return (
+    <div
+      role="alert"
+      aria-live="polite"
+      className="mb-4 rounded-lg bg-yellow-900/40 border border-yellow-600/60 px-4 py-3 text-sm"
+    >
+      <div className="flex items-start gap-2">
+        <span className="text-yellow-400 text-base flex-shrink-0 mt-0.5" aria-hidden="true">
+          ⚠
+        </span>
+        <div className="space-y-1">
+          <p className="font-semibold text-yellow-300">Low token allowance</p>
+          <p className="text-gray-300 text-xs leading-relaxed">
+            Your current allowance ({allowance.toString()} token units) is{" "}
+            <strong>{shortfall.toString()} units short</strong> of the payment
+            amount. You can still submit, but the merchant won&apos;t be able to
+            collect until you approve more tokens.
+          </p>
+          <p className="text-gray-400 text-xs leading-relaxed">
+            To fix: use your wallet to call{" "}
+            <code className="bg-gray-800 px-1.5 py-0.5 rounded text-yellow-300 font-mono">
+              approve(contract, amount)
+            </code>{" "}
+            on the token contract before the first payment is due.
+          </p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ─── Confirmation modal ────────────────────────────────────────────────────────
 
 function ConfirmModal({
@@ -527,6 +573,7 @@ function ConfirmModal({
   tokenAddress,
   amount,
   interval,
+  allowanceResult,
   onConfirm,
   onCancel,
 }: {
@@ -534,6 +581,7 @@ function ConfirmModal({
   tokenAddress: string;
   amount: string;
   interval: string;
+  allowanceResult: AllowanceResult | null;
   onConfirm: () => void;
   onCancel: () => void;
 }) {
@@ -552,6 +600,14 @@ function ConfirmModal({
         <p className="text-sm text-gray-400">
           Review the details before authorizing the on-chain transaction.
         </p>
+
+        {/* Low-allowance warning inside the confirmation dialog */}
+        {allowanceResult && !allowanceResult.sufficient && (
+          <AllowanceWarning
+            allowance={allowanceResult.allowance}
+            shortfall={allowanceResult.shortfall}
+          />
+        )}
 
         <dl className="bg-gray-800/60 rounded-lg divide-y divide-gray-700 text-sm">
           {[
@@ -744,6 +800,10 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
   const [successData, setSuccessData]   = useState<SuccessData | null>(null);
   const [showConfirm, setShowConfirm]   = useState(false);
 
+  // Allowance pre-flight state (populated when the confirm modal opens)
+  const [allowanceResult, setAllowanceResult]       = useState<AllowanceResult | null>(null);
+  const [isCheckingAllowance, setIsCheckingAllowance] = useState(false);
+
   // Guard: must have a valid contract address before rendering the form
   // (placed after hooks so rules-of-hooks is satisfied)
   if (!CONTRACT_ID) return <ContractConfigError />;
@@ -770,6 +830,7 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
     setTxError(null);
     setFieldErrors({});
     setShowConfirm(false);
+    setAllowanceResult(null);
     setMerchantAddress("");
     setTokenAddress("");
     setAmount("");
@@ -791,6 +852,23 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
     setFieldErrors(errors);
     if (!isFormValid(errors)) return;
     if (!publicKey) return;
+
+    // Run the allowance check in the background while opening the confirm
+    // modal. The check is non-blocking — the modal renders immediately and
+    // the warning appears once the check completes.
+    setAllowanceResult(null);
+    setIsCheckingAllowance(true);
+    checkAllowance({
+      subscriberAddress: publicKey,
+      tokenContractId: tokenAddress.trim(),
+      contractId: CONTRACT_ID,
+      requiredAmount: BigInt(Number(amount)),
+      rpcUrl: RPC_URL,
+      networkPassphrase: NETWORK_PASSPHRASE,
+    })
+      .then((result) => setAllowanceResult(result))
+      .catch(() => setAllowanceResult(null))
+      .finally(() => setIsCheckingAllowance(false));
 
     setShowConfirm(true);
   }
@@ -840,6 +918,7 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
           tokenAddress={tokenAddress}
           amount={amount}
           interval={interval}
+          allowanceResult={isCheckingAllowance ? null : allowanceResult}
           onConfirm={confirmAndSubmit}
           onCancel={() => setShowConfirm(false)}
         />
@@ -1050,6 +1129,16 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
               >
                 {fieldErrors.amount}
               </p>
+            )}
+            {/* Inline low-allowance hint — shown when we have a result and the
+                confirm modal is closed (avoids duplicate warning) */}
+            {!showConfirm && allowanceResult && !allowanceResult.sufficient && (
+              <div className="mt-2">
+                <AllowanceWarning
+                  allowance={allowanceResult.allowance}
+                  shortfall={allowanceResult.shortfall}
+                />
+              </div>
             )}
           </div>
 
