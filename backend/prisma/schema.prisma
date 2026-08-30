@@ -13,14 +13,14 @@ datasource db {
 }
 
 model Event {
-  id            Int      @id @default(autoincrement())
-  type          String   // "subscribe" or "executed"
-  subscriber    String
-  merchant      String
-  token         String
-  amount        String   // Store as string to handle big integers
+  id              Int      @id @default(autoincrement())
+  type            String   // "subscribe" or "executed"
+  subscriber      String
+  merchant        String
+  token           String
+  amount          String   // Store as string to handle big integers
   ledgerTimestamp BigInt
-  createdAt     DateTime @default(now())
+  createdAt       DateTime @default(now())
 }
 
 model PayoutSummary {
@@ -33,4 +33,25 @@ model PayoutSummary {
   currency      String   // Token address
   createdAt     DateTime @default(now())
   type          String   // "daily" or "weekly"
+}
+
+// Merged from two duplicate PaymentRetry blocks.
+// Superset of all fields from both definitions.
+model PaymentRetry {
+  id           Int      @id @default(autoincrement())
+  subscriber   String
+  merchant     String
+  token        String
+  amount       String   // Payment amount in token's smallest unit (stored as string)
+  attemptCount Int      @default(0)
+  lastAttempt  DateTime?
+  nextRetryAt  DateTime?
+  status       String   @default("pending") // "pending" | "succeeded" | "failed" | "abandoned"
+  errorMessage String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@index([subscriber, merchant])
+  @@index([nextRetryAt])
+  @@index([status])
 }
