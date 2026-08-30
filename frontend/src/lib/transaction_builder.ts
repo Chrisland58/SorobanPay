@@ -22,6 +22,7 @@ import {
   nativeToScVal,
   Address,
   xdr,
+  scValToNative,
 } from '@stellar/stellar-sdk';
 import { SorobanRpc } from '@stellar/stellar-sdk';
 import { signTx } from './wallet_manager';
