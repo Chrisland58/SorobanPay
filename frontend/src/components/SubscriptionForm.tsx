@@ -23,7 +23,9 @@ import {
   DEFAULT_INTERVAL_SECONDS,
   type FieldErrors,
 } from '@/lib/validation';
-import { CONTRACT_ID, NETWORK_PASSPHRASE, RPC_URL } from '@/constants/network';
+import { getNetworkConfig } from '@/constants/network';
+
+const { contractId: CONTRACT_ID, networkPassphrase: NETWORK_PASSPHRASE, rpcUrl: RPC_URL } = getNetworkConfig();
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
