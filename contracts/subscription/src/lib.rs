@@ -405,6 +405,71 @@ impl SubscriptionProtocol {
         Ok(())
     }
 
+    /// Update the amount and/or interval of an existing active subscription.
+    ///
+    /// # Authorization
+    /// Requires a valid signature from `subscriber`.
+    ///
+    /// # Parameters
+    /// - `subscriber`: Account whose subscription is being updated.
+    /// - `merchant`:   Merchant counterpart of the subscription.
+    /// - `token`:      SEP-41 token contract address (must match the stored token).
+    /// - `amount`:     New payment amount per interval. Must be > 0 and <= 10^18.
+    /// - `interval`:   New seconds between payments. Must be in [86400, 31536000].
+    ///
+    /// # Errors
+    /// - `ContractError::NoActiveSubscription` — no subscription found for the pair.
+    /// - `ContractError::AmountMustBePositive` — `amount <= 0`.
+    /// - `ContractError::AmountTooLarge`       — `amount > 10^18`.
+    /// - `ContractError::IntervalTooShort`     — `interval < 86400`.
+    /// - `ContractError::IntervalTooLong`      — `interval > 31536000`.
+    pub fn update_subscription(
+        env: Env,
+        subscriber: Address,
+        merchant: Address,
+        token: Address,
+        amount: i128,
+        interval: u64,
+    ) -> Result<(), ContractError> {
+        subscriber.require_auth();
+
+        if amount <= 0 {
+            return Err(ContractError::AmountMustBePositive);
+        }
+        if amount > MAX_AMOUNT {
+            return Err(ContractError::AmountTooLarge);
+        }
+        if interval < 86_400 {
+            return Err(ContractError::IntervalTooShort);
+        }
+        if interval > 31_536_000 {
+            return Err(ContractError::IntervalTooLong);
+        }
+
+        // Use the hash-based key — same as subscribe(), execute_payment(), and cancel().
+        let hash = subscription_key(&env, &subscriber, &merchant);
+        let key = DataKey::Subscription(hash.clone());
+
+        let mut data: SubscriptionData = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .ok_or(ContractError::NoActiveSubscription)?;
+
+        data.amount = amount;
+        data.interval = interval;
+        data.token = token.clone();
+
+        env.storage().persistent().set(&key, &data);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, MIN_TTL_LEDGERS, MAX_TTL_LEDGERS);
+
+        events::emit_subscribe(&env, &subscriber, &merchant, &token, amount);
+
+        Ok(())
+    }
+
     /// Query active subscription details for a subscriber-merchant pair.
     ///
     /// Read-only; no authorization required.

@@ -1732,3 +1732,48 @@ fn test_execute_payment_before_due_does_not_mutate_subscription() {
     assert_eq!(before.next_payment, after.next_payment);
     assert_eq!(before.amount, after.amount);
 }
+
+// ─── Issue #789 — update_subscription correct storage key ────────────────────
+
+/// subscribe() then update_subscription() must succeed (no NoActiveSubscription).
+#[test]
+fn test_update_subscription_succeeds_after_subscribe() {
+    let t = T::new();
+    let original_amount = 100_000_i128;
+    let new_amount      = 200_000_i128;
+    let original_ivl    = 86_400_u64;
+    let new_ivl         = 172_800_u64; // 2 days
+
+    t.client().subscribe(&t.subscriber, &t.merchant, &t.token, &original_amount, &original_ivl, &false);
+
+    // update_subscription must not return NoActiveSubscription
+    t.client().update_subscription(&t.subscriber, &t.merchant, &t.token, &new_amount, &new_ivl);
+
+    let sub = t.get_sub();
+    assert_eq!(sub.amount, new_amount, "amount should be updated");
+    assert_eq!(sub.interval, new_ivl, "interval should be updated");
+}
+
+/// update_subscription on a non-existent subscription must return NoActiveSubscription.
+#[test]
+fn test_update_subscription_no_active_returns_error() {
+    let t = T::new();
+    let r = t.client().try_update_subscription(
+        &t.subscriber, &t.merchant, &t.token, &100_000_i128, &86_400_u64,
+    );
+    assert!(
+        matches!(r, Err(Ok(ContractError::NoActiveSubscription))),
+        "expected NoActiveSubscription, got {r:?}",
+    );
+}
+
+/// update_subscription with amount=0 must return AmountMustBePositive.
+#[test]
+fn test_update_subscription_amount_zero_rejected() {
+    let t = T::new();
+    t.client().subscribe(&t.subscriber, &t.merchant, &t.token, &100_000_i128, &86_400_u64, &false);
+    let r = t.client().try_update_subscription(
+        &t.subscriber, &t.merchant, &t.token, &0_i128, &86_400_u64,
+    );
+    assert!(matches!(r, Err(Ok(ContractError::AmountMustBePositive))));
+}
