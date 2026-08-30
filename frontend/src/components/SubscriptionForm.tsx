@@ -40,7 +40,7 @@ import {
   clearPersistedFormData,
   useFormPersist,
 } from "@/hooks/useFormPersist";
-import { buildAndSubmitSubscribe } from "@/lib/transaction_builder";
+import { buildAndSubmitSubscribe, getSubscription, type SubscriptionData } from "@/lib/transaction_builder";
 import {
   validateSubscriptionForm,
   isFormValid,
@@ -705,6 +705,204 @@ function ErrorCard({
   );
 }
 
+// ─── Subscription lookup panel ────────────────────────────────────────────────
+
+/**
+ * Read-only panel that fetches and displays subscription details for any
+ * (subscriber, merchant) pair via the `get_subscription` view function.
+ * No wallet signature is required.
+ */
+function SubscriptionLookupPanel() {
+  const [lookupSubscriber, setLookupSubscriber] = useState("");
+  const [lookupMerchant, setLookupMerchant]     = useState("");
+  const [isLooking, setIsLooking]               = useState(false);
+  const [lookupResult, setLookupResult]         = useState<SubscriptionData | null | undefined>(undefined);
+  const [lookupError, setLookupError]           = useState<string | null>(null);
+  const [isOpen, setIsOpen]                     = useState(false);
+
+  async function handleLookup(e: FormEvent) {
+    e.preventDefault();
+    setLookupError(null);
+    setLookupResult(undefined);
+
+    const sub = lookupSubscriber.trim();
+    const mer = lookupMerchant.trim();
+
+    if (!sub || !mer) {
+      setLookupError("Both subscriber and merchant addresses are required.");
+      return;
+    }
+
+    setIsLooking(true);
+    try {
+      const result = await getSubscription(sub, mer, CONTRACT_ID, NETWORK_PASSPHRASE, RPC_URL);
+      setLookupResult(result);
+    } catch (err) {
+      setLookupError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setIsLooking(false);
+    }
+  }
+
+  const days = lookupResult
+    ? Math.round(Number(lookupResult.interval) / 86400)
+    : 0;
+
+  const nextPaymentDate = lookupResult
+    ? new Date(Number(lookupResult.next_payment) * 1000).toLocaleString()
+    : "";
+
+  return (
+    <div className="w-full max-w-lg mx-auto mt-4">
+      {/* Collapsible header */}
+      <button
+        type="button"
+        onClick={() => setIsOpen((v) => !v)}
+        aria-expanded={isOpen}
+        className="w-full flex items-center justify-between gap-3 rounded-xl bg-gray-900 border border-gray-700
+                   px-5 py-4 text-sm font-semibold text-gray-200 hover:bg-gray-800 active:bg-gray-700
+                   transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400
+                   focus-visible:ring-offset-2 focus-visible:ring-offset-gray-950"
+      >
+        <span className="flex items-center gap-2">
+          <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 text-blue-400 shrink-0" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+            <path fillRule="evenodd" d="M8 4a4 4 0 100 8 4 4 0 000-8zM2 8a6 6 0 1110.89 3.476l4.817 4.817a1 1 0 01-1.414 1.414l-4.816-4.816A6 6 0 012 8z" clipRule="evenodd" />
+          </svg>
+          Look Up a Subscription
+        </span>
+        <svg
+          xmlns="http://www.w3.org/2000/svg"
+          className={`h-4 w-4 text-gray-400 transition-transform duration-200 ${isOpen ? "rotate-180" : ""}`}
+          viewBox="0 0 20 20"
+          fill="currentColor"
+          aria-hidden="true"
+        >
+          <path fillRule="evenodd" d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z" clipRule="evenodd" />
+        </svg>
+      </button>
+
+      {isOpen && (
+        <div className="rounded-b-xl bg-gray-900 border border-t-0 border-gray-700 px-5 py-5 space-y-4">
+          <p className="text-xs text-gray-400 leading-relaxed">
+            Read subscription details directly from the contract — no wallet needed.
+            Enter any subscriber and merchant address pair to check current status.
+          </p>
+
+          <form onSubmit={handleLookup} noValidate className="space-y-3">
+            {/* Subscriber */}
+            <div>
+              <label htmlFor="lookup-subscriber" className="block text-xs font-semibold text-gray-300 mb-1.5">
+                Subscriber address
+              </label>
+              <input
+                id="lookup-subscriber"
+                type="text"
+                placeholder="G…subscriber"
+                autoComplete="off"
+                value={lookupSubscriber}
+                onChange={(e) => setLookupSubscriber(e.target.value)}
+                disabled={isLooking}
+                aria-required="true"
+                className={inputCls}
+              />
+            </div>
+
+            {/* Merchant */}
+            <div>
+              <label htmlFor="lookup-merchant" className="block text-xs font-semibold text-gray-300 mb-1.5">
+                Merchant address
+              </label>
+              <input
+                id="lookup-merchant"
+                type="text"
+                placeholder="G…merchant"
+                autoComplete="off"
+                value={lookupMerchant}
+                onChange={(e) => setLookupMerchant(e.target.value)}
+                disabled={isLooking}
+                aria-required="true"
+                className={inputCls}
+              />
+            </div>
+
+            {/* Error */}
+            {lookupError && (
+              <p role="alert" className="text-xs text-red-400 font-medium">
+                {lookupError}
+              </p>
+            )}
+
+            <button
+              type="submit"
+              disabled={isLooking}
+              className="w-full flex items-center justify-center gap-2 rounded-lg bg-gray-700
+                         hover:bg-gray-600 active:bg-gray-800 disabled:opacity-50 disabled:cursor-not-allowed
+                         px-4 py-3 text-sm font-semibold text-white transition-all duration-150 min-h-[48px]
+                         focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400
+                         focus-visible:ring-offset-2 focus-visible:ring-offset-gray-900"
+            >
+              {isLooking ? (
+                <>
+                  <svg className="animate-spin h-4 w-4 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" aria-hidden="true">
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
+                  </svg>
+                  Looking up…
+                </>
+              ) : (
+                "Fetch Subscription"
+              )}
+            </button>
+          </form>
+
+          {/* Result: None */}
+          {lookupResult === null && (
+            <div
+              role="status"
+              className="rounded-lg bg-gray-800/60 border border-gray-700 px-4 py-3 text-sm text-gray-400 text-center"
+            >
+              No active subscription found for this pair.
+            </div>
+          )}
+
+          {/* Result: found */}
+          {lookupResult != null && (
+            <div
+              role="status"
+              aria-label="Subscription details"
+              className="rounded-lg bg-green-900/20 border border-green-700/50 px-4 py-4 space-y-3"
+            >
+              <div className="flex items-center gap-2 mb-1">
+                <span className="h-2 w-2 rounded-full bg-green-400" aria-hidden="true" />
+                <span className="text-xs font-semibold text-green-300 uppercase tracking-widest">
+                  {lookupResult.is_paused ? "Paused" : "Active"}
+                </span>
+              </div>
+
+              <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-2.5 text-xs">
+                <dt className="text-gray-400 font-medium">Token</dt>
+                <dd className="break-all font-mono text-gray-200">{lookupResult.token}</dd>
+
+                <dt className="text-gray-400 font-medium">Amount</dt>
+                <dd className="text-gray-200 font-medium">{lookupResult.amount.toLocaleString()} tokens</dd>
+
+                <dt className="text-gray-400 font-medium">Interval</dt>
+                <dd className="text-gray-200">
+                  {days} day{days !== 1 ? "s" : ""}{" "}
+                  <span className="text-gray-500">({lookupResult.interval.toLocaleString()} s)</span>
+                </dd>
+
+                <dt className="text-gray-400 font-medium">Next payment</dt>
+                <dd className="text-gray-200">{nextPaymentDate}</dd>
+              </dl>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ─── Component ────────────────────────────────────────────────────────────────
 
 export default function SubscriptionForm() {
@@ -806,6 +1004,7 @@ export default function SubscriptionForm() {
   }
 
   return (
+    <>
     <div className="w-full max-w-lg mx-auto bg-gray-900 rounded-2xl shadow-xl p-5 sm:p-8 text-white">
       {showConfirm && (
         <ConfirmModal
@@ -1112,5 +1311,7 @@ export default function SubscriptionForm() {
         </form>
       )}
     </div>
+    <SubscriptionLookupPanel />
+  </>
   );
 }

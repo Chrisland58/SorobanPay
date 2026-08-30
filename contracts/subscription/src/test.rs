@@ -1772,3 +1772,87 @@ fn test_execute_payment_before_due_does_not_mutate_subscription() {
     assert_eq!(before.next_payment, after.next_payment);
     assert_eq!(before.amount, after.amount);
 }
+
+// ─── get_subscription view tests ─────────────────────────────────────────────
+
+/// get_subscription returns the correct SubscriptionData for an active subscription.
+#[test]
+fn test_get_subscription_returns_active_subscription() {
+    let t = T::new();
+    let amt = 500_000_i128;
+    let ivl = 86_400_u64;
+    let ts = t.env.ledger().timestamp();
+
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &amt, &ivl);
+
+    let result = t.client.get_subscription(&t.subscriber, &t.merchant);
+    assert!(result.is_some(), "should return Some for an active subscription");
+
+    let sub = result.unwrap();
+    assert_eq!(sub.amount, amt, "amount must match");
+    assert_eq!(sub.interval, ivl, "interval must match");
+    assert_eq!(sub.token, t.token, "token must match");
+    assert_eq!(
+        sub.next_payment,
+        ts + ivl,
+        "next_payment must be ts + interval"
+    );
+    assert!(!sub.is_paused, "is_paused must be false on a new subscription");
+}
+
+/// get_subscription returns None when no subscription exists for the pair.
+#[test]
+fn test_get_subscription_returns_none_for_nonexistent() {
+    let t = T::new();
+    let other_merchant = Address::generate(&t.env);
+
+    let result = t.client.get_subscription(&t.subscriber, &other_merchant);
+    assert!(result.is_none(), "should return None for a non-existent subscription");
+}
+
+/// get_subscription returns None after cancel removes the subscription.
+#[test]
+fn test_get_subscription_returns_none_after_cancel() {
+    let t = T::new();
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &100_000_i128, &86_400_u64);
+    assert!(t.client.get_subscription(&t.subscriber, &t.merchant).is_some());
+
+    t.client.cancel(&t.subscriber, &t.merchant);
+    let result = t.client.get_subscription(&t.subscriber, &t.merchant);
+    assert!(result.is_none(), "should return None after cancellation");
+}
+
+/// get_subscription returns updated next_payment after a successful execute_payment.
+#[test]
+fn test_get_subscription_reflects_updated_next_payment() {
+    let t = T::new();
+    let ivl = 86_400_u64;
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &100_000_i128, &ivl);
+
+    // Advance time past the interval so payment is due
+    t.advance(ivl);
+    let now = t.env.ledger().timestamp();
+    t.client.execute_payment(&t.subscriber, &t.merchant);
+
+    let result = t.client.get_subscription(&t.subscriber, &t.merchant);
+    assert!(result.is_some());
+    let sub = result.unwrap();
+    assert_eq!(
+        sub.next_payment,
+        now + ivl,
+        "next_payment must be updated to now + interval after payment"
+    );
+}
+
+/// get_subscription does not require authorization — callable by any caller.
+/// Verified by querying as a third-party address (not subscriber or merchant).
+#[test]
+fn test_get_subscription_requires_no_auth() {
+    let t = T::new();
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &100_000_i128, &86_400_u64);
+
+    // Simply calling get_subscription from a different party should not panic.
+    // `mock_all_auths` is enabled in T::new(), but get_subscription requires no auth at all.
+    let result = t.client.get_subscription(&t.subscriber, &t.merchant);
+    assert!(result.is_some(), "get_subscription must succeed without any auth");
+}

@@ -18,6 +18,7 @@ import {
   nativeToScVal,
   Address,
   xdr,
+  scValToNative,
 } from '@stellar/stellar-sdk';
 import { SorobanRpc } from '@stellar/stellar-sdk';
 import { signTx } from './wallet_manager';
@@ -43,6 +44,23 @@ export interface SubscribeParams {
 export interface SubscribeResult {
   /** Transaction hash on Stellar network */
   txHash: string;
+}
+
+/**
+ * On-chain subscription record returned by `get_subscription`.
+ * Field types mirror the Rust `SubscriptionData` struct.
+ */
+export interface SubscriptionData {
+  /** SEP-41 token contract address used for payments */
+  token: string;
+  /** Payment amount per interval, in token's smallest unit */
+  amount: bigint;
+  /** Seconds between payments */
+  interval: bigint;
+  /** Unix timestamp (seconds) of the next valid payment window */
+  next_payment: bigint;
+  /** Whether payments are currently paused */
+  is_paused: boolean;
 }
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -132,6 +150,92 @@ export async function buildAndSubmitSubscribe(
   const txHash = await pollForConfirmation(server, sendResult.hash);
 
   return { txHash };
+}
+
+// ── getSubscription ───────────────────────────────────────────────────────────
+
+/**
+ * Query active subscription details for a (subscriber, merchant) pair.
+ *
+ * Calls the read-only `get_subscription` view function on the SorobanPay
+ * contract. No wallet signature is required — this is a pure simulation that
+ * does not submit a transaction to the network.
+ *
+ * @param subscriber        Subscriber G-address
+ * @param merchant          Merchant G-address
+ * @param contractId        Deployed SorobanPay contract address
+ * @param networkPassphrase Stellar network passphrase
+ * @param rpcUrl            Soroban RPC endpoint URL
+ * @returns                 `SubscriptionData` if a subscription exists, or `null` if not found
+ * @throws                  On invalid addresses or RPC/simulation errors
+ */
+export async function getSubscription(
+  subscriber: string,
+  merchant: string,
+  contractId: string,
+  networkPassphrase: string,
+  rpcUrl: string
+): Promise<SubscriptionData | null> {
+  if (!isValidGAddress(subscriber)) {
+    throw new Error(`Invalid subscriber address: ${subscriber}`);
+  }
+  if (!isValidGAddress(merchant)) {
+    throw new Error(`Invalid merchant address: ${merchant}`);
+  }
+
+  const server = new SorobanRpc.Server(rpcUrl, { allowHttp: false });
+
+  // Fetch a source account for building the simulation transaction.
+  // We use the subscriber address as the fee source because it is already
+  // validated. The account does not need to sign; simulation is read-only.
+  const account = await server.getAccount(subscriber);
+
+  const contract = new Contract(contractId);
+
+  const tx = new TransactionBuilder(account, {
+    fee: BASE_FEE,
+    networkPassphrase,
+  })
+    .addOperation(
+      contract.call(
+        'get_subscription',
+        new Address(subscriber).toScVal(),
+        new Address(merchant).toScVal()
+      )
+    )
+    .setTimeout(30)
+    .build();
+
+  const simResult = await server.simulateTransaction(tx);
+
+  if (!SorobanRpc.Api.isSimulationSuccess(simResult)) {
+    const errMsg =
+      (simResult as SorobanRpc.Api.SimulateTransactionErrorResponse).error ??
+      'Simulation failed';
+    throw new Error(`get_subscription simulation error: ${errMsg}`);
+  }
+
+  const successResult = simResult as SorobanRpc.Api.SimulateTransactionSuccessResponse;
+  const returnVal = successResult.result?.retval;
+
+  // Option::None from the contract comes back as ScvVoid
+  if (!returnVal || returnVal.switch().name === 'scvVoid') {
+    return null;
+  }
+
+  // Decode the SubscriptionData map from ScVal
+  const native = scValToNative(returnVal) as Record<string, unknown> | null | undefined;
+  if (native == null) {
+    return null;
+  }
+
+  return {
+    token:        String(native['token']),
+    amount:       BigInt(String(native['amount'])),
+    interval:     BigInt(String(native['interval'])),
+    next_payment: BigInt(String(native['next_payment'])),
+    is_paused:    Boolean(native['is_paused']),
+  };
 }
 
 // ── Polling helper ────────────────────────────────────────────────────────────
