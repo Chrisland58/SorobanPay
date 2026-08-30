@@ -45,11 +45,8 @@ import {
   clearPersistedFormData,
   useFormPersist,
 } from "@/hooks/useFormPersist";
-import {
-  buildAndSubmitCancel,
-  buildAndSubmitSubscribe,
-  buildSignAndSubmitSubscribe,
-} from "@/lib/transaction_builder";
+import { buildAndSubmitSubscribe, buildSignAndSubmitSubscribe } from "@/lib/transaction_builder";
+import { buildAndSubmitCancel } from "@/lib/cancel_builder";
 import { useTransactionPoller, buildExplorerUrl } from "@/hooks/useTransactionPoller";
 import {
   validateSubscriptionForm,
@@ -395,6 +392,7 @@ function SuccessCard({
   data,
   onReset,
   onCancelSubscription,
+  isCancelling,
   getLabel,
   isPaused,
   pausedUntil,
@@ -405,6 +403,8 @@ function SuccessCard({
   data: SuccessData;
   onReset: () => void;
   onCancelSubscription: () => void;
+  /** True while the cancel transaction is being submitted (Issue #791) */
+  isCancelling: boolean;
   getLabel: (address: string) => string | null;
   /** True once pause_subscription has been confirmed on-chain (Issue #795) */
   isPaused: boolean;
@@ -607,42 +607,22 @@ function SuccessCard({
         </div>
       )}
 
-      {/* Pause / Resume — Issue #795 */}
+      {/* Cancel subscription — Issue #791 */}
       <div className="flex flex-col sm:flex-row gap-3">
-        {isPaused ? (
-          <button
-            type="button"
-            onClick={onResumeClick}
-            disabled={isPauseResumeSubmitting}
-            aria-label="Resume subscription"
-            className="flex-1 flex items-center justify-center gap-2 rounded-lg
-                       bg-blue-600 hover:bg-blue-500 active:bg-blue-700
-                       disabled:opacity-50 disabled:cursor-not-allowed
-                       py-3 text-sm font-semibold text-white transition-all duration-150
-                       min-h-[48px] hover:shadow-lg
-                       focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400
-                       focus-visible:ring-offset-2 focus-visible:ring-offset-gray-900"
-          >
-            <span aria-hidden="true">▶</span>
-            {isPauseResumeSubmitting ? "Resuming…" : "Resume Subscription"}
-          </button>
-        ) : (
-          <button
-            type="button"
-            onClick={onPauseClick}
-            disabled={isPauseResumeSubmitting}
-            aria-label="Pause subscription"
-            className="flex-1 flex items-center justify-center gap-2 rounded-lg
-                       border-2 border-yellow-600/70 text-yellow-300 hover:bg-yellow-900/40 active:bg-yellow-900/60
-                       disabled:opacity-50 disabled:cursor-not-allowed
-                       py-3 text-sm font-semibold transition-all duration-150 min-h-[48px] hover:shadow-lg
-                       focus:outline-none focus-visible:ring-2 focus-visible:ring-yellow-400
-                       focus-visible:ring-offset-2 focus-visible:ring-offset-gray-900"
-          >
-            <span aria-hidden="true">⏸</span>
-            {isPauseResumeSubmitting ? "Pausing…" : "Pause Subscription"}
-          </button>
-        )}
+        <button
+          type="button"
+          onClick={onCancelSubscription}
+          disabled={isCancelling}
+          aria-label="Cancel subscription"
+          className="flex-1 flex items-center justify-center gap-2 rounded-lg
+                     border-2 border-red-600/70 text-red-300 hover:bg-red-900/40 active:bg-red-900/60
+                     disabled:opacity-50 disabled:cursor-not-allowed
+                     py-3 text-sm font-semibold transition-all duration-150 min-h-[48px] hover:shadow-lg
+                     focus:outline-none focus-visible:ring-2 focus-visible:ring-red-400
+                     focus-visible:ring-offset-2 focus-visible:ring-offset-gray-900"
+        >
+          {isCancelling ? "Cancelling…" : "Cancel Subscription"}
+        </button>
       </div>
 
       {/* Action buttons */}
@@ -805,9 +785,9 @@ function ConfirmModal({
   );
 }
 
-// ─── Pause confirmation modal (Issue #795) ─────────────────────────────────────
+// ─── Cancel confirmation modal (Issue #791) ────────────────────────────────────
 
-function PauseConfirmModal({
+function CancelConfirmModal({
   merchantAddress,
   onConfirm,
   onCancel,
@@ -820,21 +800,24 @@ function PauseConfirmModal({
     <div
       role="dialog"
       aria-modal="true"
-      aria-labelledby="pause-confirm-title"
+      aria-labelledby="cancel-confirm-title"
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4"
     >
       <div className="w-full max-w-md bg-gray-900 border border-gray-700 rounded-2xl shadow-2xl p-6 space-y-5 text-white">
-        <h3 id="pause-confirm-title" className="text-lg font-bold">
-          Pause this subscription?
+        <h3 id="cancel-confirm-title" className="text-lg font-bold">
+          Cancel this subscription?
         </h3>
         <p className="text-sm text-gray-400 leading-relaxed">
-          Payments to{" "}
+          This calls{" "}
+          <code className="bg-gray-800 px-1.5 py-0.5 rounded text-red-300 text-xs">
+            cancel(subscriber, merchant)
+          </code>{" "}
+          on the contract for{" "}
           <span className="break-all font-mono text-xs text-gray-200">
             {merchantAddress}
-          </span>{" "}
-          will be skipped while paused — the merchant cannot collect until you
-          resume. No funds move when pausing or resuming, and the subscription
-          itself is not cancelled.
+          </span>
+          . The subscription is removed permanently — you&apos;ll need to
+          subscribe again to resume payments.
         </p>
 
         <div className="flex gap-3 pt-1">
@@ -842,16 +825,72 @@ function PauseConfirmModal({
             onClick={onCancel}
             className="flex-1 rounded-lg border border-gray-600 bg-gray-800/50 text-gray-300 hover:bg-gray-700 active:bg-gray-800 py-3 text-sm font-semibold transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-500"
           >
-            Go Back
+            Keep Subscription
           </button>
           <button
             onClick={onConfirm}
-            className="flex-1 rounded-lg bg-yellow-600 hover:bg-yellow-500 active:bg-yellow-700 py-3 text-sm font-semibold transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-yellow-400"
+            className="flex-1 rounded-lg bg-red-600 hover:bg-red-500 active:bg-red-700 py-3 text-sm font-semibold transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-red-400"
           >
-            Pause Subscription
+            Cancel Subscription
           </button>
         </div>
       </div>
+    </div>
+  );
+}
+
+// ─── Cancelled card (Issue #791) ────────────────────────────────────────────────
+// Shown after a successful cancel — replaces SuccessCard with the tx hash and
+// a Stellar Expert explorer link, per the acceptance criteria.
+
+function CancelledCard({
+  txHash,
+  onReset,
+}: {
+  txHash: string;
+  onReset: () => void;
+}) {
+  const explorerUrl = buildExplorerUrl(txHash);
+  return (
+    <div
+      role="alert"
+      className="mb-6 rounded-xl bg-gradient-to-br from-gray-800/60 to-gray-900/40 border-2 border-gray-600/60 p-5 sm:p-6 text-sm space-y-4 shadow-lg"
+    >
+      <div className="flex items-center gap-3">
+        <span className="text-2xl flex-shrink-0" aria-hidden="true">
+          🛑
+        </span>
+        <p className="font-semibold text-gray-200 text-base sm:text-lg">
+          Subscription cancelled
+        </p>
+      </div>
+
+      <div className="bg-gray-800/50 rounded-lg p-3 border border-gray-700/50">
+        <p className="text-gray-400 text-xs mb-1.5 font-medium">
+          Transaction hash
+        </p>
+        <p className="text-gray-200 break-all font-mono text-xs leading-relaxed">
+          {txHash}
+        </p>
+        <a
+          href={explorerUrl}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="inline-flex items-center gap-1 mt-2 text-xs text-blue-400 hover:text-blue-300 underline focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400 rounded"
+        >
+          View on Stellar Expert
+          <span aria-hidden="true">↗</span>
+        </a>
+      </div>
+
+      <button
+        onClick={onReset}
+        className="w-full rounded-lg border-2 border-gray-600/70 text-gray-200 hover:bg-gray-800/60 active:bg-gray-800/80
+                   py-3 text-sm font-semibold transition-all duration-150 min-h-[48px] hover:shadow-lg
+                   focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-400 focus-visible:ring-offset-2 focus-visible:ring-offset-gray-900"
+      >
+        Create Another Subscription
+      </button>
     </div>
   );
 }
@@ -1360,11 +1399,7 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
   // Cancel subscription confirmation modal
   const [showCancelConfirm, setShowCancelConfirm] = useState(false);
   const [cancelStatus, setCancelStatus] = useState<'idle' | 'pending' | 'done'>('idle');
-  // Pause / resume subscription (Issue #795)
-  const [showPauseConfirm, setShowPauseConfirm] = useState(false);
-  const [isPaused, setIsPaused] = useState(false);
-  const [pausedUntil, setPausedUntil] = useState<number | null>(null);
-  const [isPauseResumeSubmitting, setIsPauseResumeSubmitting] = useState(false);
+  const [cancelTxHash, setCancelTxHash] = useState<string | null>(null);
 
   // ── Transaction poller ──────────────────────────────────────────────────────
   const { state: pollerState, startPolling } = useTransactionPoller({
@@ -1490,6 +1525,9 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
     setConfirmingTxHash(null);
     setFieldErrors({});
     setShowConfirm(false);
+    setShowCancelConfirm(false);
+    setCancelStatus('idle');
+    setCancelTxHash(null);
     setMerchantAddress("");
     setTokenAddress("");
     setAmount("");
@@ -1503,6 +1541,28 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
   /** Trigger the ConfirmationModal for cancel subscription */
   function handleCancelSubscriptionClick() {
     setShowCancelConfirm(true);
+  }
+
+  /** Called when user confirms cancellation inside CancelConfirmModal (Issue #791) */
+  async function handleConfirmCancel() {
+    setShowCancelConfirm(false);
+    if (!publicKey || !successData) return;
+
+    setCancelStatus('pending');
+    try {
+      const { txHash } = await buildAndSubmitCancel(
+        { subscriber: publicKey, merchant: successData.merchant },
+        CONTRACT_ID,
+        publicKey,
+        NETWORK_PASSPHRASE,
+        RPC_URL,
+      );
+      setCancelTxHash(txHash);
+      setCancelStatus('done');
+    } catch (err) {
+      setTxError(classifyError(err));
+      setCancelStatus('idle');
+    }
   }
 
   function handleSubmit(e: FormEvent) {
@@ -1685,12 +1745,12 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
           onCancel={() => setShowConfirm(false)}
         />
       )}
-      {/* Pause confirmation modal — Issue #795 */}
-      {showPauseConfirm && successData && (
-        <PauseConfirmModal
+      {/* Cancel confirmation modal — Issue #791 */}
+      {showCancelConfirm && successData && (
+        <CancelConfirmModal
           merchantAddress={successData.merchant}
-          onConfirm={handleConfirmPause}
-          onCancel={() => setShowPauseConfirm(false)}
+          onConfirm={handleConfirmCancel}
+          onCancel={() => setShowCancelConfirm(false)}
         />
       )}
       {/* Address book modal */}
@@ -1827,12 +1887,18 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
         />
       )}
 
-      {/* Success card — shown after successful subscription */}
-      {successData && (
+      {/* Cancelled card — shown after a successful cancel (Issue #791) */}
+      {successData && cancelStatus === 'done' && cancelTxHash && (
+        <CancelledCard txHash={cancelTxHash} onReset={resetForm} />
+      )}
+
+      {/* Success card — shown after successful subscription, until cancelled */}
+      {successData && !(cancelStatus === 'done' && cancelTxHash) && (
         <SuccessCard
           data={successData}
           onReset={resetForm}
           onCancelSubscription={handleCancelSubscriptionClick}
+          isCancelling={cancelStatus === 'pending'}
           getLabel={abGetLabel}
           isPaused={isPaused}
           pausedUntil={pausedUntil}
