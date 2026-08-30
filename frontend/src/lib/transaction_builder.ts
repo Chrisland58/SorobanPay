@@ -48,6 +48,20 @@ export interface SubscribeResult {
   txHash: string;
 }
 
+export interface CancelParams {
+  /** Subscriber Stellar G-address */
+  subscriber: string;
+  /** Merchant Stellar G-address */
+  merchant: string;
+  /** Token contract C-address */
+  token: string;
+}
+
+export interface CancelResult {
+  /** Transaction hash on Stellar network */
+  txHash: string;
+}
+
 /**
  * Intermediate result returned after the transaction is submitted but before
  * it has been confirmed. The caller should pass `txHash` and `server` to
@@ -179,6 +193,92 @@ export async function buildAndSubmitSubscribe(
   );
 
   // Legacy in-process polling (fixed 1 s interval)
+  const confirmedHash = await pollForConfirmation(server, txHash);
+  return { txHash: confirmedHash };
+}
+
+// ── cancel builder ─────────────────────────────────────────────────────────────
+
+/**
+ * Build, sign, and submit a `cancel` transaction.
+ *
+ * The caller should pass the exact active subscription's token contract address,
+ * because the contract key is `(subscriber, merchant, token)`.
+ */
+export async function buildSignAndSubmitCancel(
+  params: CancelParams,
+  contractId: string,
+  publicKey: string,
+  networkPassphrase: string,
+  rpcUrl: string,
+): Promise<SubmitResult> {
+  if (!isValidGAddress(params.subscriber)) {
+    throw new Error(`Invalid subscriber address: ${params.subscriber}`);
+  }
+  if (!isValidGAddress(params.merchant)) {
+    throw new Error(`Invalid merchant address: ${params.merchant}`);
+  }
+  if (!isValidCAddress(params.token)) {
+    throw new Error(`Invalid token contract address: ${params.token}`);
+  }
+
+  const server = new SorobanRpc.Server(rpcUrl, { allowHttp: false });
+
+  const account = await server.getAccount(publicKey);
+  const contract = new Contract(contractId);
+
+  const tx = new TransactionBuilder(account, {
+    fee: BASE_FEE,
+    networkPassphrase,
+  })
+    .addOperation(
+      contract.call(
+        'cancel',
+        new Address(params.subscriber).toScVal(),
+        new Address(params.merchant).toScVal(),
+        new Address(params.token).toScVal(),
+      ),
+    )
+    .setTimeout(30)
+    .build();
+
+  let preparedTx: ReturnType<typeof TransactionBuilder.fromXDR>;
+  try {
+    preparedTx = await server.prepareTransaction(tx);
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    throw new Error(`Transaction preparation failed: ${msg}`);
+  }
+
+  const signedXdr = await signTx(preparedTx.toXDR(), networkPassphrase);
+
+  const parsedTx = TransactionBuilder.fromXDR(signedXdr, networkPassphrase);
+  const sendResult = await server.sendTransaction(parsedTx);
+
+  if (sendResult.status === 'ERROR') {
+    throw new Error(
+      `Transaction submission failed: ${sendResult.errorResult?.toXDR('base64') ?? 'unknown error'}`,
+    );
+  }
+
+  return { txHash: sendResult.hash, server };
+}
+
+export async function buildAndSubmitCancel(
+  params: CancelParams,
+  contractId: string,
+  publicKey: string,
+  networkPassphrase: string,
+  rpcUrl: string,
+): Promise<CancelResult> {
+  const { txHash, server } = await buildSignAndSubmitCancel(
+    params,
+    contractId,
+    publicKey,
+    networkPassphrase,
+    rpcUrl,
+  );
+
   const confirmedHash = await pollForConfirmation(server, txHash);
   return { txHash: confirmedHash };
 }

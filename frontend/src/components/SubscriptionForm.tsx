@@ -45,7 +45,11 @@ import {
   clearPersistedFormData,
   useFormPersist,
 } from "@/hooks/useFormPersist";
-import { buildAndSubmitSubscribe, buildSignAndSubmitSubscribe } from "@/lib/transaction_builder";
+import {
+  buildAndSubmitCancel,
+  buildAndSubmitSubscribe,
+  buildSignAndSubmitSubscribe,
+} from "@/lib/transaction_builder";
 import { useTransactionPoller, buildExplorerUrl } from "@/hooks/useTransactionPoller";
 import {
   validateSubscriptionForm,
@@ -1307,9 +1311,10 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
 
   // ── Cancel subscription state ──────────────────────────────────────────────
   const [cancelMerchant, setCancelMerchant]       = useState('');
+  const [cancelToken, setCancelToken]             = useState('');
   const [showCancelConfirm, setShowCancelConfirm] = useState(false);
   const [isCancelling, setIsCancelling]           = useState(false);
-  const [cancelSuccess, setCancelSuccess]         = useState<CancelSuccessData | null>(null);
+  const [cancelSuccess, setCancelSuccess]         = useState<{ txHash: string; merchant: string } | null>(null);
   const [cancelError, setCancelError]             = useState<TxErrorInfo | null>(null);
 
   const labelCls = 'block text-sm font-semibold text-gray-100 mb-2.5';
@@ -1346,27 +1351,6 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
   /** Trigger the ConfirmationModal for cancel subscription */
   function handleCancelSubscriptionClick() {
     setShowCancelConfirm(true);
-  }
-
-  /** Called when user confirms cancellation inside ConfirmationModal */
-  async function handleConfirmCancel() {
-    setShowCancelConfirm(false);
-    setCancelStatus('pending');
-    // NOTE: In a full implementation this would call buildAndSubmitCancel().
-    // Here we set the status to 'done' and reset so the user is brought back
-    // to the form — the actual cancel() contract call is wired up identically
-    // to how confirmAndSubmit works, and can be completed once the cancel
-    // transaction builder is added to transaction_builder.ts.
-    try {
-      // Simulate the cancel call placeholder — replace with real call:
-      // await buildAndSubmitCancel({ subscriber: publicKey!, merchant: successData!.merchant }, ...)
-      await new Promise<void>((resolve) => setTimeout(resolve, 300));
-      setCancelStatus('done');
-      resetForm();
-    } catch (err) {
-      setTxError(classifyError(err));
-      setCancelStatus('idle');
-    }
   }
 
   function handleSubmit(e: FormEvent) {
@@ -1445,8 +1429,16 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
       setCancelError(classifyError(new Error('Merchant address is required to cancel a subscription.')));
       return;
     }
+    if (!cancelToken.trim()) {
+      setCancelError(classifyError(new Error('Token contract address is required to cancel a subscription.')));
+      return;
+    }
     if (!isValidGAddress(cancelMerchant.trim())) {
       setCancelError(classifyError(new Error('Invalid merchant address. Must be a 56-character Stellar G-address.')));
+      return;
+    }
+    if (!/^(C)[A-Z2-7]{55}$/.test(cancelToken.trim())) {
+      setCancelError(classifyError(new Error('Invalid token contract address. Must be a 56-character Stellar C-address.')));
       return;
     }
     setShowCancelConfirm(true);
@@ -1468,6 +1460,7 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
         {
           subscriber: publicKey,
           merchant: cancelMerchant.trim(),
+          token: cancelToken.trim(),
         },
         CONTRACT_ID,
         publicKey,
@@ -1480,6 +1473,7 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
         merchant: cancelMerchant.trim(),
       });
       setCancelMerchant('');
+      setCancelToken('');
     } catch (err) {
       setCancelError(classifyError(err));
     } finally {
@@ -2000,6 +1994,27 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
               />
               <p className="mt-1.5 text-xs text-gray-400 leading-relaxed">
                 The merchant&apos;s Stellar G-address for the subscription you want to cancel.
+              </p>
+            </div>
+            <div>
+              <label htmlFor="cancelToken" className="block text-sm font-semibold text-gray-100 mb-2">
+                Token contract address
+                <span aria-hidden="true" className="text-red-400 ml-1">*</span>
+              </label>
+              <input
+                id="cancelToken"
+                type="text"
+                placeholder="e.g. CXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+                autoComplete="off"
+                value={cancelToken}
+                onChange={(e) => setCancelToken(e.target.value)}
+                disabled={isCancelling}
+                required
+                aria-required="true"
+                className={inputCls}
+              />
+              <p className="mt-1.5 text-xs text-gray-400 leading-relaxed">
+                The token contract tied to the active subscription being cancelled.
               </p>
             </div>
             {!publicKey && (
