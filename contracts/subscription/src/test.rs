@@ -17,7 +17,7 @@ use crate::{
 
 // ─── Test helpers ─────────────────────────────────────────────────────────────
 
-struct T {
+struct T<'a> {
     env:         Env,
     subscriber:  Address,
     merchant:    Address,
@@ -25,7 +25,7 @@ struct T {
     contract_id: Address,
 }
 
-impl T {
+impl T<'_> {
     fn new() -> Self {
         let env = Env::default();
         env.mock_all_auths_allowing_non_root_auth();
@@ -66,6 +66,7 @@ impl T {
         token::Client::new(&self.env, &self.token).balance(&self.merchant)
     }
 
+    /// Returns true if the storage key exists (regardless of status).
     fn has_sub(&self) -> bool {
         self.env
             .storage()
@@ -139,6 +140,7 @@ fn test_full_lifecycle() {
     assert_eq!(d.amount,       amt);
     assert_eq!(d.interval,     ivl);
     assert_eq!(d.next_payment, ts0 + ivl);
+    assert_eq!(d.status,       SubscriptionStatus::Active);
 
     // (b) advance clock
     t.advance(ivl + 1);
@@ -516,6 +518,7 @@ fn test_subscribe_overwrites_existing() {
     assert_eq!(d.amount,       999);
     assert_eq!(d.interval,     172_800);
     assert_eq!(d.next_payment, ts2 + 172_800);
+    assert_eq!(d.status,       SubscriptionStatus::Active);
 }
 
 #[test]
@@ -539,22 +542,24 @@ fn test_subscribe_interval_too_short() {
     assert_eq!(d1.amount,       amt1);
     assert_eq!(d1.interval,     ivl1);
     assert_eq!(d1.next_payment, ts1 + ivl1);
+    assert_eq!(d1.status,       SubscriptionStatus::Active);
 
     // (b) cancel
     t.client().cancel(&t.subscriber, &t.merchant);
     assert!(!t.has_sub());
 
-    // (c) re-subscribe with different terms
+    // (c) re-subscribe with different terms (overwrites cancelled record)
     let amt2  = 200_000_i128;
     let ivl2  = 172_800_u64;
     let ts2   = t.env.ledger().timestamp();
     t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &amt2, &ivl2, &false);
 
-    // (d) verify new subscription replaces old one
+    // (d) verify new subscription replaces old one with Active status
     let d2 = t.get_sub();
     assert_eq!(d2.amount,       amt2);
     assert_eq!(d2.interval,     ivl2);
     assert_eq!(d2.next_payment, ts2 + ivl2);
+    assert_eq!(d2.status,       SubscriptionStatus::Active);
     assert_ne!(d1.next_payment, d2.next_payment);
 }
 
@@ -912,6 +917,45 @@ fn test_executed_event_symbol_order_is_stable() {
     assert_eq!(sym, soroban_sdk::Symbol::new(&t.env, "executed"));
 }
 
+/// Verify the executed event carries the correct amount and next_payment timestamp.
+#[test]
+fn test_execute_payment_event_data() {
+    let t   = T::new();
+    let amt = 500_i128;
+    let ivl = 86_400_u64;
+    let ts0 = t.env.ledger().timestamp();
+
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &amt, &ivl);
+    t.advance(ivl + 1);
+    let now = t.env.ledger().timestamp();
+    t.client.execute_payment(&t.subscriber, &t.merchant);
+
+    // Filter to events emitted by our contract (not the SAC token contract).
+    let all_events = t.env.events().all();
+    // Find subscribe (first) and executed (second) events from our contract.
+    let mut sub_event_idx:  Option<u32> = None;
+    let mut exec_event_idx: Option<u32> = None;
+    for i in 0..all_events.len() {
+        let ev = all_events.get(i).unwrap();
+        if ev.0 == t.contract_id {
+            if sub_event_idx.is_none() {
+                sub_event_idx = Some(i);
+            } else {
+                exec_event_idx = Some(i);
+            }
+        }
+    }
+    assert!(sub_event_idx.is_some(),  "subscribe event missing");
+    assert!(exec_event_idx.is_some(), "executed event missing");
+
+    let exec_ev = all_events.get(exec_event_idx.unwrap()).unwrap();
+    let event_data: ExecutedEventData = exec_ev.2.clone().into_val(&t.env);
+    assert_eq!(event_data.amount,       amt,       "event amount must match charged amount");
+    assert_eq!(event_data.next_payment, now + ivl, "event next_payment must be advanced by interval");
+    // Sanity: next_payment is strictly after the subscribe timestamp.
+    assert!(event_data.next_payment > ts0 + ivl);
+}
+
 // ─── Requirement 13.11 — No events on failure ────────────────────────────────
 
 #[test]
@@ -952,6 +996,183 @@ fn test_cancel_emits_event() {
     t.client.cancel(&t.subscriber, &t.merchant);
     let n2 = t.env.events().all().iter().filter(|e| e.0 == t.contract_id).count();
     assert_eq!(n2, n + 1, "cancel should emit exactly 1 event");
+}
+
+// ─── Issue #47 — Cancel event indexer compatibility tests ────────────────────
+
+/// Verifies cancel event schema matches the documented indexer spec:
+///   topics: (symbol("cancel"), subscriber: Address, merchant: Address)
+///   data:   () — unit type, no payload
+///
+/// Off-chain indexers depend on this exact layout to detect cancellations.
+/// Any change to the topics tuple or data type is a breaking schema change.
+#[test]
+fn test_cancel_event_topics_and_payload_exact() {
+    let t = T::new();
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &100_i128, &86_400_u64);
+
+    // Capture event count before cancel so we can isolate the cancel event.
+    let n_before = t.env.events().all().iter().filter(|e| e.0 == t.contract_id).count();
+
+    t.client.cancel(&t.subscriber, &t.merchant);
+
+    let all = t.env.events().all();
+    let our_events: Vec<_> = all.iter().filter(|e| e.0 == t.contract_id).collect();
+
+    // Exactly one new event must have been emitted by cancel.
+    assert_eq!(
+        our_events.len(),
+        n_before + 1,
+        "cancel must emit exactly 1 event"
+    );
+
+    // The cancel event is the last one.
+    let cancel_event = our_events.last().expect("cancel event must exist");
+
+    // Topics must be exactly (symbol("cancel"), subscriber, merchant).
+    // Any missing or extra topic is a breaking change for indexers.
+    let expected_topics = (
+        Symbol::new(&t.env, "cancel"),
+        t.subscriber.clone(),
+        t.merchant.clone(),
+    )
+        .into_val(&t.env);
+    assert_eq!(
+        cancel_event.1,
+        expected_topics,
+        "cancel event topics must be (symbol(\"cancel\"), subscriber, merchant)"
+    );
+
+    // Data must be the unit type () — cancel carries no payload.
+    let expected_data = ().into_val(&t.env);
+    assert_eq!(
+        cancel_event.2,
+        expected_data,
+        "cancel event data must be unit () — no payload"
+    );
+}
+
+/// Verifies the cancel event first topic discriminant is exactly the symbol "cancel".
+/// A wrong symbol would cause indexers to misclassify or miss the event entirely.
+#[test]
+fn test_cancel_event_first_topic_is_symbol_cancel() {
+    let t = T::new();
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &100_i128, &86_400_u64);
+    t.client.cancel(&t.subscriber, &t.merchant);
+
+    let all = t.env.events().all();
+    let our_events: Vec<_> = all.iter().filter(|e| e.0 == t.contract_id).collect();
+    let cancel_event = our_events.last().expect("cancel event must exist");
+
+    // Build the exact expected topics with symbol "cancel" as discriminant.
+    let expected_topics = (
+        Symbol::new(&t.env, "cancel"),
+        t.subscriber.clone(),
+        t.merchant.clone(),
+    )
+        .into_val(&t.env);
+    assert_eq!(
+        cancel_event.1,
+        expected_topics,
+        "first topic must be the symbol 'cancel'"
+    );
+
+    // Verify the wrong symbol does NOT match (catches symbol typos).
+    let wrong_topics = (
+        Symbol::new(&t.env, "cancelled"),
+        t.subscriber.clone(),
+        t.merchant.clone(),
+    )
+        .into_val(&t.env);
+    assert_ne!(
+        cancel_event.1,
+        wrong_topics,
+        "symbol 'cancelled' must not match 'cancel'"
+    );
+}
+
+/// Verifies the cancel event has exactly 3 topics (symbol + 2 addresses).
+/// Fewer topics would drop a party address; more would add unexpected data.
+#[test]
+fn test_cancel_event_has_three_topics() {
+    let t = T::new();
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &100_i128, &86_400_u64);
+    t.client.cancel(&t.subscriber, &t.merchant);
+
+    let all = t.env.events().all();
+    let our_events: Vec<_> = all.iter().filter(|e| e.0 == t.contract_id).collect();
+    let cancel_event = our_events.last().expect("cancel event must exist");
+
+    // A 3-element tuple (symbol + subscriber + merchant) must match.
+    let three_topics = (
+        Symbol::new(&t.env, "cancel"),
+        t.subscriber.clone(),
+        t.merchant.clone(),
+    )
+        .into_val(&t.env);
+    assert_eq!(
+        cancel_event.1,
+        three_topics,
+        "cancel event must have exactly 3 topics: (symbol, subscriber, merchant)"
+    );
+
+    // A 2-element tuple missing merchant must NOT match — confirms merchant is present.
+    let two_topics = (Symbol::new(&t.env, "cancel"), t.subscriber.clone()).into_val(&t.env);
+    assert_ne!(
+        cancel_event.1,
+        two_topics,
+        "merchant must be present as 3rd topic"
+    );
+}
+
+/// Verifies cancel event correctly identifies subscriber and merchant addresses,
+/// not swapped. Indexers filter by subscriber or merchant in topics[1] and topics[2].
+#[test]
+fn test_cancel_event_subscriber_and_merchant_not_swapped() {
+    let t = T::new();
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &100_i128, &86_400_u64);
+    t.client.cancel(&t.subscriber, &t.merchant);
+
+    let all = t.env.events().all();
+    let our_events: Vec<_> = all.iter().filter(|e| e.0 == t.contract_id).collect();
+    let cancel_event = our_events.last().expect("cancel event must exist");
+
+    // Correct order: (symbol, subscriber, merchant)
+    let correct_order = (
+        Symbol::new(&t.env, "cancel"),
+        t.subscriber.clone(),
+        t.merchant.clone(),
+    )
+        .into_val(&t.env);
+    assert_eq!(cancel_event.1, correct_order, "subscriber must be topics[1], merchant topics[2]");
+
+    // Swapped order must NOT match — guards against transposed address emission.
+    let swapped_order = (
+        Symbol::new(&t.env, "cancel"),
+        t.merchant.clone(),
+        t.subscriber.clone(),
+    )
+        .into_val(&t.env);
+    assert_ne!(cancel_event.1, swapped_order, "swapped subscriber/merchant must not match");
+}
+
+/// Verifies that a failed cancel (NoActiveSubscription) emits NO event.
+/// Indexers must not receive spurious cancel signals for non-existent subscriptions.
+#[test]
+fn test_cancel_nonexistent_emits_no_event() {
+    let t = T::new();
+
+    let n_before = t.env.events().all().len();
+
+    // Attempt to cancel a subscription that doesn't exist.
+    let r = t.client.try_cancel(&t.subscriber, &t.merchant);
+    assert!(
+        matches!(r, Err(Ok(ContractError::NoActiveSubscription))),
+        "cancelling a non-existent subscription must return NoActiveSubscription"
+    );
+
+    let n_after = t.env.events().all().len();
+    assert_eq!(n_after, n_before, "failed cancel must emit no events");
 }
 
 // ─── Transfer failure — state integrity ──────────────────────────────────────
@@ -1406,8 +1627,7 @@ proptest! {
         prop_assert!(!t.has_sub());
     }
 
-    /// Property 7: Cancel terminates subscription permanently
-    /// Validates: Req 3.3, 3.5, 8.5
+    /// Property 7: Cancel terminates subscription permanently (status = Cancelled, no payments)
     #[test]
     fn prop_cancel_prevents_future_payments(
         amount   in 1_i128..=100_000_i128,
@@ -1423,7 +1643,6 @@ proptest! {
     }
 
     /// Property 8: Balance invariant — exact transfer, zero contract balance
-    /// Validates: Req 4.1, 4.2, 4.3
     #[test]
     fn prop_balance_invariant(
         amount   in 1_i128..=100_000_i128,
