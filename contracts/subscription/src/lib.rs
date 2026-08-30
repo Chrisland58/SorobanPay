@@ -89,8 +89,8 @@ impl SubscriptionProtocol {
     }
 
     /// Return the contract semantic version string (e.g. `"1.0.0"`).
-    pub fn get_version(_env: Env) -> &'static str {
-        CONTRACT_VERSION
+    pub fn get_version(env: Env) -> soroban_sdk::String {
+        soroban_sdk::String::from_str(&env, CONTRACT_VERSION)
     }
 
     /// Return the on-chain schema version set during the last `migrate` call.
@@ -172,30 +172,8 @@ impl SubscriptionProtocol {
 
     /// Create or update a recurring payment subscription.
     ///
-    /// # Storage key
-    /// Uses `sha256(subscriber_xdr ++ merchant_xdr)` as the storage key —
-    /// a compact 32-byte `BytesN<32>` vs. the old ~70-byte two-Address tuple.
-    ///
-    /// # Authorization
-    /// Requires a valid signature from `subscriber`.
-    ///
-    /// # Parameters
-    /// - `subscriber`: Account charged on each interval.
-    /// - `merchant`:   Account receiving payments.
-    /// - `token`:      SEP-41 token contract address.
-    /// - `amount`:     Payment amount per interval. Must be > 0 and <= 10^18.
-    /// - `interval`:   Seconds between payments. Must be in [86400, 31536000].
-    /// - `strict`:     When `true`, rejects the subscription if the subscriber's
-    ///                 current SEP-41 allowance for this contract is below `amount`.
-    ///
-    /// # Errors
-    /// - `ContractError::SelfSubscription`       — `subscriber == merchant`.
-    /// - `ContractError::AmountMustBePositive`   — `amount <= 0`.
-    /// - `ContractError::AmountTooLarge`         — `amount > 10^18`.
-    /// - `ContractError::IntervalTooShort`       — `interval < 86400`.
-    /// - `ContractError::IntervalTooLong`        — `interval > 31536000`.
-    /// - `ContractError::InvalidTimestamp`       — ledger timestamp is zero or overflows.
-    /// - `ContractError::InsufficientAllowance`  — `strict == true` and `allowance < amount`.
+    /// Amount must be > 0 and <= 10^18. Interval must be in [86400, 31536000].
+    /// Set `strict=true` to reject if allowance < amount.
     pub fn subscribe(
         env: Env,
         subscriber: Address,
@@ -306,12 +284,7 @@ impl SubscriptionProtocol {
         Ok(())
     }
 
-    /// Collect payments from multiple subscribers in a single transaction.
-    ///
-    /// Hard cap: at most [`BATCH_MAX_SIZE`] (50) subscribers per call.
-    ///
-    /// # Authorization
-    /// Requires a valid signature from `merchant` — authenticated once for the batch.
+    /// Collect payments from multiple subscribers in one transaction (max 50).
     pub fn batch_execute_payment(
         env: Env,
         merchant: Address,

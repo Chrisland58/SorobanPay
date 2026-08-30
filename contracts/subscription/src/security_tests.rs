@@ -520,6 +520,7 @@ mod security_tests {
             &s.token,
             &MAX_AMOUNT,        // max valid amount
             &31_536_000_u64,    // max valid interval
+            &false,
         );
         assert!(
             matches!(result, Err(Ok(ContractError::SelfSubscription))),

@@ -1,4 +1,5 @@
 use soroban_sdk::{contracttype, Address, BytesN, Env};
+use soroban_sdk::xdr::ToXdr;
 
 // ==================== Version Metadata ====================
 
@@ -33,6 +34,7 @@ pub fn subscription_key(env: &Env, subscriber: &Address, merchant: &Address) -> 
 
 /// Storage keys used by the contract.
 #[contracttype]
+#[derive(Clone)]
 pub enum DataKey {
     /// Per-subscription record, keyed by sha256(subscriber_xdr ++ merchant_xdr).
     /// Compact 32-byte key instead of the old two-Address tuple (~70 bytes).
@@ -48,22 +50,15 @@ pub enum DataKey {
 
     /// Designated admin address authorised to call `migrate`.
     Admin,
+
+    /// Optional admin configuration (rate limits, caps).
+    AdminConfig,
+
+    /// Per-merchant active subscriber count.
+    MerchantSubscriberCount(Address),
 }
 
 /// Persistent on-chain record for a subscription.
-///
-/// ## Schema versioning
-///
-/// The `ver` field starts at 1 for all new entries written by this version of the
-/// contract. Future migrations can inspect `ver` to decide whether to transform an
-/// entry before using it.
-///
-/// ## Backward compatibility
-///
-/// `grace_period`, `paused_until`, and `overdue_since` are `Option` fields so that
-/// old entries written without these fields (ver 0 / missing) deserialise correctly
-/// as `None`. Use the provided getter methods instead of direct field access to
-/// ensure default values are applied consistently.
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct SubscriptionData {
@@ -77,6 +72,14 @@ pub struct SubscriptionData {
     pub next_payment: u64,
     /// True when subscription payments are suspended
     pub is_paused:    bool,
+}
+
+/// Optional admin configuration stored in instance storage.
+#[contracttype]
+#[derive(Clone)]
+pub struct AdminConfig {
+    /// Maximum number of active subscribers allowed per merchant (0 = unlimited).
+    pub max_subscribers_per_merchant: u32,
 }
 
 /// Safe upper bound for a single subscription payment amount (1 × 10¹⁸ stroops).
