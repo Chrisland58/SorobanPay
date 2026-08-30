@@ -1,4 +1,19 @@
-use soroban_sdk::{Address, Env, Symbol};
+use soroban_sdk::{contracttype, Address, Env, Symbol};
+
+/// Data payload emitted with the `executed` event.
+///
+/// Provides analytics consumers with all fields needed to verify a payment:
+/// - `amount`       — the exact token units transferred from subscriber to merchant.
+/// - `next_payment` — the Unix timestamp after which the next payment becomes collectable.
+///                    Allows indexers to schedule alerts or mark subscriptions as overdue
+///                    without re-reading contract storage.
+#[contracttype]
+pub struct ExecutedEventData {
+    /// Token units transferred in this payment (matches `SubscriptionData::amount`).
+    pub amount:       i128,
+    /// Unix timestamp of the next payment window (advanced by `interval` after this payment).
+    pub next_payment: u64,
+}
 
 /// Emit the `contract_deployed` event to signal contract availability and version to off-chain services.
 ///
@@ -67,7 +82,7 @@ pub fn emit_payment_transfer_failure(env: &Env, subscriber: &Address, merchant: 
 }
 
 /// Emit the `executed` event after a payment transfer has been successfully completed
-/// and the next_payment timestamp has been updated.
+/// and the `next_payment` timestamp has been advanced.
 ///
 /// Topics:  (symbol("executed"), subscriber, merchant, token)
 /// Data:    amount (i128)
@@ -159,7 +174,7 @@ pub fn emit_subscription_transferred(
             old_merchant.clone(),
             new_merchant.clone(),
         ),
-        amount,
+        ExecutedEventData { amount, next_payment },
     );
 }
 
@@ -187,6 +202,38 @@ pub fn emit_low_allowance(
             token.clone(),
         ),
         (allowance, required),
+    );
+}
+
+/// Emit the `paused` event after a subscription has been successfully paused.
+///
+/// Topics:  (symbol("paused"), subscriber, merchant)
+/// Data:    resume_at (Option<u64>) — `Some(ts)` when the pause auto-resumes at
+///          `execute_payment` time, `None` for an indefinite pause requiring an
+///          explicit `resume_subscription` call.
+pub fn emit_paused(env: &Env, subscriber: &Address, merchant: &Address, resume_at: Option<u64>) {
+    env.events().publish(
+        (
+            Symbol::new(env, "paused"),
+            subscriber.clone(),
+            merchant.clone(),
+        ),
+        resume_at,
+    );
+}
+
+/// Emit the `resumed` event after a paused subscription has been reactivated.
+///
+/// Topics:  (symbol("resumed"), subscriber, merchant)
+/// Data:    next_payment (u64) — the recomputed next payment timestamp.
+pub fn emit_resumed(env: &Env, subscriber: &Address, merchant: &Address, next_payment: u64) {
+    env.events().publish(
+        (
+            Symbol::new(env, "resumed"),
+            subscriber.clone(),
+            merchant.clone(),
+        ),
+        next_payment,
     );
 }
 

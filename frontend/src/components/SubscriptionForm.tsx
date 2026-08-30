@@ -56,6 +56,7 @@ import {
   MAX_INTERVAL_SECONDS,
   type FieldErrors,
 } from "@/lib/validation";
+import { isValidGAddress } from "@/lib/validation";
 import {
   CONTRACT_ID,
   NETWORK_PASSPHRASE,
@@ -76,7 +77,12 @@ interface SuccessData {
   amount: string;
   interval: string;
   issuedAt: string;
+  /** Unix timestamp (seconds) of the last successful payment, or null if none yet (Issue #50). */
+  lastPayment: number | null;
 }
+
+/** State for the pause/resume controls shown inside the success card. */
+type PauseState = 'active' | 'pausing' | 'paused' | 'resuming';
 
 // ─── Shared input className (larger py for ≥48px touch target on mobile) ─────
 const inputCls =
@@ -388,6 +394,11 @@ function SuccessCard({
   onCancelSubscription,
   isCancelling,
   getLabel,
+  isPaused,
+  pausedUntil,
+  onPauseClick,
+  onResumeClick,
+  isPauseResumeSubmitting,
 }: {
   data: SuccessData;
   onReset: () => void;
@@ -395,6 +406,13 @@ function SuccessCard({
   /** True while the cancel transaction is being submitted (Issue #791) */
   isCancelling: boolean;
   getLabel: (address: string) => string | null;
+  /** True once pause_subscription has been confirmed on-chain (Issue #795) */
+  isPaused: boolean;
+  /** Unix timestamp (seconds) the pause auto-resumes at, or null for an indefinite pause */
+  pausedUntil: number | null;
+  onPauseClick: () => void;
+  onResumeClick: () => void;
+  isPauseResumeSubmitting: boolean;
 }) {
   const days = Math.round(Number(data.interval) / 86400);
   const [isDownloading, setIsDownloading] = useState(false);
@@ -428,24 +446,91 @@ function SuccessCard({
       role="alert"
       className="mb-6 rounded-xl bg-gradient-to-br from-green-900/60 to-green-800/30 border-2 border-green-600/60 p-5 sm:p-6 text-sm space-y-4 shadow-lg"
     >
+      {/* Cancel confirmation modal */}
+      {showCancelConfirm && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="cancel-confirm-title"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4"
+        >
+          <div className="w-full max-w-sm bg-gray-900 border border-red-700/60 rounded-2xl shadow-2xl p-6 space-y-5 text-white">
+            <h3 id="cancel-confirm-title" className="text-lg font-bold text-red-300">
+              Cancel subscription?
+            </h3>
+            <p className="text-sm text-gray-300">
+              This will permanently remove your subscription with{" "}
+              <span className="font-mono text-xs break-all text-gray-100">{data.merchant}</span>.
+              Future payments will no longer be collectible.
+            </p>
+            <div className="flex gap-3 pt-1">
+              <button
+                onClick={() => setShowCancelConfirm(false)}
+                className="flex-1 rounded-lg border border-gray-600 bg-gray-800/50 text-gray-300 hover:bg-gray-700
+                           py-3 text-sm font-semibold transition-colors
+                           focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-500"
+              >
+                Keep it
+              </button>
+              <button
+                onClick={handleConfirmCancel}
+                className="flex-1 rounded-lg bg-red-700 hover:bg-red-600 active:bg-red-800
+                           py-3 text-sm font-semibold text-white transition-colors
+                           focus:outline-none focus-visible:ring-2 focus-visible:ring-red-400"
+              >
+                Yes, cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Header */}
       <div className="flex items-center gap-3">
         <span className="text-2xl flex-shrink-0" aria-hidden="true">
-          ✓
+          {isPaused ? "⏸" : "✓"}
         </span>
         <p className="font-semibold text-green-300 text-base sm:text-lg">
           Subscription created successfully!
         </p>
       </div>
 
+      {/* Paused status banner — Issue #795 */}
+      {isPaused && (
+        <div
+          role="status"
+          className="flex flex-wrap items-center gap-2 rounded-lg bg-yellow-900/30 border border-yellow-600/50 px-3 py-2.5"
+        >
+          <span className="text-xs font-bold uppercase tracking-wide text-yellow-300">
+            Paused
+          </span>
+          <span className="text-xs text-yellow-200/80">
+            {pausedUntil
+              ? `Resumes automatically on ${new Date(pausedUntil * 1000).toLocaleString()}`
+              : "Payments are on hold until you resume."}
+          </span>
+        </div>
+      )}
+
       {/* Tx hash */}
       <div className="bg-gray-800/50 rounded-lg p-3 border border-gray-700/50">
         <p className="text-gray-400 text-xs mb-1.5 font-medium">
           Transaction hash
         </p>
-        <p className="text-gray-200 break-all font-mono text-xs leading-relaxed">
-          {data.txHash}
-        </p>
+        <div className="flex items-center gap-2 flex-wrap">
+          <p className="text-gray-200 break-all font-mono text-xs leading-relaxed flex-1">
+            {data.txHash}
+          </p>
+          <a
+            href={`${explorerBase}/${data.txHash}`}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-xs text-blue-400 hover:text-blue-300 underline shrink-0"
+            aria-label="View transaction on Stellar Expert"
+          >
+            View ↗
+          </a>
+        </div>
       </div>
 
       {/* Summary */}
@@ -462,6 +547,41 @@ function SuccessCard({
         </span>
       </div>
 
+      {/* Cancel success state */}
+      {cancelTxHash && (
+        <div
+          role="status"
+          className="rounded-lg bg-orange-900/30 border border-orange-600/50 p-3 space-y-1"
+        >
+          <p className="text-orange-300 font-semibold text-xs">
+            Subscription cancelled on-chain ✓
+          </p>
+          <div className="flex items-center gap-2 flex-wrap">
+            <p className="text-gray-400 break-all font-mono text-xs flex-1">{cancelTxHash}</p>
+            <a
+              href={`${explorerBase}/${cancelTxHash}`}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-xs text-blue-400 hover:text-blue-300 underline shrink-0"
+              aria-label="View cancellation transaction on Stellar Expert"
+            >
+              View ↗
+            </a>
+          </div>
+        </div>
+      )}
+
+      {/* Cancel error state */}
+      {cancelError && (
+        <div
+          role="alert"
+          className="rounded-lg bg-red-900/30 border border-red-600/50 p-3"
+        >
+          <p className="text-red-300 font-semibold text-xs mb-1">Cancel failed</p>
+          <p className="text-gray-300 text-xs break-all">{cancelError}</p>
+        </div>
+      )}
+
       {/* Next steps */}
       <div className="border-t border-green-800/60 pt-4 space-y-2.5">
         <p className="text-green-300 font-semibold text-xs uppercase tracking-widest">
@@ -472,13 +592,6 @@ function SuccessCard({
           <li>
             Subsequent payments are collectible every {days} day
             {days !== 1 ? "s" : ""}.
-          </li>
-          <li>
-            To cancel, call{" "}
-            <code className="bg-gray-800 px-1.5 py-0.5 rounded text-green-300 text-xs">
-              cancel(subscriber, merchant)
-            </code>{" "}
-            on the contract, or revoke the token allowance via your wallet.
           </li>
           <li>
             Your wallet remains non-custodial — the contract never holds your
@@ -582,6 +695,24 @@ function SuccessCard({
           Create Another Subscription
         </button>
       </div>
+
+      {/* Cancel subscription (#765) */}
+      {onCancelSubscription && (
+        <div className="pt-2 border-t border-green-800/40">
+          <button
+            type="button"
+            onClick={onCancelSubscription}
+            disabled={isCancelling}
+            aria-label="Cancel this subscription on-chain"
+            className="w-full rounded-lg border border-red-700/60 text-red-400 hover:bg-red-900/30 active:bg-red-900/50
+                       disabled:opacity-50 disabled:cursor-not-allowed
+                       py-3 text-sm font-semibold transition-all duration-150 min-h-[48px]
+                       focus:outline-none focus-visible:ring-2 focus-visible:ring-red-400 focus-visible:ring-offset-2 focus-visible:ring-offset-gray-900"
+          >
+            {isCancelling ? "Cancelling…" : "Cancel Subscription"}
+          </button>
+        </div>
+      )}
     </div>
   );
 }
@@ -1343,6 +1474,12 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
     formValid: feeFormValid,
   });
 
+  // Cancel flow state (#765)
+  const [showCancelConfirm, setShowCancelConfirm]   = useState(false);
+  const [isCancelling, setIsCancelling]             = useState(false);
+  const [cancelSuccess, setCancelSuccess]           = useState<CancelSuccessData | null>(null);
+  const [cancelError, setCancelError]               = useState<TxErrorInfo | null>(null);
+
   // Guard: must have a valid contract address before rendering the form
   // (placed after hooks so rules-of-hooks is satisfied)
   if (!CONTRACT_ID) return <ContractConfigError />;
@@ -1355,6 +1492,14 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
     return <SkeletonForm />;
   }
   const intervalNum = Number(interval);
+
+  // ── Cancel subscription state ──────────────────────────────────────────────
+  const [cancelMerchant, setCancelMerchant]       = useState('');
+  const [cancelToken, setCancelToken]             = useState('');
+  const [showCancelConfirm, setShowCancelConfirm] = useState(false);
+  const [isCancelling, setIsCancelling]           = useState(false);
+  const [cancelSuccess, setCancelSuccess]         = useState<{ txHash: string; merchant: string } | null>(null);
+  const [cancelError, setCancelError]             = useState<TxErrorInfo | null>(null);
 
   const labelCls = 'block text-sm font-semibold text-gray-100 mb-2.5';
   const hintCls = 'text-xs text-gray-300 leading-relaxed';
@@ -1387,6 +1532,9 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
     setTokenAddress("");
     setAmount("");
     setInterval(String(DEFAULT_INTERVAL_SECONDS));
+    setShowPauseConfirm(false);
+    setIsPaused(false);
+    setPausedUntil(null);
     clearPersistedFormData(); // Clear persisted data on success (Issue #115)
   }
 
@@ -1477,6 +1625,110 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
         docsUrl: mapped.docsUrl,
       });
       setIsSubmitting(false);
+    }
+  }
+
+  // ── Cancel handlers ──────────────────────────────────────────────────────
+
+  /**
+   * Triggered when the user clicks "Cancel Subscription".
+   * Validates the merchant address and shows the confirmation modal.
+   */
+  function handleCancelRequest(e: FormEvent) {
+    e.preventDefault();
+    setCancelError(null);
+    if (!cancelMerchant.trim()) {
+      setCancelError(classifyError(new Error('Merchant address is required to cancel a subscription.')));
+      return;
+    }
+    if (!cancelToken.trim()) {
+      setCancelError(classifyError(new Error('Token contract address is required to cancel a subscription.')));
+      return;
+    }
+    if (!isValidGAddress(cancelMerchant.trim())) {
+      setCancelError(classifyError(new Error('Invalid merchant address. Must be a 56-character Stellar G-address.')));
+      return;
+    }
+    if (!/^(C)[A-Z2-7]{55}$/.test(cancelToken.trim())) {
+      setCancelError(classifyError(new Error('Invalid token contract address. Must be a 56-character Stellar C-address.')));
+      return;
+    }
+    setShowCancelConfirm(true);
+  }
+
+  /**
+   * Confirmed by the user in the cancel confirmation modal.
+   * Calls the real on-chain cancel() entry point via buildAndSubmitCancel().
+   * Shows the transaction hash with a Stellar explorer link on success.
+   */
+  async function handleConfirmCancel() {
+    setShowCancelConfirm(false);
+    if (!publicKey) return;
+
+    setIsCancelling(true);
+    setCancelError(null);
+    try {
+      const result = await buildAndSubmitCancel(
+        {
+          subscriber: publicKey,
+          merchant: cancelMerchant.trim(),
+          token: cancelToken.trim(),
+        },
+        CONTRACT_ID,
+        publicKey,
+        NETWORK_PASSPHRASE,
+        RPC_URL,
+      );
+
+      setCancelSuccess({
+        txHash: result.txHash,
+        merchant: cancelMerchant.trim(),
+      });
+      setCancelMerchant('');
+      setCancelToken('');
+    } catch (err) {
+      setCancelError(classifyError(err));
+    } finally {
+      setIsCancelling(false);
+    }
+  }
+
+  /**
+   * handleConfirmCancel — execute the on-chain cancel() call.
+   *
+   * #765: Previously this was a setTimeout(resolve, 300) placeholder.
+   * Now calls buildAndSubmitCancel() from cancel_builder.ts which
+   * builds, signs (via Freighter), and submits the real cancel transaction.
+   */
+  async function handleConfirmCancel() {
+    setShowCancelConfirm(false);
+    if (!publicKey || !successData) return;
+
+    setIsCancelling(true);
+    setCancelError(null);
+    try {
+      const result = await buildAndSubmitCancel(
+        {
+          subscriber: publicKey,
+          merchant: successData.merchant,
+        },
+        CONTRACT_ID,
+        publicKey,
+        NETWORK_PASSPHRASE,
+        RPC_URL,
+      );
+
+      setCancelSuccess({
+        txHash: result.txHash,
+        merchant: successData.merchant,
+        subscriber: publicKey,
+      });
+      // Clear the subscription success state since it has now been cancelled
+      setSuccessData(null);
+    } catch (err) {
+      setCancelError(classifyError(err));
+    } finally {
+      setIsCancelling(false);
     }
   }
 
@@ -1648,6 +1900,11 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
           onCancelSubscription={handleCancelSubscriptionClick}
           isCancelling={cancelStatus === 'pending'}
           getLabel={abGetLabel}
+          isPaused={isPaused}
+          pausedUntil={pausedUntil}
+          onPauseClick={handlePauseClick}
+          onResumeClick={handleResume}
+          isPauseResumeSubmitting={isPauseResumeSubmitting}
         />
       )}
 
@@ -1909,6 +2166,147 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
           </div>
         </form>
       )}
+
+      {/* ── Cancel subscription section ─────────────────────────────────────── */}
+      <div className="mt-8 pt-6 border-t border-gray-700/60">
+        <h3 className="text-base font-semibold text-gray-200 mb-1">
+          Cancel a subscription
+        </h3>
+        <p className="text-xs text-gray-400 mb-4 leading-relaxed">
+          Permanently remove an active subscription. The merchant will no longer
+          be able to collect payments. This submits a real on-chain{" "}
+          <code className="bg-gray-800 px-1 rounded text-gray-200 text-xs">cancel()</code>{" "}
+          transaction.
+        </p>
+
+        {/* Cancel success */}
+        {cancelSuccess && (
+          <div
+            role="alert"
+            className="mb-4 rounded-xl bg-gradient-to-br from-green-900/60 to-green-800/30 border-2 border-green-600/60 p-4 text-sm space-y-3"
+          >
+            <div className="flex items-center gap-3">
+              <span className="text-2xl flex-shrink-0" aria-hidden="true">✓</span>
+              <p className="font-semibold text-green-300">Subscription cancelled successfully!</p>
+            </div>
+            <div className="bg-gray-800/50 rounded-lg p-3 border border-gray-700/50">
+              <p className="text-gray-400 text-xs mb-1 font-medium">Transaction hash</p>
+              <div className="flex items-start gap-2">
+                <p className="flex-1 text-gray-200 break-all font-mono text-xs leading-relaxed">
+                  {cancelSuccess.txHash}
+                </p>
+                <CopyButton text={cancelSuccess.txHash} label="Copy" />
+              </div>
+            </div>
+            <a
+              href={`https://stellar.expert/explorer/testnet/tx/${cancelSuccess.txHash}`}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-1 text-xs text-green-300 underline underline-offset-2 hover:text-green-200 transition-colors"
+            >
+              View on Stellar Expert ↗
+            </a>
+            <button
+              onClick={() => { setCancelSuccess(null); setCancelMerchant(''); }}
+              className="w-full rounded-lg border border-green-600/70 text-green-300 hover:bg-green-900/40 py-2.5 text-sm font-semibold transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-green-400"
+            >
+              Cancel another subscription
+            </button>
+          </div>
+        )}
+
+        {/* Cancel error */}
+        {cancelError && (
+          <ErrorCard error={cancelError} onDismiss={() => setCancelError(null)} />
+        )}
+
+        {/* Cancel progress */}
+        {isCancelling && (
+          <div
+            className="mb-4 p-4 bg-red-900/20 border border-red-600/40 rounded-lg"
+            role="status"
+            aria-label="Cancellation in progress"
+          >
+            <div className="flex items-center gap-2">
+              <svg
+                className="animate-spin h-4 w-4 text-red-400"
+                xmlns="http://www.w3.org/2000/svg"
+                fill="none"
+                viewBox="0 0 24 24"
+                aria-hidden="true"
+              >
+                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
+              </svg>
+              <span className="text-sm text-red-300">Submitting cancellation…</span>
+            </div>
+          </div>
+        )}
+
+        {!cancelSuccess && (
+          <form onSubmit={handleCancelRequest} noValidate aria-busy={isCancelling} className="space-y-3">
+            <div>
+              <label htmlFor="cancelMerchant" className="block text-sm font-semibold text-gray-100 mb-2">
+                Merchant address
+                <span aria-hidden="true" className="text-red-400 ml-1">*</span>
+              </label>
+              <input
+                id="cancelMerchant"
+                type="text"
+                placeholder="e.g. GXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+                autoComplete="off"
+                value={cancelMerchant}
+                onChange={(e) => setCancelMerchant(e.target.value)}
+                disabled={isCancelling}
+                required
+                aria-required="true"
+                className={inputCls}
+              />
+              <p className="mt-1.5 text-xs text-gray-400 leading-relaxed">
+                The merchant&apos;s Stellar G-address for the subscription you want to cancel.
+              </p>
+            </div>
+            <div>
+              <label htmlFor="cancelToken" className="block text-sm font-semibold text-gray-100 mb-2">
+                Token contract address
+                <span aria-hidden="true" className="text-red-400 ml-1">*</span>
+              </label>
+              <input
+                id="cancelToken"
+                type="text"
+                placeholder="e.g. CXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+                autoComplete="off"
+                value={cancelToken}
+                onChange={(e) => setCancelToken(e.target.value)}
+                disabled={isCancelling}
+                required
+                aria-required="true"
+                className={inputCls}
+              />
+              <p className="mt-1.5 text-xs text-gray-400 leading-relaxed">
+                The token contract tied to the active subscription being cancelled.
+              </p>
+            </div>
+            {!publicKey && (
+              <p className="text-xs text-yellow-400 font-medium" role="status">
+                Connect your Freighter wallet to cancel a subscription.
+              </p>
+            )}
+            <button
+              type="submit"
+              disabled={isCancelling || !publicKey}
+              className="w-full flex items-center justify-center gap-2 rounded-lg bg-red-700
+                         hover:bg-red-600 active:bg-red-800 disabled:opacity-50
+                         disabled:cursor-not-allowed px-4 py-3 text-sm font-semibold
+                         transition-all duration-150 min-h-[48px]
+                         focus:outline-none focus-visible:ring-2 focus-visible:ring-red-400
+                         focus-visible:ring-offset-2 focus-visible:ring-offset-gray-900"
+            >
+              {isCancelling ? "Cancelling…" : "Cancel Subscription"}
+            </button>
+          </form>
+        )}
+      </div>
     </div>
     </ErrorBoundary>
   );
