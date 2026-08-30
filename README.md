@@ -36,7 +36,7 @@ SorobanPay
 2. **Frontend** dispatches contract calls (`subscribe`, `cancel`, `execute_payment`) through the Stellar RPC.
 3. **Soroban Contract** executes on-chain, interacting with the **SEP-41 Token** for allowances/transfers and persisting state in the **Soroban Ledger**.
 4. **Structured events** emitted by the contract can be indexed by an **optional backend** for analytics, history, or notification triggers.
-5. **Cancellation audit records** are persisted off-chain by backend services after confirmed `cancel` transactions because the contract does not emit cancellation events.
+5. **Cancellation events** are emitted by the contract on every successful `cancel` call (`symbol("cancel")`, subscriber, merchant topics; unit data), allowing off-chain indexers to immediately detect and record cancellations without scanning storage changes.
 6. **Merchant** may use a dedicated portal or admin panel to trigger `execute_payment` and view subscription state.
 
 ---
