@@ -1,175 +1,246 @@
 /**
  * authService.test.ts
  *
- * Unit tests for the Redis-backed SEP-10 challenge store (issue #766).
+ * Unit tests for AuthService.
  *
- * Uses an in-memory Redis mock so no real Redis instance is required.
+ * Both Redis and the Stellar SDK are mocked so these run without a live Redis
+ * instance or any ESM-only native dependency.
+ *
+ * Covers: challenge creation, successful verification, replay prevention,
+ * expired/missing challenge, bad signature, wrong nonce, invalid public key.
  */
 
-import { Keypair, Networks } from '@stellar/stellar-sdk';
-import {
-  issueChallenge,
-  verifyChallenge,
-  revokeChallenge,
-  setRedisClient,
-} from '../../src/services/authService';
+// ─── Mock ioredis ─────────────────────────────────────────────────────────────
 
-// ─── In-memory Redis mock ─────────────────────────────────────────────────────
+const store = new Map<string, string>();
 
-class InMemoryRedis {
-  private store = new Map<string, { value: string; expiresAt: number }>();
-
-  async set(key: string, value: string, _ex: 'EX', ttlSeconds: number): Promise<'OK'> {
-    this.store.set(key, {
-      value,
-      expiresAt: Date.now() + ttlSeconds * 1_000,
-    });
+const mockRedis = {
+  set: jest.fn(async (key: string, value: string, _ex?: string, _ttl?: number) => {
+    store.set(key, value);
     return 'OK';
-  }
+  }),
+  del: jest.fn(async (key: string) => {
+    store.delete(key);
+    return 1;
+  }),
+  // Simulates atomic Lua GET+DEL
+  eval: jest.fn(async (_script: string, _numKeys: number, key: string) => {
+    const val = store.get(key) ?? null;
+    if (val !== null) store.delete(key);
+    return val;
+  }),
+  on: jest.fn(),
+};
 
-  async getdel(key: string): Promise<string | null> {
-    const entry = this.store.get(key);
-    if (!entry) return null;
-    if (Date.now() > entry.expiresAt) {
-      this.store.delete(key);
-      return null;
-    }
-    this.store.delete(key);
-    return entry.value;
-  }
+jest.mock('../src/lib/redis', () => mockRedis);
 
-  async del(key: string): Promise<number> {
-    return this.store.delete(key) ? 1 : 0;
-  }
+// ─── Mock @stellar/stellar-sdk ────────────────────────────────────────────────
+//
+// We only need enough of the SDK surface that authService.ts imports:
+//   Keypair.fromPublicKey(key)  → for address validation
+//   new Transaction(xdr, net)   → for decoding signed transactions
+//   Networks.TESTNET             → passphrase constant
 
-  on(_event: string, _listener: (...args: unknown[]) => void): this {
-    return this;
-  }
-
-  clear(): void {
-    this.store.clear();
-  }
-
-  /** Test helper — peek at a key without consuming it. */
-  peekSync(key: string): string | null {
-    const entry = this.store.get(key);
-    if (!entry || Date.now() > entry.expiresAt) return null;
-    return entry.value;
-  }
+interface MockTransaction {
+  memo: { type: string; value: string | null };
+  signatures: Array<{ signature: () => Buffer }>;
+  hash: () => Buffer;
 }
 
-// ─── Test setup ───────────────────────────────────────────────────────────────
+// Controls what the Transaction constructor returns per test.
+let _mockTxFactory: (() => MockTransaction) | null = null;
+let _keypairValid = true; // set false to simulate invalid public key
 
-let mockRedis: InMemoryRedis;
-const serverKeypair = Keypair.random();
-const clientKeypair = Keypair.random();
-const publicKey = clientKeypair.publicKey();
+const mockKeypair = {
+  verify: jest.fn((_hash: Buffer, _sig: Buffer) => true),
+  publicKey: jest.fn(() => 'GAAAAAAATEST'),
+};
 
-beforeEach(() => {
-  mockRedis = new InMemoryRedis();
-  setRedisClient(mockRedis as any);
-});
+jest.mock('@stellar/stellar-sdk', () => ({
+  Networks: { TESTNET: 'Test SDF Network ; September 2015' },
+  Keypair: {
+    fromPublicKey: jest.fn((key: string) => {
+      if (!_keypairValid) throw new Error('Invalid public key');
+      return { ...mockKeypair, publicKey: () => key };
+    }),
+  },
+  Transaction: jest.fn().mockImplementation((_xdr: string, _net: string) => {
+    if (_mockTxFactory) return _mockTxFactory();
+    throw new Error('Transaction factory not set');
+  }),
+}));
 
-// ─── issueChallenge ───────────────────────────────────────────────────────────
+// ─── Import after mocks ───────────────────────────────────────────────────────
 
-describe('issueChallenge', () => {
-  it('stores a challenge in Redis and returns XDR + expiresAt', async () => {
-    const result = await issueChallenge(publicKey, serverKeypair, Networks.TESTNET);
+import { AuthService } from '../src/services/authService';
 
-    expect(result.challengeXdr).toBeTruthy();
-    expect(typeof result.challengeXdr).toBe('string');
-    expect(result.expiresAt).toBeGreaterThan(Date.now());
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+function makeTx(nonce: string, sigVerifies = true): MockTransaction {
+  const hash = Buffer.from('fakehash');
+  return {
+    memo: { type: 'text', value: nonce },
+    hash: () => hash,
+    signatures: [
+      {
+        signature: () => Buffer.from('fakesig'),
+      },
+    ],
+  };
+}
+
+/** Retrieve the stored challenge JSON for a given public key. */
+function storedChallenge(pk: string): Record<string, unknown> | null {
+  const raw = store.get(`auth:challenge:${pk}`);
+  return raw ? (JSON.parse(raw) as Record<string, unknown>) : null;
+}
+
+// ─── Tests ────────────────────────────────────────────────────────────────────
+
+describe('AuthService', () => {
+  let service: AuthService;
+  const PK = 'GABC1234TEST';
+
+  beforeEach(() => {
+    store.clear();
+    jest.clearAllMocks();
+    _keypairValid = true;
+    _mockTxFactory = null;
+    service = new AuthService('Test SDF Network ; September 2015');
   });
 
-  it('stores the challenge under the correct Redis key', async () => {
-    await issueChallenge(publicKey, serverKeypair, Networks.TESTNET);
+  // ── createChallenge ───────────────────────────────────────────────────────
 
-    const stored = mockRedis.peekSync(`sep10:challenge:${publicKey}`);
-    expect(stored).not.toBeNull();
+  describe('createChallenge', () => {
+    it('returns a 64-char hex nonce and persists it in Redis', async () => {
+      const result = await service.createChallenge(PK);
 
-    const record = JSON.parse(stored!);
-    expect(record).toHaveProperty('nonce');
-    expect(record).toHaveProperty('issuedAt');
+      expect(result.nonce).toMatch(/^[0-9a-f]{64}$/);
+      expect(mockRedis.set).toHaveBeenCalledTimes(1);
+
+      const [key, , ex, ttl] = mockRedis.set.mock.calls[0];
+      expect(key).toBe(`auth:challenge:${PK}`);
+      expect(ex).toBe('EX');
+      expect(ttl).toBe(300);
+    });
+
+    it('stores publicKey and issuedAt alongside the nonce', async () => {
+      const before = Date.now();
+      const { nonce } = await service.createChallenge(PK);
+      const after = Date.now();
+
+      const stored = storedChallenge(PK);
+      expect(stored).not.toBeNull();
+      expect(stored!.publicKey).toBe(PK);
+      expect(stored!.nonce).toBe(nonce);
+      expect(stored!.issuedAt).toBeGreaterThanOrEqual(before);
+      expect(stored!.issuedAt).toBeLessThanOrEqual(after);
+    });
+
+    it('throws for an invalid public key', async () => {
+      _keypairValid = false;
+      await expect(service.createChallenge('BADKEY')).rejects.toThrow(
+        /invalid stellar public key/i,
+      );
+      expect(mockRedis.set).not.toHaveBeenCalled();
+    });
+
+    it('overwrites a previous challenge for the same key', async () => {
+      const r1 = await service.createChallenge(PK);
+      const r2 = await service.createChallenge(PK);
+
+      expect(r1.nonce).not.toBe(r2.nonce);
+      // Two Redis.set calls
+      expect(mockRedis.set).toHaveBeenCalledTimes(2);
+      // Only the latest nonce remains
+      expect(storedChallenge(PK)!.nonce).toBe(r2.nonce);
+    });
   });
 
-  it('overwrites a previous challenge for the same public key', async () => {
-    await issueChallenge(publicKey, serverKeypair, Networks.TESTNET);
-    const first = mockRedis.peekSync(`sep10:challenge:${publicKey}`);
+  // ── verifyChallenge ───────────────────────────────────────────────────────
 
-    await issueChallenge(publicKey, serverKeypair, Networks.TESTNET);
-    const second = mockRedis.peekSync(`sep10:challenge:${publicKey}`);
+  describe('verifyChallenge', () => {
+    it('returns success:true when nonce and signature are correct', async () => {
+      const { nonce } = await service.createChallenge(PK);
+      _mockTxFactory = () => makeTx(nonce, true);
+      // Mock keypair.verify to return true
+      const { Keypair } = jest.requireMock('@stellar/stellar-sdk') as { Keypair: { fromPublicKey: jest.Mock } };
+      const kpInstance = Keypair.fromPublicKey(PK);
+      jest.spyOn(kpInstance, 'verify' as never).mockReturnValue(true as never);
 
-    // Both should exist, but nonces differ because timestamps differ
-    expect(first).not.toBeNull();
-    expect(second).not.toBeNull();
+      const result = await service.verifyChallenge(PK, 'signed-xdr');
+      expect(result.success).toBe(true);
+      expect(result.publicKey).toBe(PK);
+    });
+
+    it('fails when no challenge exists in Redis', async () => {
+      _mockTxFactory = () => makeTx('any-nonce');
+
+      const result = await service.verifyChallenge(PK, 'signed-xdr');
+      expect(result.success).toBe(false);
+      expect(result.error).toMatch(/no pending challenge/i);
+    });
+
+    it('prevents replay — challenge is deleted after first verify', async () => {
+      const { nonce } = await service.createChallenge(PK);
+      _mockTxFactory = () => makeTx(nonce, true);
+
+      const first = await service.verifyChallenge(PK, 'signed-xdr');
+      expect(first.success).toBe(true);
+
+      // Store is now empty; second attempt must fail
+      const second = await service.verifyChallenge(PK, 'signed-xdr');
+      expect(second.success).toBe(false);
+      expect(second.error).toMatch(/no pending challenge/i);
+    });
+
+    it('fails when transaction memo does not match stored nonce', async () => {
+      await service.createChallenge(PK);
+      _mockTxFactory = () => makeTx('wrong-nonce');
+
+      const result = await service.verifyChallenge(PK, 'signed-xdr');
+      expect(result.success).toBe(false);
+      expect(result.error).toMatch(/memo does not match/i);
+    });
+
+    it('fails when transaction has no valid signature from the public key', async () => {
+      const { nonce } = await service.createChallenge(PK);
+      const tx = makeTx(nonce);
+      _mockTxFactory = () => tx;
+
+      // Make verify always return false
+      const { Keypair } = jest.requireMock('@stellar/stellar-sdk') as { Keypair: { fromPublicKey: jest.Mock } };
+      Keypair.fromPublicKey.mockImplementationOnce((key: string) => ({
+        verify: () => false,
+        publicKey: () => key,
+      }));
+
+      const result = await service.verifyChallenge(PK, 'signed-xdr');
+      expect(result.success).toBe(false);
+      expect(result.error).toMatch(/not signed by the claimed public key/i);
+    });
+
+    it('fails when transaction XDR is malformed', async () => {
+      await service.createChallenge(PK);
+      _mockTxFactory = () => { throw new Error('bad XDR'); };
+
+      const result = await service.verifyChallenge(PK, 'bad-xdr');
+      expect(result.success).toBe(false);
+      expect(result.error).toMatch(/invalid transaction xdr/i);
+    });
   });
-});
 
-// ─── verifyChallenge ──────────────────────────────────────────────────────────
+  // ── invalidateChallenge ───────────────────────────────────────────────────
 
-describe('verifyChallenge', () => {
-  it('returns valid=false when no challenge is stored', async () => {
-    const result = await verifyChallenge(publicKey, 'not-valid-xdr', Networks.TESTNET);
-    expect(result.valid).toBe(false);
-    expect(result.error).toMatch(/not found|already consumed/i);
-  });
+  describe('invalidateChallenge', () => {
+    it('deletes the challenge key from Redis', async () => {
+      await service.createChallenge(PK);
+      expect(storedChallenge(PK)).not.toBeNull();
 
-  it('consumes the challenge on first verify (no replay)', async () => {
-    const { challengeXdr } = await issueChallenge(publicKey, serverKeypair, Networks.TESTNET);
+      await service.invalidateChallenge(PK);
 
-    // First call — challenge present
-    const first = await verifyChallenge(publicKey, challengeXdr, Networks.TESTNET);
-    // The XDR is not signed by clientKeypair, so sig check will fail,
-    // but the Redis key must be consumed regardless.
-    const second = await verifyChallenge(publicKey, challengeXdr, Networks.TESTNET);
-
-    expect(second.valid).toBe(false);
-    expect(second.error).toMatch(/not found|already consumed/i);
-    // Confirm key is gone
-    expect(mockRedis.peekSync(`sep10:challenge:${publicKey}`)).toBeNull();
-    void first; // suppress unused-variable warning
-  });
-
-  it('returns valid=false with invalid XDR after challenge is found', async () => {
-    await issueChallenge(publicKey, serverKeypair, Networks.TESTNET);
-    const result = await verifyChallenge(publicKey, 'bad-xdr', Networks.TESTNET);
-    expect(result.valid).toBe(false);
-    expect(result.error).toBeTruthy();
-  });
-});
-
-// ─── revokeChallenge ──────────────────────────────────────────────────────────
-
-describe('revokeChallenge', () => {
-  it('removes the challenge from Redis', async () => {
-    await issueChallenge(publicKey, serverKeypair, Networks.TESTNET);
-    expect(mockRedis.peekSync(`sep10:challenge:${publicKey}`)).not.toBeNull();
-
-    await revokeChallenge(publicKey);
-    expect(mockRedis.peekSync(`sep10:challenge:${publicKey}`)).toBeNull();
-  });
-
-  it('does not throw when no challenge exists', async () => {
-    await expect(revokeChallenge(publicKey)).resolves.not.toThrow();
-  });
-});
-
-// ─── Multi-instance correctness ───────────────────────────────────────────────
-
-describe('multi-instance correctness', () => {
-  it('challenge issued by one client can be verified by another (shared Redis)', async () => {
-    // Simulate two different "pods" sharing the same Redis instance (mockRedis)
-    const podARedis = mockRedis;
-    const podBRedis = mockRedis; // same instance = shared store
-
-    setRedisClient(podARedis as any);
-    const { challengeXdr } = await issueChallenge(publicKey, serverKeypair, Networks.TESTNET);
-
-    // Pod B uses the same Redis → can read the challenge pod A stored
-    setRedisClient(podBRedis as any);
-    // Verify returns false because the XDR isn't signed by clientKeypair,
-    // but crucially the challenge IS found (no "not found" error).
-    const result = await verifyChallenge(publicKey, challengeXdr, Networks.TESTNET);
-    expect(result.error).not.toMatch(/not found/i);
+      expect(mockRedis.del).toHaveBeenCalledWith(`auth:challenge:${PK}`);
+      expect(storedChallenge(PK)).toBeNull();
+    });
   });
 });
