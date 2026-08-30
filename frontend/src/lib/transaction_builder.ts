@@ -22,6 +22,10 @@ import {
 import { SorobanRpc } from '@stellar/stellar-sdk';
 import { signTx } from './wallet_manager';
 import { isValidCAddress, isValidGAddress } from './validation';
+import { normalizeRpcError } from './rpc_error_normalizer';
+
+// Re-export NormalizedRpcError so callers can import from one place.
+export type { NormalizedRpcError, RpcErrorCategory } from './rpc_error_normalizer';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -112,7 +116,9 @@ export async function buildAndSubmitSubscribe(
     preparedTx = await server.prepareTransaction(tx);
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
-    throw new Error(`Transaction preparation failed: ${msg}`);
+    // Wrap in a descriptive message so the normalizer can classify it, then
+    // throw the NormalizedRpcError so callers receive structured metadata.
+    throw normalizeRpcError(new Error(`Transaction preparation failed: ${msg}`));
   }
 
   // 4. Sign with Freighter
@@ -123,8 +129,10 @@ export async function buildAndSubmitSubscribe(
   const sendResult = await server.sendTransaction(parsedTx);
 
   if (sendResult.status === 'ERROR') {
-    throw new Error(
-      `Transaction submission failed: ${sendResult.errorResult?.toXDR('base64') ?? 'unknown error'}`
+    throw normalizeRpcError(
+      new Error(
+        `Transaction submission failed: ${sendResult.errorResult?.toXDR('base64') ?? 'unknown error'}`
+      )
     );
   }
 
@@ -151,16 +159,20 @@ async function pollForConfirmation(
 
     if (result.status === SorobanRpc.Api.GetTransactionStatus.FAILED) {
       const meta = (result as SorobanRpc.Api.GetFailedTransactionResponse).resultMetaXdr;
-      throw new Error(
-        `Transaction failed on-chain: ${meta ?? 'no result meta available'}`
+      throw normalizeRpcError(
+        new Error(
+          `Transaction failed on-chain: ${meta ?? 'no result meta available'}`
+        )
       );
     }
 
     // status === NOT_FOUND — still in mempool, continue polling
   }
 
-  throw new Error(
-    `Transaction confirmation timeout after ${MAX_POLL_ATTEMPTS} seconds. Hash: ${hash}`
+  throw normalizeRpcError(
+    new Error(
+      `Transaction confirmation timeout after ${MAX_POLL_ATTEMPTS} seconds. Hash: ${hash}`
+    )
   );
 }
 
