@@ -5,6 +5,7 @@ import cron from 'node-cron';
 import { EventIndexer } from './services/eventIndexer';
 import { PayoutSummaryGenerator } from './services/payoutSummaryGenerator';
 import summariesRouter from './routes/summaries';
+import authRouter from './routes/auth';
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -15,6 +16,7 @@ app.use(express.json());
 
 // Routes
 app.use('/api/summaries', summariesRouter);
+app.use('/api/auth', authRouter);
 
 // Initialize services
 const rpcUrl = process.env.RPC_URL || 'https://soroban-testnet.stellar.org';
