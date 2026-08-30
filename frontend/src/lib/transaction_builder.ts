@@ -27,6 +27,11 @@ import { signTx } from './wallet_manager';
 import { isValidCAddress, isValidGAddress } from './validation';
 import { normalizeRpcError } from './rpc_error_normalizer';
 import { checkAllowance, type AllowanceResult } from './allowance_checker';
+import { withBackoff, isRpcRetryable as isRetryable, getErrorMessage } from './backoff';
+import { prepareTransactionWithDiagnostics } from './simulationDiagnostics';
+
+// Re-export diagnostic types so callers can catch/inspect them from one place.
+export { SimulationFailedError, type SimulationDiagnostic } from './simulationDiagnostics';
 
 // Re-export NormalizedRpcError so callers can import from one place.
 export type { NormalizedRpcError, RpcErrorCategory } from './rpc_error_normalizer';
@@ -229,7 +234,7 @@ export async function buildSignAndSubmitSubscribe(
   let preparedTx: ReturnType<typeof TransactionBuilder.fromXDR>;
   try {
     preparedTx = await withBackoff(
-      () => server.prepareTransaction(tx),
+      () => prepareTransactionWithDiagnostics(server, tx),
       {
         maxRetries: 3,
         baseDelayMs: 500,
@@ -428,7 +433,7 @@ export async function buildSignAndSubmitCancel(
   // 4. Prepare transaction (simulation + resource fee injection)
   let preparedTx: ReturnType<typeof TransactionBuilder.fromXDR>;
   try {
-    preparedTx = await server.prepareTransaction(tx);
+    preparedTx = await prepareTransactionWithDiagnostics(server, tx);
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
     // Wrap in a descriptive message so the normalizer can classify it, then
@@ -590,7 +595,7 @@ export async function buildAndSubmitExecutePayment(
   let preparedTx: ReturnType<typeof TransactionBuilder.fromXDR>;
   try {
     preparedTx = await withBackoff(
-      () => server.prepareTransaction(tx),
+      () => prepareTransactionWithDiagnostics(server, tx),
       {
         maxRetries: 3,
         baseDelayMs: 500,
@@ -856,7 +861,7 @@ async function submitAtomicBatchPayment(
     let preparedTx: ReturnType<typeof TransactionBuilder.fromXDR>;
     try {
       preparedTx = await withBackoff(
-        () => server.prepareTransaction(tx),
+        () => prepareTransactionWithDiagnostics(server, tx),
         {
           maxRetries: 3,
           baseDelayMs: 500,
@@ -1048,7 +1053,7 @@ export async function buildAndSubmitUpdateSubscription(
 
   let preparedTx: ReturnType<typeof TransactionBuilder.fromXDR>;
   try {
-    preparedTx = await server.prepareTransaction(tx);
+    preparedTx = await prepareTransactionWithDiagnostics(server, tx);
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
     throw new Error(`Transaction preparation failed: ${msg}`);
@@ -1154,7 +1159,7 @@ export async function buildAndSubmitUpdateSubscription(
 
   let preparedTx: ReturnType<typeof TransactionBuilder.fromXDR>;
   try {
-    preparedTx = await server.prepareTransaction(tx);
+    preparedTx = await prepareTransactionWithDiagnostics(server, tx);
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
     throw new Error(`Transaction preparation failed: ${msg}`);
@@ -1257,7 +1262,7 @@ export async function buildAndSubmitTransferSubscription(
 
   let preparedTx: ReturnType<typeof TransactionBuilder.fromXDR>;
   try {
-    preparedTx = await server.prepareTransaction(tx);
+    preparedTx = await prepareTransactionWithDiagnostics(server, tx);
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
     throw new Error(`Transaction preparation failed: ${msg}`);
