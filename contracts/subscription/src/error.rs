@@ -5,6 +5,7 @@ use soroban_sdk::contracterror;
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 #[repr(u32)]
 pub enum ContractError {
+    // ── Core subscription errors (1–7) ──────────────────────────────────────
     /// `subscribe` called with amount <= 0
     AmountMustBePositive  = 1,
     /// `subscribe` called with interval < 86400 seconds (1 day)
