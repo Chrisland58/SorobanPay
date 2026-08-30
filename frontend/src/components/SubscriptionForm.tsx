@@ -362,9 +362,10 @@ function SuccessCard({
 
       {/* Tx hash */}
       <div className="bg-gray-800/50 rounded-lg p-3 border border-gray-700/50">
-        <p className="text-gray-400 text-xs mb-1.5 font-medium">
-          Transaction hash
-        </p>
+        <div className="flex items-center justify-between gap-2 mb-1.5">
+          <p className="text-gray-400 text-xs font-medium">Transaction hash</p>
+          <CopyButton text={data.txHash} label="Copy" />
+        </div>
         <p className="text-gray-200 break-all font-mono text-xs leading-relaxed">
           {data.txHash}
         </p>
