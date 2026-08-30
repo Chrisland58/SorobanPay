@@ -588,28 +588,33 @@ export async function buildAndSubmitExecutePayment(
 // ΓöÇΓöÇ batch_execute_payment builder ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
 /**
- * Execute payment collection for multiple subscribers sequentially.
+ * Execute payment collection for multiple subscribers using the on-chain
+ * `batch_execute_payment` entry point.
  *
- * Each entry is submitted as an independent `execute_payment` transaction.
- * Failures are captured per-entry and do not halt the batch ΓÇö the UI can
- * show partial success with per-row error messages.
+ * Entries that carry a token contract address are collected atomically: a
+ * single transaction charges every subscriber in the same (merchant, token)
+ * group at once, up to the contract's BATCH_MAX_SIZE. The per-subscriber
+ * success/failure booleans returned by the contract are mapped back onto the
+ * input entries so the UI can show which subscribers succeeded and which
+ * were skipped on-chain.
  *
- * Note: This is a client-side sequential batch. When the on-chain
- * `batch_execute_payment` entry point is deployed (SC-9), this function
- * should be updated to use a single multi-operation transaction for
- * atomicity and lower fee cost.
+ * Entries without a token fall back to the legacy per-entry
+ * `execute_payment` submission. Failures are captured per-entry and never
+ * halt the batch.
  *
- * @param entries           Array of (subscriber, merchant) pairs to collect from
+ * @param entries           Array of (subscriber, merchant, token) entries to collect from
  * @param contractId        Deployed SorobanPay contract address
  * @param publicKey         Connected merchant's public key (from Freighter)
  * @param networkPassphrase Stellar network passphrase
  * @param rpcUrl            Soroban RPC endpoint URL
  * @returns                 Per-entry results with success/failure breakdown
  */
-/** A single (subscriber, merchant) pair to collect a payment from */
+/** A single (subscriber, merchant, token) triple to collect a payment from */
 export interface BatchPaymentEntry {
   subscriber: string;
   merchant: string;
+  /** Token contract address - required to use the atomic batch_execute_payment call */
+  token?: string;
 }
 
 /** Per-entry outcome plus aggregate counts for a batch execute_payment run */
@@ -637,77 +642,292 @@ export async function buildAndSubmitBatchExecutePayment(
     return { results: [], successCount: 0, failureCount: 0 };
   }
 
-  const results: BatchExecutePaymentResult['results'] = [];
-  let successCount = 0;
-  let failureCount = 0;
+  const server = new SorobanRpc.Server(rpcUrl, { allowHttp: false });
+
+  // 1. Validate every entry up front (non-retryable). A single bad row must
+  //    not abort the rest of the batch. Entries that fail validation get an
+  //    inline error result and are excluded from the atomic call.
+  const output: BatchExecutePaymentResult['results'] = [];
+  const atomicGroups = new Map<string, BatchPaymentEntry[]>();
 
   for (const entry of entries) {
-    try {
-      const { txHash } = await buildAndSubmitExecutePayment(
-        { subscriber: entry.subscriber, merchant: entry.merchant },
-        contractId,
-        publicKey,
-        networkPassphrase,
-        rpcUrl,
-      );
-      results.push({ subscriber: entry.subscriber, merchant: entry.merchant, txHash });
-      successCount++;
-    } catch (err: unknown) {
-      const error = err instanceof Error ? err.message : String(err);
-      results.push({ subscriber: entry.subscriber, merchant: entry.merchant, error });
-      failureCount++;
+    if (!isValidGAddress(entry.subscriber)) {
+      output.push({
+        subscriber: entry.subscriber,
+        merchant: entry.merchant,
+        error: `Invalid subscriber address: ${entry.subscriber}`,
+      });
+      continue;
+    }
+    if (!isValidGAddress(entry.merchant)) {
+      output.push({
+        subscriber: entry.subscriber,
+        merchant: entry.merchant,
+        error: `Invalid merchant address: ${entry.merchant}`,
+      });
+      continue;
+    }
+    if (entry.token) {
+      if (!isValidCAddress(entry.token)) {
+        output.push({
+          subscriber: entry.subscriber,
+          merchant: entry.merchant,
+          error: `Invalid token contract address: ${entry.token}`,
+        });
+        continue;
+      }
+      const groupKey = `${entry.merchant}\u0000${entry.token}`;
+      const group = atomicGroups.get(groupKey);
+      if (group) {
+        group.push(entry);
+      } else {
+        atomicGroups.set(groupKey, [entry]);
+      }
+    } else {
+      // No token supplied — fall back to the legacy per-entry execute_payment.
+      try {
+        const { txHash } = await buildAndSubmitExecutePayment(
+          { subscriber: entry.subscriber, merchant: entry.merchant },
+          contractId,
+          publicKey,
+          networkPassphrase,
+          rpcUrl,
+        );
+        output.push({ subscriber: entry.subscriber, merchant: entry.merchant, txHash });
+      } catch (err: unknown) {
+        const error = err instanceof Error ? err.message : String(err);
+        output.push({ subscriber: entry.subscriber, merchant: entry.merchant, error });
+      }
     }
   }
 
-  return { results, successCount, failureCount };
+  // 2. Execute one on-chain batch_execute_payment transaction per
+  //    (merchant, token) group — up to the contract's BATCH_MAX_SIZE.
+  for (const group of atomicGroups.values()) {
+    const groupResults = await submitAtomicBatchPayment(
+      group,
+      server,
+      contractId,
+      publicKey,
+      networkPassphrase,
+    );
+    output.push(...groupResults);
+  }
+
+  // 3. Aggregate counts across the ordered results.
+  const successCount = output.filter((r) => r.txHash).length;
+  const failureCount = output.filter((r) => r.error).length;
+
+  return { results: output, successCount, failureCount };
 }
 
-// ── pause_subscription / resume_subscription builders (Issue #795) ────────────
+/**
+ * Submit a single on-chain `batch_execute_payment` transaction for a group
+ * of entries that share the same (merchant, token) pair.
+ *
+ * The contract charges each due subscriber in one `invokeHostFunction`
+ * operation and returns `Vec<(Address, bool)>` — one per subscriber in input
+ * order — which is mapped back onto the entries so the UI can show exactly
+ * which subscribers succeeded and which were skipped on-chain.
+ */
+async function submitAtomicBatchPayment(
+  entries: BatchPaymentEntry[],
+  server: SorobanRpc.Server,
+  contractId: string,
+  publicKey: string,
+  networkPassphrase: string,
+): Promise<BatchExecutePaymentResult['results']> {
+  const merchant = entries[0].merchant;
+  const token = entries[0].token as string;
 
-/** Parameters for pausing an active subscription */
-export interface PauseSubscriptionParams {
+  try {
+    const account = await withBackoff(
+      () => server.getAccount(publicKey),
+      {
+        maxRetries: 5,
+        baseDelayMs: 300,
+        maxDelayMs: 30_000,
+        jitterFactor: 0.25,
+        isRetryable,
+        onRetry: (attempt, error, delayMs) => {
+          console.warn(
+            `[batch_execute_payment] getAccount retry ${attempt}/6 after ${delayMs}ms:`,
+            getErrorMessage(error),
+          );
+        },
+      },
+    );
+
+    const contract = new Contract(contractId);
+
+    const subscribersScVal = xdr.ScVal.scvVec(
+      entries.map((e) => new Address(e.subscriber).toScVal()),
+    );
+
+    const tx = new TransactionBuilder(account, {
+      fee: BASE_FEE,
+      networkPassphrase,
+    })
+      .addOperation(
+        contract.call(
+          'batch_execute_payment',
+          new Address(merchant).toScVal(),
+          new Address(token).toScVal(),
+          subscribersScVal,
+        ),
+      )
+      .setTimeout(30)
+      .build();
+
+    // Simulate first so we can read the on-chain per-subscriber outcome
+    // (Vec<(Address, bool)>) before signing.
+    const simResult = await server.simulateTransaction(tx);
+    if (!SorobanRpc.Api.isSimulationSuccess(simResult)) {
+      const msg = simResult.error ?? 'batch_execute_payment simulation failed';
+      return entries.map((e) => ({ subscriber: e.subscriber, merchant, error: msg }));
+    }
+    const outcomes = decodeBatchOutcomes(simResult.result?.retval);
+
+    // Prepare (fills resource fees), sign with Freighter, and submit.
+    let preparedTx: ReturnType<typeof TransactionBuilder.fromXDR>;
+    try {
+      preparedTx = await withBackoff(
+        () => server.prepareTransaction(tx),
+        {
+          maxRetries: 3,
+          baseDelayMs: 500,
+          maxDelayMs: 15_000,
+          jitterFactor: 0.25,
+          isRetryable,
+          onRetry: (attempt, error, delayMs) => {
+            console.warn(
+              `[batch_execute_payment] prepareTransaction retry ${attempt}/4 after ${delayMs}ms:`,
+              getErrorMessage(error),
+            );
+          },
+        },
+      );
+    } catch (err: unknown) {
+      const msg = getErrorMessage(err);
+      return entries.map((e) => ({
+        subscriber: e.subscriber,
+        merchant,
+        error: `Transaction preparation failed: ${msg}`,
+      }));
+    }
+
+    const signedXdr = await signTx(preparedTx.toXDR(), networkPassphrase);
+    const parsedTx = TransactionBuilder.fromXDR(signedXdr, networkPassphrase);
+
+    let sendResult: SorobanRpc.Api.SendTransactionResponse;
+    try {
+      sendResult = await withBackoff(
+        () => server.sendTransaction(parsedTx),
+        {
+          maxRetries: 3,
+          baseDelayMs: 500,
+          maxDelayMs: 15_000,
+          jitterFactor: 0.25,
+          isRetryable,
+          onRetry: (attempt, error, delayMs) => {
+            console.warn(
+              `[batch_execute_payment] sendTransaction retry ${attempt}/4 after ${delayMs}ms:`,
+              getErrorMessage(error),
+            );
+          },
+        },
+      );
+    } catch (err: unknown) {
+      const msg = getErrorMessage(err);
+      return entries.map((e) => ({
+        subscriber: e.subscriber,
+        merchant,
+        error: `Transaction submission failed: ${msg}`,
+      }));
+    }
+
+    if (sendResult.status === 'ERROR') {
+      const msg = `Transaction submission failed: ${sendResult.errorResult?.toXDR('base64') ?? 'unknown error'}`;
+      return entries.map((e) => ({ subscriber: e.subscriber, merchant, error: msg }));
+    }
+
+    const txHash = await pollForConfirmation(server, sendResult.hash);
+
+    // 3. Map the on-chain booleans onto the input entries (contract preserves
+    //    input order, but we fall back to matching by address defensively).
+    const outcomeBySubscriber = new Map(
+      outcomes.map((o) => [o.subscriber, o.success]),
+    );
+
+    return entries.map((e) => {
+      const success = outcomeBySubscriber.get(e.subscriber) ?? false;
+      return success
+        ? { subscriber: e.subscriber, merchant, txHash }
+        : {
+            subscriber: e.subscriber,
+            merchant,
+            error:
+              'Skipped on-chain: subscription not due, not found, or insufficient allowance/balance.',
+          };
+    });
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    return entries.map((e) => ({ subscriber: e.subscriber, merchant, error: message }));
+  }
+}
+
+/**
+ * Decode the return value of `batch_execute_payment` (`Vec<(Address, bool)>`)
+ * into an ordered list of per-subscriber outcomes.
+ */
+function decodeBatchOutcomes(
+  retval: xdr.ScVal | undefined,
+): Array<{ subscriber: string; success: boolean }> {
+  if (!retval) return [];
+  try {
+    const native = scValToNative(retval);
+    if (!Array.isArray(native)) return [];
+    return native
+      .map((pair) => {
+        const cells = Array.isArray(pair) ? pair : [];
+        return {
+          subscriber: cells.length > 0 ? String(cells[0]) : '',
+          success: cells.length > 1 ? Boolean(cells[1]) : false,
+        };
+      })
+      .filter((o) => o.subscriber !== '');
+  } catch {
+    return [];
+  }
+}
+
+// ── update_subscription builder (Issue #768) ──────────────────────────────────
+
+/** Parameters for updating an existing subscription's amount and/or interval */
+export interface UpdateSubscriptionParams {
   /** Subscriber Stellar G-address (must match the connected wallet) */
   subscriber: string;
   /** Merchant Stellar G-address */
   merchant: string;
-  /** Token contract C-address */
-  token: string;
-  /**
-   * Optional unix timestamp (seconds) at which `execute_payment` should
-   * automatically clear the pause. Omit to require an explicit
-   * `resume_subscription` call to reactivate.
-   */
-  resumeAt?: number;
+  /** Replacement payment amount, in the token's smallest unit. Must be > 0. */
+  newAmount: number;
+  /** Replacement interval in seconds. Must be in [86400, 31536000]. */
+  newInterval: number;
 }
 
-/** Parameters for resuming a paused subscription */
-export interface ResumeSubscriptionParams {
-  /** Subscriber Stellar G-address (must match the connected wallet) */
-  subscriber: string;
-  /** Merchant Stellar G-address */
-  merchant: string;
-  /** Token contract C-address */
-  token: string;
-}
-
-/** Result of a successful pause_subscription transaction */
-export interface PauseSubscriptionResult {
-  txHash: string;
-}
-
-/** Result of a successful resume_subscription transaction */
-export interface ResumeSubscriptionResult {
+/** Result of a successful update_subscription transaction */
+export interface UpdateSubscriptionResult {
   txHash: string;
 }
 
 /**
- * Build, sign, and submit a `pause_subscription` transaction.
+ * Build, sign, and submit an `update_subscription` transaction.
  *
- * The connected subscriber wallet must authorize this call. While paused,
- * `execute_payment` rejects collection attempts on-chain — no funds move
- * while a subscription is paused.
+ * Unlike cancel + re-subscribe, the contract preserves the subscription's
+ * current `next_payment` — the subscriber's billing cycle is not disrupted
+ * by an amount/interval change.
  *
- * @param params            Subscriber, merchant, token, and optional auto-resume time
+ * @param params            Subscriber, merchant, and the replacement amount/interval
  * @param contractId        Deployed SorobanPay contract address
  * @param publicKey         Connected subscriber's public key (from Freighter)
  * @param networkPassphrase Stellar network passphrase
@@ -715,33 +935,36 @@ export interface ResumeSubscriptionResult {
  * @returns                 Transaction hash of the confirmed transaction
  * @throws                  On validation failure, signing rejection, or RPC errors
  */
-export async function buildAndSubmitPauseSubscription(
-  params: PauseSubscriptionParams,
+export async function buildAndSubmitUpdateSubscription(
+  params: UpdateSubscriptionParams,
   contractId: string,
   publicKey: string,
   networkPassphrase: string,
   rpcUrl: string,
-): Promise<PauseSubscriptionResult> {
+): Promise<UpdateSubscriptionResult> {
+  // Validate before any network calls — same rules as subscribe().
   if (!isValidGAddress(params.subscriber)) {
     throw new Error(`Invalid subscriber address: ${params.subscriber}`);
   }
   if (!isValidGAddress(params.merchant)) {
     throw new Error(`Invalid merchant address: ${params.merchant}`);
   }
-  if (!isValidCAddress(params.token)) {
-    throw new Error(`Invalid token contract address: ${params.token}`);
+  if (!Number.isInteger(params.newAmount) || params.newAmount <= 0) {
+    throw new Error('Amount must be a positive whole number');
+  }
+  if (
+    !Number.isInteger(params.newInterval) ||
+    params.newInterval < 86_400 ||
+    params.newInterval > 31_536_000
+  ) {
+    throw new Error(
+      'Interval must be a whole number of seconds between 86,400 (1 day) and 31,536,000 (365 days)',
+    );
   }
 
   const server = new SorobanRpc.Server(rpcUrl, { allowHttp: false });
   const account = await server.getAccount(publicKey);
   const contract = new Contract(contractId);
-
-  // Contract signature is `Option<u64>` — `Some(ts)` encodes as a u64 ScVal,
-  // `None` as ScVal::Void (there is no separate "option" wire type).
-  const resumeAtScVal =
-    params.resumeAt != null
-      ? nativeToScVal(BigInt(params.resumeAt), { type: 'u64' })
-      : xdr.ScVal.scvVoid();
 
   const tx = new TransactionBuilder(account, {
     fee: BASE_FEE,
@@ -749,11 +972,11 @@ export async function buildAndSubmitPauseSubscription(
   })
     .addOperation(
       contract.call(
-        'pause_subscription',
+        'update_subscription',
         new Address(params.subscriber).toScVal(),
         new Address(params.merchant).toScVal(),
-        new Address(params.token).toScVal(),
-        resumeAtScVal,
+        nativeToScVal(BigInt(params.newAmount), { type: 'i128' }),
+        nativeToScVal(BigInt(params.newInterval), { type: 'u64' }),
       ),
     )
     .setTimeout(30)
@@ -781,36 +1004,68 @@ export async function buildAndSubmitPauseSubscription(
   return { txHash };
 }
 
+// ── update_subscription builder (Issue #794) ────────────────────────────────
+
+/** Parameters for updating an active subscription's amount and/or interval */
+export interface UpdateSubscriptionParams {
+  /** Subscriber Stellar G-address (must match the connected wallet) */
+  subscriber: string;
+  /** Merchant Stellar G-address */
+  merchant: string;
+  /** New payment amount as a positive integer (in token's smallest unit) */
+  newAmount: number;
+  /** New payment interval in seconds [86400, 31536000] */
+  newInterval: number;
+}
+
+/** Result of a successful update_subscription transaction */
+export interface UpdateSubscriptionResult {
+  /** Transaction hash on Stellar network */
+  txHash: string;
+}
+
 /**
- * Build, sign, and submit a `resume_subscription` transaction.
+ * Build, sign, and submit an `update_subscription` transaction.
  *
- * The connected subscriber wallet must authorize this call. Reactivates a
- * paused subscription immediately — ahead of any `paused_until` timestamp —
- * and the contract recomputes `next_payment` so no charge is due right away.
+ * The connected subscriber wallet must authorize this call. The contract
+ * replaces the stored amount/interval in-place without touching `next_payment`,
+ * so the subscriber's current billing cycle continues uninterrupted.
  *
- * @param params            Subscriber, merchant, and token addresses
+ * Validation mirrors the contract error conditions:
+ *   - `newAmount > 0` (else AmountMustBePositive)
+ *   - `86 400 <= newInterval <= 31 536 000` (else IntervalTooShort/Long)
+ *
+ * @param params            Subscriber, merchant, new amount, and new interval
  * @param contractId        Deployed SorobanPay contract address
- * @param publicKey         Connected subscriber's public key (from Freighter)
+ * @param publicKey         Connected wallet's public key (from Freighter) —
+ *                          must equal `subscriber` or `oldMerchant`
  * @param networkPassphrase Stellar network passphrase
  * @param rpcUrl            Soroban RPC endpoint URL
  * @returns                 Transaction hash of the confirmed transaction
  * @throws                  On validation failure, signing rejection, or RPC errors
  */
-export async function buildAndSubmitResumeSubscription(
-  params: ResumeSubscriptionParams,
+export async function buildAndSubmitUpdateSubscription(
+  params: UpdateSubscriptionParams,
   contractId: string,
   publicKey: string,
   networkPassphrase: string,
   rpcUrl: string,
-): Promise<ResumeSubscriptionResult> {
+): Promise<UpdateSubscriptionResult> {
   if (!isValidGAddress(params.subscriber)) {
     throw new Error(`Invalid subscriber address: ${params.subscriber}`);
   }
   if (!isValidGAddress(params.merchant)) {
     throw new Error(`Invalid merchant address: ${params.merchant}`);
   }
-  if (!isValidCAddress(params.token)) {
-    throw new Error(`Invalid token contract address: ${params.token}`);
+  if (!Number.isInteger(params.newAmount) || params.newAmount <= 0) {
+    throw new Error('Amount must be a positive integer.');
+  }
+  if (
+    !Number.isInteger(params.newInterval) ||
+    params.newInterval < 86_400 ||
+    params.newInterval > 31_536_000
+  ) {
+    throw new Error('Interval must be between 86400 and 31536000 seconds.');
   }
 
   const server = new SorobanRpc.Server(rpcUrl, { allowHttp: false });
@@ -823,10 +1078,114 @@ export async function buildAndSubmitResumeSubscription(
   })
     .addOperation(
       contract.call(
-        'resume_subscription',
+        'update_subscription',
         new Address(params.subscriber).toScVal(),
         new Address(params.merchant).toScVal(),
-        new Address(params.token).toScVal(),
+        nativeToScVal(BigInt(params.newAmount), { type: 'i128' }),
+        nativeToScVal(BigInt(params.newInterval), { type: 'u64' }),
+      ),
+    )
+    .setTimeout(30)
+    .build();
+
+  let preparedTx: ReturnType<typeof TransactionBuilder.fromXDR>;
+  try {
+    preparedTx = await server.prepareTransaction(tx);
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    throw new Error(`Transaction preparation failed: ${msg}`);
+  }
+
+  const signedXdr = await signTx(preparedTx.toXDR(), networkPassphrase);
+  const parsedTx = TransactionBuilder.fromXDR(signedXdr, networkPassphrase);
+  const sendResult = await server.sendTransaction(parsedTx);
+
+  if (sendResult.status === 'ERROR') {
+    throw new Error(
+      `Transaction submission failed: ${sendResult.errorResult?.toXDR('base64') ?? 'unknown error'}`,
+    );
+  }
+
+  const txHash = await pollForConfirmation(server, sendResult.hash);
+  return { txHash };
+}
+
+// ── transfer_subscription builder (Issue #796) ──────────────────────────────
+
+/** Parameters for migrating an active subscription to a new merchant wallet */
+export interface TransferSubscriptionParams {
+  /** Subscriber Stellar G-address (must match the connected wallet) */
+  subscriber: string;
+  /** Current merchant Stellar G-address */
+  oldMerchant: string;
+  /** Destination merchant Stellar G-address */
+  newMerchant: string;
+}
+
+/** Result of a successful transfer_subscription transaction */
+export interface TransferSubscriptionResult {
+  /** Transaction hash on Stellar network */
+  txHash: string;
+}
+
+/**
+ * Build, sign, and submit a `transfer_subscription` transaction.
+ *
+ * Migrates an active subscription from one merchant wallet to another while
+ * preserving state (token, amount, interval, `next_payment`) — no billing
+ * cycle reset occurs.
+ *
+ * Validation mirrors the contract error conditions:
+ *   - `oldMerchant != newMerchant` (else SameMerchant)
+ *   - `subscriber != newMerchant` (else SelfSubscription)
+ *
+ * @param params            Subscriber, current merchant, and new merchant addresses
+ * @param contractId        Deployed SorobanPay contract address
+ * @param publicKey         Connected subscriber's public key (from Freighter)
+ * @param networkPassphrase Stellar network passphrase
+ * @param rpcUrl            Soroban RPC endpoint URL
+ * @returns                 Transaction hash of the confirmed transaction
+ * @throws                  On validation failure, signing rejection, or RPC errors
+ */
+export async function buildAndSubmitTransferSubscription(
+  params: TransferSubscriptionParams,
+  contractId: string,
+  publicKey: string,
+  networkPassphrase: string,
+  rpcUrl: string,
+): Promise<TransferSubscriptionResult> {
+  if (!isValidGAddress(params.subscriber)) {
+    throw new Error(`Invalid subscriber address: ${params.subscriber}`);
+  }
+  if (!isValidGAddress(params.oldMerchant)) {
+    throw new Error(`Invalid current merchant address: ${params.oldMerchant}`);
+  }
+  if (!isValidGAddress(params.newMerchant)) {
+    throw new Error(`Invalid new merchant address: ${params.newMerchant}`);
+  }
+  if (params.oldMerchant === params.newMerchant) {
+    throw new Error(
+      'Transfer failed: the new merchant must be different from the current merchant.',
+    );
+  }
+  if (params.subscriber === params.newMerchant) {
+    throw new Error('Transfer failed: a subscriber cannot become their own merchant.');
+  }
+
+  const server = new SorobanRpc.Server(rpcUrl, { allowHttp: false });
+  const account = await server.getAccount(publicKey);
+  const contract = new Contract(contractId);
+
+  const tx = new TransactionBuilder(account, {
+    fee: BASE_FEE,
+    networkPassphrase,
+  })
+    .addOperation(
+      contract.call(
+        'transfer_subscription',
+        new Address(params.subscriber).toScVal(),
+        new Address(params.oldMerchant).toScVal(),
+        new Address(params.newMerchant).toScVal(),
       ),
     )
     .setTimeout(30)
