@@ -11,51 +11,69 @@ import {
 
 const router = Router();
 
-// ─── BE-52: GET /v1/subscriptions?merchant={address} ─────────────────────────
-// List all active subscriptions for a merchant via query param.
-// This mirrors /merchant/:merchantAddress but follows the ?merchant= convention
-// specified in the BE-52 OpenAPI spec.
+// ─── Issue #825: GET /api/v1/subscriptions ────────────────────────────────────
+// List Subscription records for the authenticated merchant.
+//
+// This is backed directly by the `Subscription` table (authoritative status,
+// updated by the indexer) rather than reconstructed from raw Event history —
+// the merchant dashboard previously had to do that itself, which was slow
+// and left fields like status/amount stale or incomplete.
+//
+// Auth: the merchant address is taken from the verified JWT (res.locals.merchantAddress,
+// set by the `requireMerchant` middleware mounted ahead of this router in index.ts) —
+// never from a client-supplied query param, so one merchant cannot read another's data
+// by passing a different address.
+//
+// Query params:
+//   page   {number} — 1-indexed page number, default 1
+//   limit  {number} — page size, default 20, capped at 100
+//   status {string} — optional filter: ACTIVE | PAUSED | OVERDUE | CANCELLED
+//
+// Response 200: { data: Subscription[], total: number, page: number }
+// Response 400: invalid status value
+// Response 401: no authenticated merchant on the request
+const SUBSCRIPTION_STATUSES = ['ACTIVE', 'PAUSED', 'OVERDUE', 'CANCELLED'];
+
 router.get('/', async (req: Request, res: Response) => {
-  const merchantAddress = req.query.merchant as string | undefined;
+  // Defensive check: this router is also mounted at the unauthenticated
+  // legacy alias /api/subscriptions (see index.ts), which does not apply
+  // requireMerchant. Refuse to serve data rather than rely solely on that
+  // mount ordering for authorization.
+  const merchantAddress = res.locals.merchantAddress as string | undefined;
   if (!merchantAddress) {
-    return res.status(400).json({ error: 'merchant query parameter is required' });
+    return res.status(401).json({ error: 'Missing or invalid Authorization header' });
   }
 
-  try {
-    const subscribeEvents = await prisma.event.findMany({
-      where: { merchant: merchantAddress, type: 'subscribe' },
-      orderBy: { ledgerTimestamp: 'desc' },
+  const statusParam = req.query.status as string | undefined;
+  if (statusParam && !SUBSCRIPTION_STATUSES.includes(statusParam)) {
+    return res.status(400).json({
+      error: `Invalid status filter. Must be one of: ${SUBSCRIPTION_STATUSES.join(', ')}`,
     });
+  }
 
-    const seen = new Map<string, (typeof subscribeEvents)[0]>();
-    for (const event of subscribeEvents) {
-      const key = `${event.subscriber}:${event.token}`;
-      if (!seen.has(key)) seen.set(key, event);
-    }
+  const page = Math.max(parseInt((req.query.page as string) ?? '1', 10) || 1, 1);
+  const limit = Math.min(
+    Math.max(parseInt((req.query.limit as string) ?? '20', 10) || 20, 1),
+    100,
+  );
 
-    const subscriptions = await Promise.all(
-      Array.from(seen.values()).map(async (sub) => {
-        const [lastExecuted, status] = await Promise.all([
-          prisma.event.findFirst({
-            where: { merchant: merchantAddress, subscriber: sub.subscriber, token: sub.token, type: 'executed' },
-            orderBy: { ledgerTimestamp: 'desc' },
-          }),
-          getSubscriptionStatus(sub.subscriber, merchantAddress),
-        ]);
-        return {
-          subscriber: sub.subscriber,
-          merchant: sub.merchant,
-          token: sub.token,
-          amount: sub.amount,
-          status: status ?? 'ACTIVE',
-          interval: null,
-          nextPaymentDue: null,
-          lastPaymentAt: lastExecuted?.ledgerTimestamp?.toString() ?? null,
-        };
+  try {
+    const where = {
+      merchant: merchantAddress,
+      ...(statusParam ? { status: statusParam } : {}),
+    };
+
+    const [data, total] = await prisma.$transaction([
+      prisma.subscription.findMany({
+        where,
+        orderBy: { createdAt: 'desc' },
+        skip: (page - 1) * limit,
+        take: limit,
       }),
-    );
+      prisma.subscription.count({ where }),
+    ]);
 
-    return res.json(subscriptions);
+    return res.json({ data, total, page });
   } catch {
     return res.status(500).json({ error: 'Failed to fetch subscriptions' });
   }

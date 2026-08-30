@@ -17,7 +17,7 @@ use crate::{
 
 // ─── Test helpers ─────────────────────────────────────────────────────────────
 
-struct T {
+struct T<'a> {
     env:         Env,
     subscriber:  Address,
     merchant:    Address,
@@ -25,7 +25,7 @@ struct T {
     contract_id: Address,
 }
 
-impl T {
+impl T<'_> {
     fn new() -> Self {
         let env = Env::default();
         env.mock_all_auths_allowing_non_root_auth();
@@ -66,6 +66,7 @@ impl T {
         token::Client::new(&self.env, &self.token).balance(&self.merchant)
     }
 
+    /// Returns true if the storage key exists (regardless of status).
     fn has_sub(&self) -> bool {
         self.env
             .storage()
@@ -139,6 +140,7 @@ fn test_full_lifecycle() {
     assert_eq!(d.amount,       amt);
     assert_eq!(d.interval,     ivl);
     assert_eq!(d.next_payment, ts0 + ivl);
+    assert_eq!(d.status,       SubscriptionStatus::Active);
 
     // (b) advance clock
     t.advance(ivl + 1);
@@ -516,6 +518,7 @@ fn test_subscribe_overwrites_existing() {
     assert_eq!(d.amount,       999);
     assert_eq!(d.interval,     172_800);
     assert_eq!(d.next_payment, ts2 + 172_800);
+    assert_eq!(d.status,       SubscriptionStatus::Active);
 }
 
 #[test]
@@ -539,22 +542,24 @@ fn test_subscribe_interval_too_short() {
     assert_eq!(d1.amount,       amt1);
     assert_eq!(d1.interval,     ivl1);
     assert_eq!(d1.next_payment, ts1 + ivl1);
+    assert_eq!(d1.status,       SubscriptionStatus::Active);
 
     // (b) cancel
     t.client().cancel(&t.subscriber, &t.merchant);
     assert!(!t.has_sub());
 
-    // (c) re-subscribe with different terms
+    // (c) re-subscribe with different terms (overwrites cancelled record)
     let amt2  = 200_000_i128;
     let ivl2  = 172_800_u64;
     let ts2   = t.env.ledger().timestamp();
     t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &amt2, &ivl2, &false);
 
-    // (d) verify new subscription replaces old one
+    // (d) verify new subscription replaces old one with Active status
     let d2 = t.get_sub();
     assert_eq!(d2.amount,       amt2);
     assert_eq!(d2.interval,     ivl2);
     assert_eq!(d2.next_payment, ts2 + ivl2);
+    assert_eq!(d2.status,       SubscriptionStatus::Active);
     assert_ne!(d1.next_payment, d2.next_payment);
 }
 
@@ -910,6 +915,45 @@ fn test_executed_event_symbol_order_is_stable() {
     let (_, topics, _) = ours.get(1).unwrap();
     let sym: soroban_sdk::Symbol = topics.get(0).unwrap().into_val(&t.env);
     assert_eq!(sym, soroban_sdk::Symbol::new(&t.env, "executed"));
+}
+
+/// Verify the executed event carries the correct amount and next_payment timestamp.
+#[test]
+fn test_execute_payment_event_data() {
+    let t   = T::new();
+    let amt = 500_i128;
+    let ivl = 86_400_u64;
+    let ts0 = t.env.ledger().timestamp();
+
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &amt, &ivl);
+    t.advance(ivl + 1);
+    let now = t.env.ledger().timestamp();
+    t.client.execute_payment(&t.subscriber, &t.merchant);
+
+    // Filter to events emitted by our contract (not the SAC token contract).
+    let all_events = t.env.events().all();
+    // Find subscribe (first) and executed (second) events from our contract.
+    let mut sub_event_idx:  Option<u32> = None;
+    let mut exec_event_idx: Option<u32> = None;
+    for i in 0..all_events.len() {
+        let ev = all_events.get(i).unwrap();
+        if ev.0 == t.contract_id {
+            if sub_event_idx.is_none() {
+                sub_event_idx = Some(i);
+            } else {
+                exec_event_idx = Some(i);
+            }
+        }
+    }
+    assert!(sub_event_idx.is_some(),  "subscribe event missing");
+    assert!(exec_event_idx.is_some(), "executed event missing");
+
+    let exec_ev = all_events.get(exec_event_idx.unwrap()).unwrap();
+    let event_data: ExecutedEventData = exec_ev.2.clone().into_val(&t.env);
+    assert_eq!(event_data.amount,       amt,       "event amount must match charged amount");
+    assert_eq!(event_data.next_payment, now + ivl, "event next_payment must be advanced by interval");
+    // Sanity: next_payment is strictly after the subscribe timestamp.
+    assert!(event_data.next_payment > ts0 + ivl);
 }
 
 // ─── Requirement 13.11 — No events on failure ────────────────────────────────
@@ -1406,8 +1450,7 @@ proptest! {
         prop_assert!(!t.has_sub());
     }
 
-    /// Property 7: Cancel terminates subscription permanently
-    /// Validates: Req 3.3, 3.5, 8.5
+    /// Property 7: Cancel terminates subscription permanently (status = Cancelled, no payments)
     #[test]
     fn prop_cancel_prevents_future_payments(
         amount   in 1_i128..=100_000_i128,
@@ -1423,7 +1466,6 @@ proptest! {
     }
 
     /// Property 8: Balance invariant — exact transfer, zero contract balance
-    /// Validates: Req 4.1, 4.2, 4.3
     #[test]
     fn prop_balance_invariant(
         amount   in 1_i128..=100_000_i128,

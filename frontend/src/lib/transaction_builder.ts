@@ -21,6 +21,7 @@ import {
   BASE_FEE,
   nativeToScVal,
   Address,
+  xdr,
 } from '@stellar/stellar-sdk';
 import { SorobanRpc } from '@stellar/stellar-sdk';
 import { signTx } from './wallet_manager';
@@ -101,7 +102,7 @@ export interface BatchExecutePaymentResult {
   failureCount: number;
 }
 
-// ΓöÇΓöÇ Constants ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+// ── Constants ─────────────────────────────────────────────────────────────────
 
 /** @deprecated Use useTransactionPoller (exponential backoff) instead */
 const POLL_INTERVAL_MS = 1_000;
@@ -209,7 +210,7 @@ export async function buildSignAndSubmitSubscribe(
     throw new Error(`Transaction preparation failed after retries: ${msg}`);
   }
 
-  // 4. Sign with Freighter (user action, no retry ΓÇö if rejected, fail immediately)
+  // 4. Sign with Freighter (user action, no retry — if rejected, fail immediately)
   const signedXdr = await signTx(preparedTx.toXDR(), networkPassphrase);
 
   const parsedTx = TransactionBuilder.fromXDR(signedXdr, networkPassphrase);
@@ -344,6 +345,20 @@ function sleep(ms: number): Promise<void> {
  * @returns                 Transaction hash of the confirmed transaction
  * @throws                  On validation failure, signing rejection, or persistent errors
  */
+/** Parameters for collecting a single subscriber's payment */
+export interface ExecutePaymentParams {
+  /** Subscriber Stellar G-address being charged */
+  subscriber: string;
+  /** Merchant Stellar G-address (must match the connected wallet) */
+  merchant: string;
+}
+
+/** Result of a successful execute_payment transaction */
+export interface ExecutePaymentResult {
+  /** Transaction hash on Stellar network */
+  txHash: string;
+}
+
 export async function buildAndSubmitExecutePayment(
   params: ExecutePaymentParams,
   contractId: string,
@@ -419,7 +434,7 @@ export async function buildAndSubmitExecutePayment(
     throw new Error(`Transaction preparation failed after retries: ${msg}`);
   }
 
-  // Sign with Freighter (user action, no retry ΓÇö if rejected, fail immediately)
+  // Sign with Freighter (user action, no retry — if rejected, fail immediately)
   const signedXdr = await signTx(preparedTx.toXDR(), networkPassphrase);
 
   const parsedTx = TransactionBuilder.fromXDR(signedXdr, networkPassphrase);
@@ -479,6 +494,26 @@ export async function buildAndSubmitExecutePayment(
  * @param rpcUrl            Soroban RPC endpoint URL
  * @returns                 Per-entry results with success/failure breakdown
  */
+/** A single (subscriber, merchant) pair to collect a payment from */
+export interface BatchPaymentEntry {
+  subscriber: string;
+  merchant: string;
+}
+
+/** Per-entry outcome plus aggregate counts for a batch execute_payment run */
+export interface BatchExecutePaymentResult {
+  results: Array<{
+    subscriber: string;
+    merchant: string;
+    /** Present when this entry's transaction succeeded */
+    txHash?: string;
+    /** Present when this entry failed (validation, signing, or on-chain error) */
+    error?: string;
+  }>;
+  successCount: number;
+  failureCount: number;
+}
+
 export async function buildAndSubmitBatchExecutePayment(
   entries: BatchPaymentEntry[],
   contractId: string,
@@ -513,4 +548,196 @@ export async function buildAndSubmitBatchExecutePayment(
   }
 
   return { results, successCount, failureCount };
+}
+
+// ── pause_subscription / resume_subscription builders (Issue #795) ────────────
+
+/** Parameters for pausing an active subscription */
+export interface PauseSubscriptionParams {
+  /** Subscriber Stellar G-address (must match the connected wallet) */
+  subscriber: string;
+  /** Merchant Stellar G-address */
+  merchant: string;
+  /** Token contract C-address */
+  token: string;
+  /**
+   * Optional unix timestamp (seconds) at which `execute_payment` should
+   * automatically clear the pause. Omit to require an explicit
+   * `resume_subscription` call to reactivate.
+   */
+  resumeAt?: number;
+}
+
+/** Parameters for resuming a paused subscription */
+export interface ResumeSubscriptionParams {
+  /** Subscriber Stellar G-address (must match the connected wallet) */
+  subscriber: string;
+  /** Merchant Stellar G-address */
+  merchant: string;
+  /** Token contract C-address */
+  token: string;
+}
+
+/** Result of a successful pause_subscription transaction */
+export interface PauseSubscriptionResult {
+  txHash: string;
+}
+
+/** Result of a successful resume_subscription transaction */
+export interface ResumeSubscriptionResult {
+  txHash: string;
+}
+
+/**
+ * Build, sign, and submit a `pause_subscription` transaction.
+ *
+ * The connected subscriber wallet must authorize this call. While paused,
+ * `execute_payment` rejects collection attempts on-chain — no funds move
+ * while a subscription is paused.
+ *
+ * @param params            Subscriber, merchant, token, and optional auto-resume time
+ * @param contractId        Deployed SorobanPay contract address
+ * @param publicKey         Connected subscriber's public key (from Freighter)
+ * @param networkPassphrase Stellar network passphrase
+ * @param rpcUrl            Soroban RPC endpoint URL
+ * @returns                 Transaction hash of the confirmed transaction
+ * @throws                  On validation failure, signing rejection, or RPC errors
+ */
+export async function buildAndSubmitPauseSubscription(
+  params: PauseSubscriptionParams,
+  contractId: string,
+  publicKey: string,
+  networkPassphrase: string,
+  rpcUrl: string,
+): Promise<PauseSubscriptionResult> {
+  if (!isValidGAddress(params.subscriber)) {
+    throw new Error(`Invalid subscriber address: ${params.subscriber}`);
+  }
+  if (!isValidGAddress(params.merchant)) {
+    throw new Error(`Invalid merchant address: ${params.merchant}`);
+  }
+  if (!isValidCAddress(params.token)) {
+    throw new Error(`Invalid token contract address: ${params.token}`);
+  }
+
+  const server = new SorobanRpc.Server(rpcUrl, { allowHttp: false });
+  const account = await server.getAccount(publicKey);
+  const contract = new Contract(contractId);
+
+  // Contract signature is `Option<u64>` — `Some(ts)` encodes as a u64 ScVal,
+  // `None` as ScVal::Void (there is no separate "option" wire type).
+  const resumeAtScVal =
+    params.resumeAt != null
+      ? nativeToScVal(BigInt(params.resumeAt), { type: 'u64' })
+      : xdr.ScVal.scvVoid();
+
+  const tx = new TransactionBuilder(account, {
+    fee: BASE_FEE,
+    networkPassphrase,
+  })
+    .addOperation(
+      contract.call(
+        'pause_subscription',
+        new Address(params.subscriber).toScVal(),
+        new Address(params.merchant).toScVal(),
+        new Address(params.token).toScVal(),
+        resumeAtScVal,
+      ),
+    )
+    .setTimeout(30)
+    .build();
+
+  let preparedTx: ReturnType<typeof TransactionBuilder.fromXDR>;
+  try {
+    preparedTx = await server.prepareTransaction(tx);
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    throw new Error(`Transaction preparation failed: ${msg}`);
+  }
+
+  const signedXdr = await signTx(preparedTx.toXDR(), networkPassphrase);
+  const parsedTx = TransactionBuilder.fromXDR(signedXdr, networkPassphrase);
+  const sendResult = await server.sendTransaction(parsedTx);
+
+  if (sendResult.status === 'ERROR') {
+    throw new Error(
+      `Transaction submission failed: ${sendResult.errorResult?.toXDR('base64') ?? 'unknown error'}`,
+    );
+  }
+
+  const txHash = await pollForConfirmation(server, sendResult.hash);
+  return { txHash };
+}
+
+/**
+ * Build, sign, and submit a `resume_subscription` transaction.
+ *
+ * The connected subscriber wallet must authorize this call. Reactivates a
+ * paused subscription immediately — ahead of any `paused_until` timestamp —
+ * and the contract recomputes `next_payment` so no charge is due right away.
+ *
+ * @param params            Subscriber, merchant, and token addresses
+ * @param contractId        Deployed SorobanPay contract address
+ * @param publicKey         Connected subscriber's public key (from Freighter)
+ * @param networkPassphrase Stellar network passphrase
+ * @param rpcUrl            Soroban RPC endpoint URL
+ * @returns                 Transaction hash of the confirmed transaction
+ * @throws                  On validation failure, signing rejection, or RPC errors
+ */
+export async function buildAndSubmitResumeSubscription(
+  params: ResumeSubscriptionParams,
+  contractId: string,
+  publicKey: string,
+  networkPassphrase: string,
+  rpcUrl: string,
+): Promise<ResumeSubscriptionResult> {
+  if (!isValidGAddress(params.subscriber)) {
+    throw new Error(`Invalid subscriber address: ${params.subscriber}`);
+  }
+  if (!isValidGAddress(params.merchant)) {
+    throw new Error(`Invalid merchant address: ${params.merchant}`);
+  }
+  if (!isValidCAddress(params.token)) {
+    throw new Error(`Invalid token contract address: ${params.token}`);
+  }
+
+  const server = new SorobanRpc.Server(rpcUrl, { allowHttp: false });
+  const account = await server.getAccount(publicKey);
+  const contract = new Contract(contractId);
+
+  const tx = new TransactionBuilder(account, {
+    fee: BASE_FEE,
+    networkPassphrase,
+  })
+    .addOperation(
+      contract.call(
+        'resume_subscription',
+        new Address(params.subscriber).toScVal(),
+        new Address(params.merchant).toScVal(),
+        new Address(params.token).toScVal(),
+      ),
+    )
+    .setTimeout(30)
+    .build();
+
+  let preparedTx: ReturnType<typeof TransactionBuilder.fromXDR>;
+  try {
+    preparedTx = await server.prepareTransaction(tx);
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    throw new Error(`Transaction preparation failed: ${msg}`);
+  }
+
+  const signedXdr = await signTx(preparedTx.toXDR(), networkPassphrase);
+  const parsedTx = TransactionBuilder.fromXDR(signedXdr, networkPassphrase);
+  const sendResult = await server.sendTransaction(parsedTx);
+
+  if (sendResult.status === 'ERROR') {
+    throw new Error(
+      `Transaction submission failed: ${sendResult.errorResult?.toXDR('base64') ?? 'unknown error'}`,
+    );
+  }
+
+  const txHash = await pollForConfirmation(server, sendResult.hash);
+  return { txHash };
 }

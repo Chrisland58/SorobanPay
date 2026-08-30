@@ -7,7 +7,8 @@ pub const CONTRACT_VERSION: &str = "1.0.0";
 pub const CONTRACT_NAME: &str = "SorobanPay-SubscriptionProtocol";
 
 /// Current on-chain schema version.  Increment when `SubscriptionData` changes.
-pub const CURRENT_SCHEMA_VERSION: u32 = 1;
+/// Bumped to 2 for Issue #50: added `last_payment` (Option<u64>) field.
+pub const CURRENT_SCHEMA_VERSION: u32 = 2;
 
 // ==================== Key helpers ====================
 
@@ -50,6 +51,12 @@ pub enum DataKey {
     /// Enables enumeration ("all subscriptions for merchant X") on-chain.
     MerchantIndex(Address),
 
+    /// Merchant subscriber roster: maps merchant → Vec<Address> of all
+    /// subscriber addresses for that merchant.  Maintained in parallel with
+    /// `MerchantIndex` and enables `get_merchant_subscriptions` to return
+    /// full `SubscriptionData` without reversing compact sha-256 keys.
+    MerchantSubscribers(Address),
+
     /// On-chain schema version; updated by `migrate(admin)`.
     SchemaVersion,
 
@@ -65,16 +72,9 @@ pub enum DataKey {
 ///
 /// ## Schema versioning
 ///
-/// The `ver` field starts at 1 for all new entries written by this version of the
-/// contract. Future migrations can inspect `ver` to decide whether to transform an
-/// entry before using it.
-///
-/// ## Backward compatibility
-///
-/// `grace_period`, `paused_until`, and `overdue_since` are `Option` fields so that
-/// old entries written without these fields (ver 0 / missing) deserialise correctly
-/// as `None`. Use the provided getter methods instead of direct field access to
-/// ensure default values are applied consistently.
+/// `last_payment` was added in schema v2 (Issue #50).  It is `Option<u64>` so that
+/// old entries written by schema v1 (which lack this field) deserialise correctly as
+/// `None`.  `None` means no payment has been collected yet for this subscription.
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct SubscriptionData {
@@ -91,6 +91,10 @@ pub struct SubscriptionData {
     pub grace_period: u64,
     pub overdue_since: Option<u64>,
     pub payment_nonce: u64,
+    /// Unix timestamp at which a paused subscription auto-resumes on the next
+    /// `execute_payment` call. `None` means the pause is indefinite and requires
+    /// an explicit `resume_subscription` call (issue #795).
+    pub paused_until: Option<u64>,
 }
 
 #[contracttype]
@@ -98,6 +102,19 @@ pub struct SubscriptionData {
 pub struct AdminConfig {
     pub admin: Address,
     pub max_amount: i128,
+}
+
+/// A subscription record paired with its subscriber address.
+///
+/// Returned by `get_merchant_subscriptions` so callers receive both the
+/// subscriber identity and the full subscription state in a single query.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct SubscriptionEntry {
+    /// The subscriber's Stellar account address.
+    pub subscriber: Address,
+    /// The full subscription state for this subscriber-merchant pair.
+    pub data:       SubscriptionData,
 }
 
 /// Safe upper bound for a single subscription payment amount (1 × 10¹⁸ stroops).
