@@ -1,218 +1,337 @@
 /**
- * authService.ts
+ * authService.ts — SEP-10 style Stellar challenge-response authentication.
  *
- * SEP-10 challenge / response flow backed by Redis.
+ * Flow:
+ *   1. GET /v1/auth/challenge?account=G…
+ *      Server builds an unsigned Stellar ManageData transaction whose source is
+ *      the merchant's account. The operation encapsulates a random nonce so
+ *      each challenge is unique and non-replayable.
  *
- * Why Redis instead of an in-process Map?
- * ─────────────────────────────────────────
- * When the backend runs as multiple pods (horizontal scaling or a rolling
- * deploy), each pod has its own memory. A challenge created on pod A cannot
- * be verified on pod B, causing ~50 % of auth attempts to fail.  Storing
- * challenges in Redis gives every pod a single, consistent view with
- * automatic TTL expiry — no extra cleanup jobs needed.
+ *   2. POST /v1/auth/token { transaction: "<base64-XDR>" }
+ *      Server verifies:
+ *        a. The XDR decodes to a valid Stellar transaction.
+ *        b. The transaction matches a known pending challenge.
+ *        c. The transaction carries a valid signature from the claimed account.
+ *      On success a JWT is issued with payload { address, exp }.
  *
- * Storage layout
- * ──────────────
- * Key:   auth:challenge:<publicKey>
- * Value: JSON-serialised AuthChallenge
- * TTL:   CHALLENGE_TTL_SECONDS (default 300 s / 5 min)
- *
- * Atomicity
- * ─────────
- * Verification uses a Lua script to GET + DEL in a single round-trip so a
- * challenge cannot be replayed even under concurrent requests.
+ * Reference: https://github.com/stellar/stellar-protocol/blob/master/ecosystem/sep-0010.md
  */
 
-import { randomBytes } from 'crypto';
-import { Keypair, Transaction, Networks } from '@stellar/stellar-sdk';
-import redis from '../lib/redis';
+import {
+  Keypair,
+  Transaction,
+  TransactionBuilder,
+  Operation,
+  Account,
+  BASE_FEE,
+  Networks,
+} from '@stellar/stellar-sdk';
+import { createHmac, randomBytes } from 'crypto';
 
-// ─── Constants ────────────────────────────────────────────────────────────────
+// ─── Types ───────────────────────────────────────────────────────────────────
 
-const CHALLENGE_TTL_SECONDS = 300; // 5 minutes — matches SEP-10 recommendation
-const KEY_PREFIX = 'auth:challenge:';
-
-// ─── Types ────────────────────────────────────────────────────────────────────
-
-export interface AuthChallenge {
-  /** Stellar public key (G…) of the party being authenticated. */
-  publicKey: string;
-  /** Random nonce embedded in the challenge. */
+export interface ChallengeRecord {
+  /** The merchant's Stellar public key. */
+  account: string;
+  /** Random 32-byte nonce encoded as hex. */
   nonce: string;
-  /** Unix timestamp (ms) when the challenge was issued. */
-  issuedAt: number;
+  /** Unsigned challenge transaction XDR. */
+  transactionXdr: string;
+  /** Unix timestamp (seconds) when this challenge expires. */
+  expiresAt: number;
 }
 
-export interface ChallengeResult {
-  challenge: AuthChallenge;
-  /** The nonce the client must sign to prove key ownership. */
-  nonce: string;
+export interface MerchantTokenPayload {
+  /** Stellar public key of the authenticated merchant. */
+  address: string;
+  /** Issued-at timestamp (seconds). */
+  iat: number;
+  /** Expiry timestamp (seconds). */
+  exp: number;
 }
 
-export interface VerifyResult {
-  success: boolean;
-  publicKey?: string;
-  error?: string;
+// ─── Constants ───────────────────────────────────────────────────────────────
+
+/** Challenge TTL: 5 minutes. After this the merchant must request a new one. */
+const CHALLENGE_TTL_SECONDS = 5 * 60;
+
+/** JWT TTL: 24 hours. */
+export const JWT_TTL_SECONDS = 24 * 60 * 60;
+
+/**
+ * ManageData operation key used to embed the challenge nonce.
+ * Follows the SEP-10 convention: "<home_domain> auth".
+ */
+const MANAGE_DATA_KEY = 'SorobanPay auth';
+
+// ─── In-memory challenge store ────────────────────────────────────────────────
+// In production this should move to Redis so horizontal scaling works and TTL
+// management is automatic.  For single-process deployments the Map is correct.
+
+const pendingChallenges = new Map<string, ChallengeRecord>();
+
+/**
+ * Remove any expired entries from the in-memory challenge store.
+ * Called before every lookup so stale challenges can't accumulate.
+ */
+function evictExpired(): void {
+  const now = Math.floor(Date.now() / 1000);
+  for (const [account, record] of pendingChallenges) {
+    if (record.expiresAt <= now) {
+      pendingChallenges.delete(account);
+    }
+  }
 }
 
-// ─── Helpers ─────────────────────────────────────────────────────────────────
+// ─── Challenge generation ─────────────────────────────────────────────────────
 
-function redisKey(publicKey: string): string {
-  return `${KEY_PREFIX}${publicKey}`;
+/**
+ * Build and return an unsigned Stellar challenge transaction for `account`.
+ *
+ * The transaction uses the server's account as the fee-payer source so the
+ * merchant doesn't need an on-chain sequence number.  The challenge transaction
+ * is never broadcast to the network — it only serves as a sign-this-data
+ * vehicle.
+ *
+ * @param account  Merchant's Stellar public key (G…).
+ * @param networkPassphrase  Stellar network passphrase.
+ * @returns ChallengeRecord including the unsigned XDR.
+ */
+export function generateChallenge(
+  account: string,
+  networkPassphrase: string,
+): ChallengeRecord {
+  // Validate address format — Keypair.fromPublicKey throws on invalid input
+  Keypair.fromPublicKey(account);
+
+  const nonce = randomBytes(32).toString('hex');
+  const now = Math.floor(Date.now() / 1000);
+  const expiresAt = now + CHALLENGE_TTL_SECONDS;
+
+  // Build a minimal transaction that just carries the nonce as ManageData.
+  // We use the merchant's account as source with sequence 0 so the server
+  // doesn't need to know the real sequence number, and the tx is never
+  // submitted.
+  const source = new Account(account, '0');
+  const tx = new TransactionBuilder(source, {
+    fee: BASE_FEE,
+    networkPassphrase,
+  })
+    .addOperation(
+      Operation.manageData({
+        name: MANAGE_DATA_KEY,
+        // 32-byte nonce as raw buffer per SEP-10 convention
+        value: Buffer.from(nonce, 'hex'),
+      }),
+    )
+    .setTimeout(CHALLENGE_TTL_SECONDS)
+    .build();
+
+  const transactionXdr = tx.toEnvelope().toXDR('base64');
+
+  const record: ChallengeRecord = { account, nonce, transactionXdr, expiresAt };
+
+  evictExpired();
+  // One active challenge per account — a new request supersedes the old one
+  pendingChallenges.set(account, record);
+
+  return record;
+}
+
+// ─── Signature verification ───────────────────────────────────────────────────
+
+export class AuthError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'AuthError';
+  }
 }
 
 /**
- * Atomic GET + DEL via Lua script.
- * Returns the stored value and deletes it in one round-trip, preventing
- * replay attacks even under concurrent verification requests.
+ * Verify a signed challenge transaction and return the merchant's address.
+ *
+ * Checks:
+ *   1. The XDR decodes to a valid Stellar transaction.
+ *   2. A pending challenge exists for the transaction's source account.
+ *   3. The challenge has not expired.
+ *   4. The ManageData nonce in the transaction matches the stored nonce.
+ *   5. At least one signature on the transaction is valid for the source account.
+ *
+ * On success, the challenge is consumed (deleted) so it cannot be replayed.
+ *
+ * @param signedXdr        Base64-encoded signed transaction XDR.
+ * @param networkPassphrase Stellar network passphrase.
+ * @returns The merchant's Stellar public key.
+ * @throws AuthError on any verification failure.
  */
-const GET_DEL_SCRIPT = `
-local val = redis.call('GET', KEYS[1])
-if val then
-  redis.call('DEL', KEYS[1])
-end
-return val
-`;
-
-// ─── AuthService ─────────────────────────────────────────────────────────────
-
-export class AuthService {
-  private readonly networkPassphrase: string;
-
-  constructor(networkPassphrase?: string) {
-    this.networkPassphrase =
-      networkPassphrase ??
-      process.env.NETWORK_PASSPHRASE ??
-      Networks.TESTNET;
+export function verifyChallenge(
+  signedXdr: string,
+  networkPassphrase: string,
+): string {
+  // 1. Decode the transaction
+  let tx: Transaction;
+  try {
+    tx = new Transaction(signedXdr, networkPassphrase);
+  } catch {
+    throw new AuthError('Invalid transaction XDR');
   }
 
-  /**
-   * Issue a new challenge for the given public key.
-   *
-   * Generates a random nonce, persists it in Redis with a TTL, and returns
-   * the challenge object.  Any previous challenge for the same public key is
-   * overwritten (last-write-wins — safe because challenges are single-use).
-   */
-  async createChallenge(publicKey: string): Promise<ChallengeResult> {
-    // Validate the public key is a well-formed Stellar address.
-    try {
-      Keypair.fromPublicKey(publicKey);
-    } catch {
-      throw new Error(`Invalid Stellar public key: ${publicKey}`);
-    }
+  // 2. Identify the account from the transaction source
+  const account = tx.source;
 
-    const nonce = randomBytes(32).toString('hex');
-    const challenge: AuthChallenge = {
-      publicKey,
-      nonce,
-      issuedAt: Date.now(),
-    };
+  evictExpired();
+  const record = pendingChallenges.get(account);
 
-    await redis.set(
-      redisKey(publicKey),
-      JSON.stringify(challenge),
-      'EX',
-      CHALLENGE_TTL_SECONDS,
-    );
-
-    return { challenge, nonce };
+  if (!record) {
+    throw new AuthError('No pending challenge for this account');
   }
 
-  /**
-   * Verify a signed challenge.
-   *
-   * The client signs a Stellar transaction whose memo contains the nonce
-   * issued in createChallenge.  This method:
-   *   1. Atomically retrieves and deletes the challenge from Redis (replay
-   *      protection — even concurrent requests cannot reuse the same challenge).
-   *   2. Decodes the signed transaction XDR.
-   *   3. Checks that the transaction memo matches the stored nonce.
-   *   4. Confirms the transaction carries a valid signature from the claimed
-   *      public key.
-   *
-   * @param publicKey  Stellar public key the client claims to own.
-   * @param signedXdr  Base64-encoded signed Stellar transaction XDR.
-   */
-  async verifyChallenge(
-    publicKey: string,
-    signedXdr: string,
-  ): Promise<VerifyResult> {
-    // 1. Atomically retrieve + delete from Redis.
-    let raw: string | null;
+  // 3. Expiry guard (belt-and-suspenders on top of evictExpired)
+  const now = Math.floor(Date.now() / 1000);
+  if (record.expiresAt <= now) {
+    pendingChallenges.delete(account);
+    throw new AuthError('Challenge expired');
+  }
+
+  // 4. Verify the ManageData nonce matches
+  const ops = tx.operations;
+  const manageDataOp = ops.find(
+    (op): op is Operation.ManageData =>
+      op.type === 'manageData' && op.name === MANAGE_DATA_KEY,
+  );
+
+  if (!manageDataOp || !manageDataOp.value) {
+    throw new AuthError('Challenge transaction missing ManageData operation');
+  }
+
+  const submittedNonce = (manageDataOp.value as Buffer).toString('hex');
+  if (submittedNonce !== record.nonce) {
+    throw new AuthError('Nonce mismatch');
+  }
+
+  // 5. Verify at least one valid signature from the account
+  if (!tx.signatures || tx.signatures.length === 0) {
+    throw new AuthError('Transaction has no signatures');
+  }
+
+  const keypair = Keypair.fromPublicKey(account);
+  const txHash = tx.hash();
+  let signatureValid = false;
+
+  for (const sig of tx.signatures) {
     try {
-      raw = (await redis.eval(
-        GET_DEL_SCRIPT,
-        1,
-        redisKey(publicKey),
-      )) as string | null;
-    } catch (err) {
-      console.error('[authService] Redis error during verify:', err);
-      return { success: false, error: 'Internal error — please retry' };
-    }
-
-    if (!raw) {
-      return {
-        success: false,
-        error: 'No pending challenge for this public key, or challenge expired',
-      };
-    }
-
-    let stored: AuthChallenge;
-    try {
-      stored = JSON.parse(raw) as AuthChallenge;
-    } catch {
-      return { success: false, error: 'Corrupted challenge data' };
-    }
-
-    // 2. Decode the signed transaction.
-    let tx: Transaction;
-    try {
-      tx = new Transaction(signedXdr, this.networkPassphrase);
-    } catch (err) {
-      return { success: false, error: `Invalid transaction XDR: ${(err as Error).message}` };
-    }
-
-    // 3. Verify memo matches the stored nonce.
-    const memoValue =
-      tx.memo.type === 'text' ? tx.memo.value : null;
-
-    if (memoValue !== stored.nonce) {
-      return {
-        success: false,
-        error: 'Transaction memo does not match the issued nonce',
-      };
-    }
-
-    // 4. Verify the transaction carries a valid signature from publicKey.
-    const keypair = Keypair.fromPublicKey(publicKey);
-    const txHash = tx.hash();
-
-    const hasSig = tx.signatures.some((sig) => {
-      try {
-        return keypair.verify(txHash, sig.signature());
-      } catch {
-        return false;
+      if (keypair.verify(txHash, sig.signature())) {
+        signatureValid = true;
+        break;
       }
-    });
-
-    if (!hasSig) {
-      return {
-        success: false,
-        error: 'Transaction is not signed by the claimed public key',
-      };
+    } catch {
+      // Try next signature
     }
-
-    return { success: true, publicKey };
   }
 
-  /**
-   * Delete a pending challenge for the given public key without verifying it.
-   * Useful for logout / explicit challenge invalidation flows.
-   */
-  async invalidateChallenge(publicKey: string): Promise<void> {
-    await redis.del(redisKey(publicKey));
+  if (!signatureValid) {
+    throw new AuthError('No valid signature from account');
   }
+
+  // Consume the challenge — prevents replay
+  pendingChallenges.delete(account);
+
+  return account;
 }
 
-// Default singleton — used by the auth route.
-export const authService = new AuthService();
+// ─── JWT helpers ──────────────────────────────────────────────────────────────
+
+/**
+ * Encode a string to base64url format.
+ */
+function base64url(input: string | Buffer): string {
+  const buf = typeof input === 'string' ? Buffer.from(input, 'utf8') : input;
+  return buf.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
+}
+
+/**
+ * Issue a merchant JWT.
+ *
+ * Payload: `{ address: string; iat: number; exp: number }`
+ *
+ * Signed with HMAC-SHA256 using `JWT_SECRET` from the environment
+ * (matching the approach used in adminAuth.ts).
+ *
+ * @param address  Merchant's Stellar public key.
+ * @param secret   JWT signing secret (from environment).
+ * @returns Compact JWT string.
+ */
+export function issueMerchantJwt(address: string, secret: string): string {
+  const now = Math.floor(Date.now() / 1000);
+  const payload: MerchantTokenPayload = {
+    address,
+    iat: now,
+    exp: now + JWT_TTL_SECONDS,
+  };
+
+  const header = base64url(JSON.stringify({ alg: 'HS256', typ: 'JWT' }));
+  const body = base64url(JSON.stringify(payload));
+  const signingInput = `${header}.${body}`;
+
+  const signature = createHmac('sha256', secret)
+    .update(signingInput)
+    .digest('base64url');
+
+  return `${signingInput}.${signature}`;
+}
+
+/**
+ * Verify a merchant JWT and return its payload.
+ *
+ * @param token  Compact JWT string.
+ * @param secret JWT signing secret.
+ * @returns Decoded MerchantTokenPayload.
+ * @throws AuthError if the token is invalid, expired, or the signature fails.
+ */
+export function verifyMerchantJwt(token: string, secret: string): MerchantTokenPayload {
+  const parts = token.split('.');
+  if (parts.length !== 3) throw new AuthError('Invalid JWT format');
+
+  const [headerB64, payloadB64, receivedSig] = parts;
+
+  // Re-compute expected signature
+  const signingInput = `${headerB64}.${payloadB64}`;
+  const expectedSig = createHmac('sha256', secret)
+    .update(signingInput)
+    .digest('base64url');
+
+  if (expectedSig !== receivedSig) {
+    throw new AuthError('Invalid token signature');
+  }
+
+  // Decode payload
+  let payload: MerchantTokenPayload;
+  try {
+    payload = JSON.parse(
+      Buffer.from(payloadB64.replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8'),
+    ) as MerchantTokenPayload;
+  } catch {
+    throw new AuthError('Malformed token payload');
+  }
+
+  const now = Math.floor(Date.now() / 1000);
+  if (!payload.exp || payload.exp < now) {
+    throw new AuthError('Token expired');
+  }
+
+  if (!payload.address) {
+    throw new AuthError('Token missing address claim');
+  }
+
+  return payload;
+}
+
+// ─── Exposed for testing only ─────────────────────────────────────────────────
+
+/**
+ * Clear all pending challenges. Only intended for test teardown.
+ * @internal
+ */
+export function _clearChallengesForTesting(): void {
+  pendingChallenges.clear();
+}
