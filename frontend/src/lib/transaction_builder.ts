@@ -1,4 +1,4 @@
-/**
+﻿/**
  * transaction_builder.ts
  *
  * Builds, signs, and submits Soroban transactions for the SorobanPay protocol.
@@ -8,7 +8,7 @@
  *   2. Build transaction with contract call
  *   3. prepareTransaction (simulates and fills resource fees)
  *   4. Sign with Freighter via signTx()
- *   5. Submit → returns txHash immediately (caller handles polling via
+ *   5. Submit ΓåÆ returns txHash immediately (caller handles polling via
  *      useTransactionPoller for the 'confirming' intermediate UI state)
  *
  * The legacy buildAndSubmitSubscribe remains exported for backward compatibility
@@ -28,7 +28,7 @@ import { signTx } from './wallet_manager';
 import { isValidCAddress, isValidGAddress } from './validation';
 import { withBackoff, isRpcRetryable, getErrorMessage } from './backoff';
 
-// ── Types ─────────────────────────────────────────────────────────────────────
+// ΓöÇΓöÇ Types ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
 /** Parameters for creating a new subscription */
 export interface SubscribeParams {
@@ -58,7 +58,7 @@ export interface SubscribeResult {
 export interface SubmitResult {
   /** Transaction hash (available immediately after sendTransaction) */
   txHash: string;
-  /** The SorobanRpc.Server instance used — pass to startPolling() */
+  /** The SorobanRpc.Server instance used ΓÇö pass to startPolling() */
   server: SorobanRpc.Server;
 }
 
@@ -109,7 +109,7 @@ const POLL_INTERVAL_MS = 1_000;
 /** @deprecated Use useTransactionPoller (exponential backoff) instead */
 const MAX_POLL_ATTEMPTS = 60; // 60 seconds total
 
-// ── Phase 1: build, sign, and submit ─────────────────────────────────────────
+// ΓöÇΓöÇ Phase 1: build, sign, and submit ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
 /**
  * Build, sign, and submit a `subscribe` transaction with adaptive retry logic.
@@ -124,7 +124,7 @@ const MAX_POLL_ATTEMPTS = 60; // 60 seconds total
  *
  * Returns the transaction hash and server instance as soon as the transaction
  * is accepted by the RPC (status !== 'ERROR'). The caller is responsible for
- * polling for confirmation — use `useTransactionPoller.startPolling()`.
+ * polling for confirmation ΓÇö use `useTransactionPoller.startPolling()`.
  *
  * @throws On validation failure, signing rejection, or persistent submission errors
  */
@@ -245,11 +245,11 @@ export async function buildSignAndSubmitSubscribe(
     );
   }
 
-  // Return immediately — polling is handled by useTransactionPoller
+  // Return immediately ΓÇö polling is handled by useTransactionPoller
   return { txHash: sendResult.hash, server };
 }
 
-// ── Legacy all-in-one function (backward compatibility) ───────────────────────
+// ΓöÇΓöÇ Legacy all-in-one function (backward compatibility) ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
 /**
  * Build, sign, submit, and poll a `subscribe` transaction to completion.
@@ -285,7 +285,7 @@ export async function buildAndSubmitSubscribe(
   return { txHash: confirmedHash };
 }
 
-// ── Legacy polling helper ─────────────────────────────────────────────────────
+// ΓöÇΓöÇ Legacy polling helper ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
 /** @deprecated Use useTransactionPoller (exponential backoff) instead */
 async function pollForConfirmation(
@@ -308,7 +308,7 @@ async function pollForConfirmation(
       );
     }
 
-    // status === NOT_FOUND — still in mempool, continue polling
+    // status === NOT_FOUND ΓÇö still in mempool, continue polling
   }
 
   throw new Error(
@@ -320,7 +320,7 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-// ── execute_payment builder ───────────────────────────────────────────────────
+// ΓöÇΓöÇ execute_payment builder ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
 /**
  * Build, sign, and submit an `execute_payment` transaction with adaptive retry logic.
@@ -473,13 +473,13 @@ export async function buildAndSubmitExecutePayment(
   return { txHash };
 }
 
-// ── batch_execute_payment builder ─────────────────────────────────────────────
+// ΓöÇΓöÇ batch_execute_payment builder ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
 /**
  * Execute payment collection for multiple subscribers sequentially.
  *
  * Each entry is submitted as an independent `execute_payment` transaction.
- * Failures are captured per-entry and do not halt the batch — the UI can
+ * Failures are captured per-entry and do not halt the batch ΓÇö the UI can
  * show partial success with per-row error messages.
  *
  * Note: This is a client-side sequential batch. When the on-chain
