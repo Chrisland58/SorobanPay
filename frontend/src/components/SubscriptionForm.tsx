@@ -44,6 +44,7 @@ import {
   useFormPersist,
 } from "@/hooks/useFormPersist";
 import { buildAndSubmitSubscribe } from "@/lib/transaction_builder";
+import { buildAndSubmitCancel } from "@/lib/cancel_builder";
 import {
   validateSubscriptionForm,
   isFormValid,
@@ -69,6 +70,12 @@ interface SuccessData {
   amount: string;
   interval: string;
   issuedAt: string;
+}
+
+interface CancelSuccessData {
+  txHash: string;
+  merchant: string;
+  subscriber: string;
 }
 
 // ─── Shared input className (larger py for ≥48px touch target on mobile) ─────
@@ -345,9 +352,13 @@ function ProgressBar() {
 function SuccessCard({
   data,
   onReset,
+  onCancelSubscription,
+  isCancelling,
 }: {
   data: SuccessData;
   onReset: () => void;
+  onCancelSubscription?: () => void;
+  isCancelling?: boolean;
 }) {
   const days = Math.round(Number(data.interval) / 86400);
   const [isDownloading, setIsDownloading] = useState(false);
@@ -515,6 +526,24 @@ function SuccessCard({
           Create Another Subscription
         </button>
       </div>
+
+      {/* Cancel subscription (#765) */}
+      {onCancelSubscription && (
+        <div className="pt-2 border-t border-green-800/40">
+          <button
+            type="button"
+            onClick={onCancelSubscription}
+            disabled={isCancelling}
+            aria-label="Cancel this subscription on-chain"
+            className="w-full rounded-lg border border-red-700/60 text-red-400 hover:bg-red-900/30 active:bg-red-900/50
+                       disabled:opacity-50 disabled:cursor-not-allowed
+                       py-3 text-sm font-semibold transition-all duration-150 min-h-[48px]
+                       focus:outline-none focus-visible:ring-2 focus-visible:ring-red-400 focus-visible:ring-offset-2 focus-visible:ring-offset-gray-900"
+          >
+            {isCancelling ? "Cancelling…" : "Cancel Subscription"}
+          </button>
+        </div>
+      )}
     </div>
   );
 }
@@ -843,6 +872,12 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
   const [successData, setSuccessData]   = useState<SuccessData | null>(null);
   const [showConfirm, setShowConfirm]   = useState(false);
 
+  // Cancel flow state (#765)
+  const [showCancelConfirm, setShowCancelConfirm]   = useState(false);
+  const [isCancelling, setIsCancelling]             = useState(false);
+  const [cancelSuccess, setCancelSuccess]           = useState<CancelSuccessData | null>(null);
+  const [cancelError, setCancelError]               = useState<TxErrorInfo | null>(null);
+
   // Guard: must have a valid contract address before rendering the form
   // (placed after hooks so rules-of-hooks is satisfied)
   if (!CONTRACT_ID) return <ContractConfigError />;
@@ -930,6 +965,45 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
     }
   }
 
+  /**
+   * handleConfirmCancel — execute the on-chain cancel() call.
+   *
+   * #765: Previously this was a setTimeout(resolve, 300) placeholder.
+   * Now calls buildAndSubmitCancel() from cancel_builder.ts which
+   * builds, signs (via Freighter), and submits the real cancel transaction.
+   */
+  async function handleConfirmCancel() {
+    setShowCancelConfirm(false);
+    if (!publicKey || !successData) return;
+
+    setIsCancelling(true);
+    setCancelError(null);
+    try {
+      const result = await buildAndSubmitCancel(
+        {
+          subscriber: publicKey,
+          merchant: successData.merchant,
+        },
+        CONTRACT_ID,
+        publicKey,
+        NETWORK_PASSPHRASE,
+        RPC_URL,
+      );
+
+      setCancelSuccess({
+        txHash: result.txHash,
+        merchant: successData.merchant,
+        subscriber: publicKey,
+      });
+      // Clear the subscription success state since it has now been cancelled
+      setSuccessData(null);
+    } catch (err) {
+      setCancelError(classifyError(err));
+    } finally {
+      setIsCancelling(false);
+    }
+  }
+
   return (
     <ErrorBoundary name="SubscriptionForm">
     <div className="w-full max-w-lg mx-auto bg-gray-900 rounded-2xl shadow-xl p-5 sm:p-8 text-white">
@@ -941,6 +1015,15 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
           interval={interval}
           onConfirm={confirmAndSubmit}
           onCancel={() => setShowConfirm(false)}
+        />
+      )}
+
+      {/* Cancel confirmation modal (#765) */}
+      {showCancelConfirm && successData && (
+        <CancelConfirmModal
+          merchantAddress={successData.merchant}
+          onConfirm={handleConfirmCancel}
+          onCancel={() => setShowCancelConfirm(false)}
         />
       )}
       <div className="flex items-start justify-between mb-1 gap-3">
@@ -1012,8 +1095,31 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
       {/* Progress indicator — visible only while submitting */}
       {isSubmitting && <ProgressBar />}
 
+      {/* Cancel in-progress indicator */}
+      {isCancelling && <ProgressBar label="Cancelling subscription…" />}
+
+      {/* Cancel success card (#765) */}
+      {cancelSuccess && (
+        <CancelSuccessCard
+          data={cancelSuccess}
+          onReset={() => { setCancelSuccess(null); resetForm(); }}
+        />
+      )}
+
+      {/* Cancel transaction error */}
+      {cancelError && (
+        <ErrorCard error={cancelError} onDismiss={() => setCancelError(null)} />
+      )}
+
       {/* Success card */}
-      {successData && <SuccessCard data={successData} onReset={resetForm} />}
+      {successData && (
+        <SuccessCard
+          data={successData}
+          onReset={resetForm}
+          onCancelSubscription={publicKey ? () => setShowCancelConfirm(true) : undefined}
+          isCancelling={isCancelling}
+        />
+      )}
 
       {/* Transaction error */}
       {txError && (
