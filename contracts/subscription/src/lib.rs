@@ -1089,16 +1089,21 @@ impl SubscriptionProtocol {
 
     /// Return the number of active subscriptions indexed for a given merchant.
     ///
-    /// Uses the `MerchantIndex` temporary-storage vector maintained by `subscribe`
-    /// and `cancel`.  Returns `0` when the merchant has no subscribers or the
-    /// index entry has expired from temporary storage.
+    /// Uses the `MerchantIndex` persistent-storage vector maintained by `subscribe`
+    /// and `cancel` (see `index_add` / `index_remove`).  Returns `0` when the
+    /// merchant has no subscribers or the index entry has expired from
+    /// persistent storage.
     ///
     /// Read-only; no authorization required.
     pub fn get_subscription_count(env: Env, merchant: Address) -> u32 {
         let idx_key = DataKey::MerchantIndex(merchant);
+        // `index_add`/`index_remove` write this key under `.persistent()`, so the
+        // read side must match — reading via `.temporary()` would silently miss
+        // every entry (different storage durability = different ledger key) and
+        // always report 0.
         let index: Vec<BytesN<32>> = env
             .storage()
-            .temporary()
+            .persistent()
             .get(&idx_key)
             .unwrap_or_else(|| Vec::new(&env));
         index.len()
