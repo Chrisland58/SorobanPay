@@ -235,6 +235,20 @@ function sleep(ms: number): Promise<void> {
  * @returns                 Transaction hash of the confirmed transaction
  * @throws                  On validation failure, signing rejection, or RPC errors
  */
+/** Parameters for collecting a single subscriber's payment */
+export interface ExecutePaymentParams {
+  /** Subscriber Stellar G-address being charged */
+  subscriber: string;
+  /** Merchant Stellar G-address (must match the connected wallet) */
+  merchant: string;
+}
+
+/** Result of a successful execute_payment transaction */
+export interface ExecutePaymentResult {
+  /** Transaction hash on Stellar network */
+  txHash: string;
+}
+
 export async function buildAndSubmitExecutePayment(
   params: ExecutePaymentParams,
   contractId: string,
@@ -318,6 +332,26 @@ export async function buildAndSubmitExecutePayment(
  * @param rpcUrl            Soroban RPC endpoint URL
  * @returns                 Per-entry results with success/failure breakdown
  */
+/** A single (subscriber, merchant) pair to collect a payment from */
+export interface BatchPaymentEntry {
+  subscriber: string;
+  merchant: string;
+}
+
+/** Per-entry outcome plus aggregate counts for a batch execute_payment run */
+export interface BatchExecutePaymentResult {
+  results: Array<{
+    subscriber: string;
+    merchant: string;
+    /** Present when this entry's transaction succeeded */
+    txHash?: string;
+    /** Present when this entry failed (validation, signing, or on-chain error) */
+    error?: string;
+  }>;
+  successCount: number;
+  failureCount: number;
+}
+
 export async function buildAndSubmitBatchExecutePayment(
   entries: BatchPaymentEntry[],
   contractId: string,
@@ -352,4 +386,107 @@ export async function buildAndSubmitBatchExecutePayment(
   }
 
   return { results, successCount, failureCount };
+}
+
+// ── update_subscription builder (Issue #768) ──────────────────────────────────
+
+/** Parameters for updating an existing subscription's amount and/or interval */
+export interface UpdateSubscriptionParams {
+  /** Subscriber Stellar G-address (must match the connected wallet) */
+  subscriber: string;
+  /** Merchant Stellar G-address */
+  merchant: string;
+  /** Replacement payment amount, in the token's smallest unit. Must be > 0. */
+  newAmount: number;
+  /** Replacement interval in seconds. Must be in [86400, 31536000]. */
+  newInterval: number;
+}
+
+/** Result of a successful update_subscription transaction */
+export interface UpdateSubscriptionResult {
+  txHash: string;
+}
+
+/**
+ * Build, sign, and submit an `update_subscription` transaction.
+ *
+ * Unlike cancel + re-subscribe, the contract preserves the subscription's
+ * current `next_payment` — the subscriber's billing cycle is not disrupted
+ * by an amount/interval change.
+ *
+ * @param params            Subscriber, merchant, and the replacement amount/interval
+ * @param contractId        Deployed SorobanPay contract address
+ * @param publicKey         Connected subscriber's public key (from Freighter)
+ * @param networkPassphrase Stellar network passphrase
+ * @param rpcUrl            Soroban RPC endpoint URL
+ * @returns                 Transaction hash of the confirmed transaction
+ * @throws                  On validation failure, signing rejection, or RPC errors
+ */
+export async function buildAndSubmitUpdateSubscription(
+  params: UpdateSubscriptionParams,
+  contractId: string,
+  publicKey: string,
+  networkPassphrase: string,
+  rpcUrl: string,
+): Promise<UpdateSubscriptionResult> {
+  // Validate before any network calls — same rules as subscribe().
+  if (!isValidGAddress(params.subscriber)) {
+    throw new Error(`Invalid subscriber address: ${params.subscriber}`);
+  }
+  if (!isValidGAddress(params.merchant)) {
+    throw new Error(`Invalid merchant address: ${params.merchant}`);
+  }
+  if (!Number.isInteger(params.newAmount) || params.newAmount <= 0) {
+    throw new Error('Amount must be a positive whole number');
+  }
+  if (
+    !Number.isInteger(params.newInterval) ||
+    params.newInterval < 86_400 ||
+    params.newInterval > 31_536_000
+  ) {
+    throw new Error(
+      'Interval must be a whole number of seconds between 86,400 (1 day) and 31,536,000 (365 days)',
+    );
+  }
+
+  const server = new SorobanRpc.Server(rpcUrl, { allowHttp: false });
+  const account = await server.getAccount(publicKey);
+  const contract = new Contract(contractId);
+
+  const tx = new TransactionBuilder(account, {
+    fee: BASE_FEE,
+    networkPassphrase,
+  })
+    .addOperation(
+      contract.call(
+        'update_subscription',
+        new Address(params.subscriber).toScVal(),
+        new Address(params.merchant).toScVal(),
+        nativeToScVal(BigInt(params.newAmount), { type: 'i128' }),
+        nativeToScVal(BigInt(params.newInterval), { type: 'u64' }),
+      ),
+    )
+    .setTimeout(30)
+    .build();
+
+  let preparedTx: ReturnType<typeof TransactionBuilder.fromXDR>;
+  try {
+    preparedTx = await server.prepareTransaction(tx);
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    throw new Error(`Transaction preparation failed: ${msg}`);
+  }
+
+  const signedXdr = await signTx(preparedTx.toXDR(), networkPassphrase);
+  const parsedTx = TransactionBuilder.fromXDR(signedXdr, networkPassphrase);
+  const sendResult = await server.sendTransaction(parsedTx);
+
+  if (sendResult.status === 'ERROR') {
+    throw new Error(
+      `Transaction submission failed: ${sendResult.errorResult?.toXDR('base64') ?? 'unknown error'}`,
+    );
+  }
+
+  const txHash = await pollForConfirmation(server, sendResult.hash);
+  return { txHash };
 }
