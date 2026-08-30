@@ -235,6 +235,20 @@ function sleep(ms: number): Promise<void> {
  * @returns                 Transaction hash of the confirmed transaction
  * @throws                  On validation failure, signing rejection, or RPC errors
  */
+/** Parameters for collecting a single subscriber's payment */
+export interface ExecutePaymentParams {
+  /** Subscriber Stellar G-address being charged */
+  subscriber: string;
+  /** Merchant Stellar G-address (must match the connected wallet) */
+  merchant: string;
+}
+
+/** Result of a successful execute_payment transaction */
+export interface ExecutePaymentResult {
+  /** Transaction hash on Stellar network */
+  txHash: string;
+}
+
 export async function buildAndSubmitExecutePayment(
   params: ExecutePaymentParams,
   contractId: string,
@@ -318,6 +332,26 @@ export async function buildAndSubmitExecutePayment(
  * @param rpcUrl            Soroban RPC endpoint URL
  * @returns                 Per-entry results with success/failure breakdown
  */
+/** A single (subscriber, merchant) pair to collect a payment from */
+export interface BatchPaymentEntry {
+  subscriber: string;
+  merchant: string;
+}
+
+/** Per-entry outcome plus aggregate counts for a batch execute_payment run */
+export interface BatchExecutePaymentResult {
+  results: Array<{
+    subscriber: string;
+    merchant: string;
+    /** Present when this entry's transaction succeeded */
+    txHash?: string;
+    /** Present when this entry failed (validation, signing, or on-chain error) */
+    error?: string;
+  }>;
+  successCount: number;
+  failureCount: number;
+}
+
 export async function buildAndSubmitBatchExecutePayment(
   entries: BatchPaymentEntry[],
   contractId: string,
@@ -352,4 +386,109 @@ export async function buildAndSubmitBatchExecutePayment(
   }
 
   return { results, successCount, failureCount };
+}
+
+// ── transfer_subscription builder (Issue #770) ────────────────────────────────
+
+/** Parameters for reassigning an active subscription to a new merchant */
+export interface TransferSubscriptionParams {
+  /** Subscriber Stellar G-address whose subscription is being reassigned */
+  subscriber: string;
+  /** Current merchant Stellar G-address (must also authorize the transfer) */
+  oldMerchant: string;
+  /** Destination merchant Stellar G-address */
+  newMerchant: string;
+}
+
+/** Result of a successful transfer_subscription transaction */
+export interface TransferSubscriptionResult {
+  txHash: string;
+}
+
+/**
+ * Build, sign, and submit a `transfer_subscription` transaction.
+ *
+ * Dual authorization: the contract requires signatures from BOTH `subscriber`
+ * and `oldMerchant` (see transfer_subscription in
+ * contracts/subscription/src/lib.rs) — neither party alone can reassign the
+ * subscription. This function signs with whichever role the connected wallet
+ * (`publicKey`) is playing. If `publicKey` matches only one of the two
+ * required signers, `prepareTransaction`'s simulation still succeeds (it just
+ * reports the auth requirements), but on-chain submission will fail until the
+ * other party also authorizes it — there is no multi-party co-signing/XDR
+ * exchange flow here, that would be a separate, larger feature.
+ *
+ * @param params            Subscriber, current merchant, and destination merchant
+ * @param contractId        Deployed SorobanPay contract address
+ * @param publicKey         Connected wallet's public key (from Freighter) —
+ *                          must equal `subscriber` or `oldMerchant`
+ * @param networkPassphrase Stellar network passphrase
+ * @param rpcUrl            Soroban RPC endpoint URL
+ * @returns                 Transaction hash of the confirmed transaction
+ * @throws                  On validation failure, signing rejection, or RPC errors
+ */
+export async function buildAndSubmitTransferSubscription(
+  params: TransferSubscriptionParams,
+  contractId: string,
+  publicKey: string,
+  networkPassphrase: string,
+  rpcUrl: string,
+): Promise<TransferSubscriptionResult> {
+  if (!isValidGAddress(params.subscriber)) {
+    throw new Error(`Invalid subscriber address: ${params.subscriber}`);
+  }
+  if (!isValidGAddress(params.oldMerchant)) {
+    throw new Error(`Invalid current merchant address: ${params.oldMerchant}`);
+  }
+  if (!isValidGAddress(params.newMerchant)) {
+    throw new Error(`Invalid new merchant address: ${params.newMerchant}`);
+  }
+  // Mirrors the contract's own guards (SameMerchant / SelfSubscription) so the
+  // error surfaces instantly, before any network round-trip.
+  if (params.oldMerchant === params.newMerchant) {
+    throw new Error('New merchant must be different from the current merchant');
+  }
+  if (params.subscriber === params.newMerchant) {
+    throw new Error('Subscriber cannot become their own merchant');
+  }
+
+  const server = new SorobanRpc.Server(rpcUrl, { allowHttp: false });
+  const account = await server.getAccount(publicKey);
+  const contract = new Contract(contractId);
+
+  const tx = new TransactionBuilder(account, {
+    fee: BASE_FEE,
+    networkPassphrase,
+  })
+    .addOperation(
+      contract.call(
+        'transfer_subscription',
+        new Address(params.subscriber).toScVal(),
+        new Address(params.oldMerchant).toScVal(),
+        new Address(params.newMerchant).toScVal(),
+      ),
+    )
+    .setTimeout(30)
+    .build();
+
+  let preparedTx: ReturnType<typeof TransactionBuilder.fromXDR>;
+  try {
+    preparedTx = await server.prepareTransaction(tx);
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    throw new Error(`Transaction preparation failed: ${msg}`);
+  }
+
+  const signedXdr = await signTx(preparedTx.toXDR(), networkPassphrase);
+  const parsedTx = TransactionBuilder.fromXDR(signedXdr, networkPassphrase);
+  const sendResult = await server.sendTransaction(parsedTx);
+
+  if (sendResult.status === 'ERROR') {
+    throw new Error(
+      `Transaction submission failed: ${sendResult.errorResult?.toXDR('base64') ?? 'unknown error'}`,
+    );
+  }
+
+  const txHash = await pollForConfirmation(server, sendResult.hash);
+  return { txHash };
 }
