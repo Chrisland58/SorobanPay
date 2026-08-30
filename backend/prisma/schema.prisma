@@ -113,3 +113,26 @@ model NotificationPreference {
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 }
+
+// #790: Persistent retry tracking for failed execute_payment attempts.
+// Merged from both duplicate PaymentRetry blocks; keeps the superset of all fields.
+model PaymentRetry {
+  id            Int      @id @default(autoincrement())
+  subscriber    String
+  merchant      String
+  /// Number of retry attempts made so far (0 = not yet retried)
+  attempts      Int      @default(0)
+  /// Most recent error message from the last failed attempt
+  lastError     String?
+  /// Unix timestamp (seconds) of the next scheduled retry
+  nextRetryAt   BigInt?
+  /// Idempotency key — sha256(subscriber + merchant + ledger) — prevents duplicate submissions
+  idempotencyKey String  @unique
+  /// Current retry state: PENDING | IN_FLIGHT | SUCCEEDED | EXHAUSTED
+  status        String   @default("PENDING")
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@index([status, nextRetryAt])
+  @@index([subscriber, merchant])
+}
