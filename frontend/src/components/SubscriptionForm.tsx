@@ -904,122 +904,22 @@ interface TxErrorInfo {
   raw: string;
 }
 
+/**
+ * Classifies a thrown error into a structured `TxErrorInfo` by delegating to
+ * `normalizeRpcError` from `rpc_error_normalizer`.
+ *
+ * All contract error codes, RPC-layer failures, Freighter rejections, and
+ * network faults are handled in the normalizer. This wrapper maps the
+ * `NormalizedRpcError` shape to the `TxErrorInfo` shape that `ErrorCard`
+ * already renders.
+ */
 function classifyError(err: unknown): TxErrorInfo {
-  const raw = err instanceof Error ? err.message : String(err);
-  const msg = raw.toLowerCase();
-
-  if (
-    msg.includes("user declined") ||
-    msg.includes("rejected") ||
-    msg.includes("signing failed") ||
-    msg.includes("user rejected")
-  ) {
-    return {
-      title: "Signing cancelled",
-      summary: "The Freighter pop-up was dismissed or the request was rejected.",
-      fix: 'To retry: click "Authorize Subscription" again and approve in the Freighter pop-up. To use a different account, switch accounts in Freighter first, then resubmit.',
-      raw,
-    };
-  }
-  if (
-    msg.includes("insufficient balance") ||
-    msg.includes("not enough") ||
-    msg.includes("underfunded")
-  ) {
-    return {
-      title: "Insufficient balance",
-      summary:
-        "Your wallet does not have enough tokens or XLM to cover this transaction.",
-      fix: "Top up your account. On testnet use Stellar Friendbot; on mainnet send XLM to your address.",
-      raw,
-    };
-  }
-  if (
-    msg.includes("allowance") ||
-    msg.includes("transfer from") ||
-    msg.includes("spend limit")
-  ) {
-    return {
-      title: "Token allowance too low",
-      summary:
-        "The contract is not authorized to transfer this token amount on your behalf.",
-      fix: "Approve a higher token allowance by calling token.approve(contract_id, amount) before subscribing.",
-      raw,
-    };
-  }
-  if (msg.includes("timeout") || msg.includes("timed out")) {
-    return {
-      title: "Transaction timed out",
-      summary:
-        "The network did not confirm the transaction within the expected time.",
-      fix: "Check your connection and retry. The transaction may still confirm — wait a minute before resubmitting.",
-      raw,
-    };
-  }
-  if (
-    msg.includes("network") ||
-    msg.includes("fetch") ||
-    msg.includes("rpc") ||
-    msg.includes("failed to fetch")
-  ) {
-    return {
-      title: "Network error",
-      summary: "Could not reach the Soroban RPC endpoint.",
-      fix: "Check your internet connection and verify NEXT_PUBLIC_RPC_URL in .env.local. Retry in a moment.",
-      raw,
-    };
-  }
-  if (
-    msg.includes("wrong network") ||
-    msg.includes("passphrase") ||
-    msg.includes("network mismatch")
-  ) {
-    return {
-      title: "Wrong network",
-      summary: "Freighter is set to a different network than the app expects.",
-      fix: `Open Freighter, switch to ${NETWORK_NAME}, and try again.`,
-      raw,
-    };
-  }
-  if (
-    msg.includes("amountmustbepositive") ||
-    msg.includes("error(contract, #1)")
-  ) {
-    return {
-      title: "Invalid amount",
-      summary:
-        "The contract rejected the amount — it must be greater than zero.",
-      fix: "Enter a positive integer amount and resubmit.",
-      raw,
-    };
-  }
-  if (
-    msg.includes("intervaltoo") ||
-    msg.includes("error(contract, #2)") ||
-    msg.includes("error(contract, #3)")
-  ) {
-    return {
-      title: "Invalid interval",
-      summary:
-        "The payment interval is outside the allowed range (1 day – 1 year).",
-      fix: "Enter a value between 86 400 s (1 day) and 31 536 000 s (1 year).",
-      raw,
-    };
-  }
-  if (msg.includes("unauthorized") || msg.includes("error(contract, #6)")) {
-    return {
-      title: "Authorisation failed",
-      summary: "The contract rejected the transaction signature.",
-      fix: "Ensure the connected wallet matches the subscriber address and retry.",
-      raw,
-    };
-  }
-
+  const normalized = normalizeRpcError(err);
   return {
-    title: "Transaction failed",
-    summary: "An unexpected error occurred while submitting the transaction.",
-    fix: "Review the technical details below and retry. If the problem persists, check the README troubleshooting section.",
-    raw,
+    title:   normalized.title,
+    summary: normalized.summary,
+    fix:     normalized.action,
+    raw:     normalized.rawMessage,
   };
 }
 
