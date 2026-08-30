@@ -111,6 +111,12 @@ export default function MerchantPage() {
 
       const merchant = publicKey;
 
+      // Map each selected subscriber to the token contract of their
+      // subscription so the atomic on-chain batch_execute_payment call can be used.
+      const tokenBySubscriber = new Map(
+        subscriptions.map((s) => [s.subscriber, s.token]),
+      );
+
       // Mark all selected rows as collecting
       setCollectingRows((prev) => {
         const next = new Set(prev);
@@ -125,7 +131,11 @@ export default function MerchantPage() {
       });
 
       const batchResult = await buildAndSubmitBatchExecutePayment(
-        subscribers.map((s) => ({ subscriber: s, merchant })),
+        subscribers.map((s) => ({
+          subscriber: s,
+          merchant,
+          token: tokenBySubscriber.get(s),
+        })),
         CONTRACT_ID,
         publicKey,
         NETWORK_PASSPHRASE,
@@ -157,7 +167,7 @@ export default function MerchantPage() {
         setTimeout(refresh, 2000);
       }
     },
-    [publicKey, refresh],
+    [publicKey, refresh, subscriptions],
   );
 
   // ── Render ─────────────────────────────────────────────────────────────────
