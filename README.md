@@ -744,13 +744,26 @@ Three ways to access the shortcuts reference:
 
 | Function | Auth required | Description |
 |----------|--------------|-------------|
-| `subscribe(subscriber, merchant, token, amount, interval)` | subscriber | Create or update subscription. Amount must be > 0, interval in [86400, 31536000] seconds. |
-| `execute_payment(subscriber, merchant)` | merchant | Collect payment if interval has elapsed. Transfers tokens directly subscriber → merchant. |
-| `cancel(subscriber, merchant)` | subscriber | Remove subscription from persistent storage. |
-| `get_subscription(subscriber, merchant)` | *(none — read-only)* | Return `Some(SubscriptionData)` if an active subscription exists, or `None` if it does not. |
+| `subscribe(subscriber, merchant, token, amount, interval, strict, grace_period)` | subscriber | Create or update subscription. Amount ∈ (0, 10¹⁸], interval ∈ [86400, 31536000] seconds. |
+| `execute_payment(subscriber, merchant, token)` | merchant | Collect payment if interval has elapsed. Transfers tokens directly subscriber → merchant (after protocol fee split if configured). |
+| `cancel(subscriber, merchant, token)` | subscriber | Remove subscription from persistent storage. Revoke SEP-41 allowance to block future collections. |
+| `update_subscription(subscriber, merchant, new_amount, new_interval)` | subscriber | Modify amount and/or interval in-place. Preserves `next_payment` — no billing-cycle reset. |
+| `transfer_subscription(subscriber, old_merchant, new_merchant)` | subscriber + old_merchant | Atomically reassign subscription to a new merchant. Both parties must authorize. |
+| `batch_execute_payment(merchant, token, subscribers)` | merchant | Collect payments from up to 50 subscribers in one transaction. Fee split applied per subscriber. |
+| `get_subscription(subscriber, merchant, token)` | *(none — read-only)* | Return `Some(SubscriptionData)` if an active subscription exists, or `None` if it does not. |
 | `get_subscription_count(merchant)` | *(none — read-only)* | Return the number of active subscriptions indexed for a given merchant. Returns `0` if none. |
 
-### Examples
+### Parameter value ranges
+
+| Parameter | Type | Valid range | Description |
+|-----------|------|-------------|-------------|
+| `amount` | i128 | (0, 10¹⁸] | Payment per interval in token's smallest unit (stroops). Must be strictly positive and ≤ 1,000,000,000,000,000,000. |
+| `interval` | u64 | [86400, 31536000] | Seconds between payments. Minimum 1 day (86400 s), maximum 365 days (31536000 s). |
+| `fee_bps` | u32 | [0, 500] | Protocol fee in basis points. 0 = no fee, 500 = 5% max. Set by admin via `set_protocol_fee`. |
+| `grace_period` | Option<u64> | [0, ∞) | Optional seconds after payment due date before subscription can expire. Default: 0 (no grace period). |
+| `strict` | bool | {true, false} | When true, rejects subscription if subscriber's SEP-41 allowance < amount. When false, issues a warning event. |
+
+### Core subscription examples
 
 **subscribe** — authorize 100 tokens every 30 days:
 
@@ -762,11 +775,14 @@ stellar contract invoke \
   --merchant   GXYZ...MERCHANT \
   --token      CABC...USDC \
   --amount     100 \
-  --interval   2592000
+  --interval   2592000 \
+  --strict     false \
+  --grace-period 0
 ```
 
 ```typescript
 import { Contract, nativeToScVal, Address } from "@stellar/stellar-sdk";
+
 const op = contract.call(
   "subscribe",
   new Address(subscriber).toScVal(),
@@ -774,18 +790,59 @@ const op = contract.call(
   new Address(tokenAddress).toScVal(),
   nativeToScVal(100n, { type: "i128" }),
   nativeToScVal(2592000n, { type: "u64" }),
+  nativeToScVal(false, { type: "bool" }),
+  nativeToScVal(null),  // no grace period
 );
 // Expected: subscription stored, `subscribe` event emitted, first payment collectable immediately.
+// Error cases:
+//   - AmountMustBePositive (code 1) if amount ≤ 0
+//   - AmountTooLarge (code 9) if amount > 10^18
+//   - IntervalTooShort (code 2) if interval < 86400
+//   - IntervalTooLong (code 3) if interval > 31536000
+//   - SelfSubscription (code 10) if subscriber == merchant
+//   - InsufficientAllowance if strict=true and allowance < amount
 ```
 
-**execute_payment** — merchant collects a due payment:
+**subscribe with grace period** — allow up to 7 days late payment before expiry:
+
+```bash
+stellar contract invoke \
+  --id $CONTRACT_ID --source alice --network testnet \
+  -- subscribe \
+  --subscriber GABC...ALICE \
+  --merchant   GXYZ...MERCHANT \
+  --token      CABC...USDC \
+  --amount     5000 \
+  --interval   2592000 \
+  --strict     true \
+  --grace-period 604800
+```
+
+```typescript
+// grace_period = 604800 = 7 days in seconds
+// If payment fails, subscription enters overdue state.
+// After grace_period elapses, expire_subscription can be called to remove it.
+const op = contract.call(
+  "subscribe",
+  new Address(subscriber).toScVal(),
+  new Address(merchant).toScVal(),
+  new Address(tokenAddress).toScVal(),
+  nativeToScVal(5000n, { type: "i128" }),
+  nativeToScVal(2592000n, { type: "u64" }),
+  nativeToScVal(true, { type: "bool" }),
+  nativeToScVal(604800n, { type: "u64" }),  // 7 days grace period
+);
+```
+
+**execute_payment** — merchant collects a due payment (with protocol fee):
 
 ```bash
 stellar contract invoke \
   --id $CONTRACT_ID --source merchant-key --network testnet \
   -- execute_payment \
   --subscriber GABC...ALICE \
-  --merchant   GXYZ...MERCHANT
+  --merchant   GXYZ...MERCHANT \
+  --token      CABC...USDC
 ```
 
 ```typescript
@@ -793,8 +850,37 @@ const op = contract.call(
   "execute_payment",
   new Address(subscriber).toScVal(),
   new Address(merchant).toScVal(),
+  new Address(tokenAddress).toScVal(),
 );
-// Expected: 100 tokens transferred subscriber → merchant, `executed` event emitted, next_payment advanced.
+// Expected:
+//   - If protocol fee is 0%: 100 tokens → merchant
+//   - If protocol fee is 2.5% (250 bps):
+//       fee = 100 * 250 / 10_000 = 2 tokens
+//       merchant receives 98 tokens
+//       fee_collector receives 2 tokens
+//   - next_payment advanced by interval
+//   - `executed` event emitted with amount and payment_nonce
+//
+// Error cases:
+//   - NoActiveSubscription (code 4) if subscription not found
+//   - PaymentNotDue (code 5) if now < next_payment
+//   - TransferFailed (code 7) if subscriber balance < amount
+//   - SubscriptionPaused (code 12) if subscription is paused
+```
+
+**execute_payment — error case recovery:**
+
+```typescript
+// Scenario: subscriber has insufficient balance; payment fails
+const result = await server.simulateTransaction(tx);
+// Returns error: TransferFailed (code 7)
+// Subscription remains ACTIVE with overdue_since timestamp set
+// Merchant can retry execute_payment once subscriber adds balance
+// After grace_period expires, admin or anyone can call expire_subscription
+
+// If subscriber adds balance before grace period:
+const retryOp = contract.call("execute_payment", ...);
+// Second attempt succeeds, overdue_since is cleared, next_payment advanced
 ```
 
 **cancel** — subscriber terminates the agreement:
@@ -804,16 +890,167 @@ stellar contract invoke \
   --id $CONTRACT_ID --source alice --network testnet \
   -- cancel \
   --subscriber GABC...ALICE \
-  --merchant   GXYZ...MERCHANT
+  --merchant   GXYZ...MERCHANT \
+  --token      CABC...USDC
+
+# IMPORTANT: Also revoke the SEP-41 allowance to prevent future collections
+stellar contract invoke \
+  --id $TOKEN_CONTRACT_ID --source alice --network testnet \
+  -- approve \
+  --from GABC...ALICE \
+  --spender $CONTRACT_ID \
+  --amount 0
 ```
 
 ```typescript
+// Step 1: Remove subscription from contract
 const op = contract.call(
   "cancel",
   new Address(subscriber).toScVal(),
   new Address(merchant).toScVal(),
+  new Address(tokenAddress).toScVal(),
 );
-// Expected: subscription removed; future execute_payment calls return NoActiveSubscription (error 4).
+// Expected: subscription removed, `cancel` event emitted
+
+// Step 2: Revoke allowance for added security
+const tokenClient = new token.Client(env, tokenAddress);
+tokenClient.approve(subscriber, contractAddress, BigInt(0));
+// This is an additional layer of protection—even if the subscription
+// re-appears due to a bug, no tokens can be transferred without new approval.
+
+// Error case:
+//   - NoActiveSubscription (code 4) if subscription not found → idempotent, safe to retry
+```
+
+**update_subscription** — modify terms without resetting billing cycle:
+
+```bash
+stellar contract invoke \
+  --id $CONTRACT_ID --source alice --network testnet \
+  -- update_subscription \
+  --subscriber GABC...ALICE \
+  --merchant   GXYZ...MERCHANT \
+  --new-amount 150 \
+  --new-interval 1209600
+```
+
+```typescript
+import {
+  Contract,
+  nativeToScVal,
+  Address,
+} from "@stellar/stellar-sdk";
+
+const op = contract.call(
+  "update_subscription",
+  new Address(subscriber).toScVal(),
+  new Address(merchant).toScVal(),
+  nativeToScVal(150n, { type: "i128" }),       // new amount
+  nativeToScVal(1209600n, { type: "u64" }),    // new interval (14 days)
+);
+// Expected:
+//   - Amount changed from 100 to 150
+//   - Interval changed from 30 days to 14 days
+//   - next_payment is PRESERVED — subscriber NOT charged immediately
+//   - `updated` event emitted with old and new values
+//   - TTL extended to ~365 days
+//
+// Typical use cases:
+//   - Subscriber upgrades plan: 100/mo → 150/mo
+//   - Subscriber downgrades plan: 100/mo → 50/mo
+//   - Annual to monthly billing: 1200/yr → 100/mo
+//
+// Error cases:
+//   - NoActiveSubscription (code 4) if subscription not found
+//   - AmountMustBePositive (code 1) if new_amount ≤ 0
+//   - AmountTooLarge (code 9) if new_amount > 10^18
+//   - IntervalTooShort (code 2) if new_interval < 86400
+//   - IntervalTooLong (code 3) if new_interval > 31536000
+```
+
+**batch_execute_payment** — collect from multiple subscribers in one call:
+
+```bash
+stellar contract invoke \
+  --id $CONTRACT_ID --source merchant-key --network testnet \
+  -- batch_execute_payment \
+  --merchant GXYZ...MERCHANT \
+  --token CABC...USDC \
+  --subscribers GABC...SUB1 GDEF...SUB2 GHIJ...SUB3
+```
+
+```typescript
+const op = contract.call(
+  "batch_execute_payment",
+  new Address(merchant).toScVal(),
+  new Address(tokenAddress).toScVal(),
+  new Vec(env, [
+    new Address("GABC...SUB1").toScVal(),
+    new Address("GDEF...SUB2").toScVal(),
+    new Address("GHIJ...SUB3").toScVal(),
+  ]),
+);
+// Expected return: Vec<(Address, bool)> = [
+//   (GABC...SUB1, true),   // payment successful
+//   (GDEF...SUB2, false),  // payment skipped: not due or insufficient balance
+//   (GHIJ...SUB3, true),   // payment successful
+// ]
+//
+// Cost benefits:
+//   - One auth check covers all subscribers
+//   - Fee split applied per subscriber
+//   - Protocol fee deducted from each payment
+//   - Reduced total transaction fee vs. 3 individual calls
+//
+// Constraints:
+//   - Maximum 50 subscribers per batch
+//   - Empty subscribers list returns EmptyBatch error
+//   - Batch is partial-success: failed subscribers do not block others
+//
+// Error cases:
+//   - EmptyBatch if subscribers.is_empty()
+//   - BatchTooLarge if subscribers.len() > 50
+```
+
+**transfer_subscription** — reassign subscription to new merchant (atomic):
+
+```bash
+stellar contract invoke \
+  --id $CONTRACT_ID --source alice --network testnet \
+  -- transfer_subscription \
+  --subscriber GABC...ALICE \
+  --old-merchant GXYZ...OLD_MERCHANT \
+  --new-merchant GNEW...NEW_MERCHANT
+```
+
+```typescript
+const op = contract.call(
+  "transfer_subscription",
+  new Address(subscriber).toScVal(),
+  new Address(oldMerchant).toScVal(),
+  new Address(newMerchant).toScVal(),
+);
+// Expected:
+//   - Subscription removed from old merchant's index
+//   - Subscription added to new merchant's index
+//   - All state preserved: token, amount, interval, next_payment
+//   - Atomic: either both changes commit or neither does
+//   - `subscription_transferred` event emitted
+//
+// Typical use cases:
+//   - Merchant key rotation: old_key → new_key
+//   - Business acquisition: subscriber's vendors merge
+//   - Account consolidation: old_merchant → admin account
+//
+// Authorization:
+//   - Both subscriber AND old_merchant must sign
+//   - Neither party alone can reassign the subscription
+//
+// Error cases:
+//   - NoActiveSubscription (code 4) if (subscriber, old_merchant) pair not found
+//   - SameMerchant if old_merchant == new_merchant (no-op)
+//   - SelfSubscription (code 10) if subscriber == new_merchant
+//   - SubscriptionAlreadyExists if (subscriber, new_merchant) pair already has active subscription
 ```
 
 **get_subscription** — read active subscription state without auth:
@@ -823,7 +1060,8 @@ stellar contract invoke \
   --id $CONTRACT_ID --network testnet \
   -- get_subscription \
   --subscriber GABC...ALICE \
-  --merchant   GXYZ...MERCHANT
+  --merchant   GXYZ...MERCHANT \
+  --token      CABC...USDC
 ```
 
 ```typescript
@@ -834,7 +1072,6 @@ import {
   Networks,
   Address,
   scValToNative,
-  xdr,
 } from "@stellar/stellar-sdk";
 
 const server = new SorobanRpc.Server("https://soroban-testnet.stellar.org");
@@ -848,6 +1085,7 @@ const tx = new TransactionBuilder(account, { fee: "100", networkPassphrase: Netw
       "get_subscription",
       new Address(subscriber).toScVal(),
       new Address(merchant).toScVal(),
+      new Address(tokenAddress).toScVal(),
     )
   )
   .setTimeout(30)
@@ -862,17 +1100,29 @@ if (SorobanRpc.Api.isSimulationSuccess(sim) && sim.result) {
     console.log("No active subscription for this pair.");
   } else {
     // raw is an object matching SubscriptionData:
-    // { token: string, amount: bigint, interval: bigint, next_payment: bigint, is_paused: boolean }
+    // {
+    //   token: Address,
+    //   amount: i128,
+    //   interval: u64,
+    //   next_payment: u64,
+    //   is_paused: boolean,
+    //   grace_period: u64,
+    //   overdue_since: Option<u64>,
+    //   payment_nonce: u32,
+    // }
     console.log("Subscription:", raw);
     console.log("Amount (stroops):", raw.amount);
-    console.log("Next payment (unix timestamp):", new Date(Number(raw.next_payment) * 1000));
+    console.log("Interval (seconds):", raw.interval);
+    console.log("Next payment:", new Date(Number(raw.next_payment) * 1000));
+    console.log("Overdue since:", raw.overdue_since ? new Date(Number(raw.overdue_since) * 1000) : "N/A");
+    console.log("Is paused:", raw.is_paused);
   }
 }
 // Expected: returns the SubscriptionData struct or null (None) if no subscription exists.
 // No wallet connection or signature needed — safe to call from any read-only context.
 ```
 
-**get_subscription_count** — number of active subscriptions for a merchant:
+**get_subscription_count** — enumerate active subscriptions for a merchant:
 
 ```bash
 stellar contract invoke \
@@ -899,10 +1149,47 @@ if (SorobanRpc.Api.isSimulationSuccess(sim) && sim.result) {
   console.log(`Merchant has ${count} active subscriber(s).`);
 }
 // Expected: u32 count of active subscriptions indexed for the merchant.
-// Returns 0 when the merchant has no subscribers or the index has expired.
+// Returns 0 when the merchant has no subscribers or the index has expired from temporary storage.
 ```
 
-For the full parameter reference and error cases see [docs/contract-api.md](docs/contract-api.md).
+### Protocol fee split mechanics
+
+When a protocol fee is configured via `set_protocol_fee(admin, fee_bps, fee_collector)`, every `execute_payment` call splits the payment:
+
+```
+fee_bps = 250 (2.5%)
+amount = 100 tokens
+
+fee             = amount × fee_bps / 10_000 = 100 × 250 / 10_000 = 2 tokens (integer division)
+merchant_amount = amount - fee = 100 - 2 = 98 tokens
+
+Transfer 1: subscriber → merchant        for 98 tokens
+Transfer 2: subscriber → fee_collector   for 2 tokens
+```
+
+**Key points:**
+- Fee is capped at 500 bps (5%) — admin cannot extract more than 5% per transaction.
+- Fee rounds down; amounts < 200 tokens at 50 bps yield zero fee.
+- Each transfer triggers a `fee_collected` event.
+- Subscriber's SEP-41 allowance must cover the full `amount`; the contract handles the split internally.
+- `batch_execute_payment` applies the same fee split per subscriber.
+
+### Summary table: common error scenarios
+
+| Error Code | Name | Trigger | Recovery |
+|---|---|---|---|
+| 1 | `AmountMustBePositive` | `amount ≤ 0` in `subscribe` or `update_subscription` | Correct amount to be > 0 and resubmit |
+| 2 | `IntervalTooShort` | `interval < 86400` (< 1 day) | Set interval ≥ 86400 seconds |
+| 3 | `IntervalTooLong` | `interval > 31536000` (> 365 days) | Set interval ≤ 31536000 seconds |
+| 4 | `NoActiveSubscription` | Attempting payment/query on non-existent pair | Call `subscribe` to create; or check pair is correct |
+| 5 | `PaymentNotDue` | `execute_payment` called before `now ≥ next_payment` | Wait until `next_payment` or check timestamp |
+| 6 | `Unauthorized` | Invalid or missing signature on restricted entry point | Ensure correct account signs via Freighter or CLI |
+| 7 | `TransferFailed` | Subscriber has insufficient balance for payment | Subscriber must deposit tokens and retry; or `cancel` |
+| 9 | `AmountTooLarge` | `amount > 10^18` | Reduce amount ≤ 1,000,000,000,000,000,000 |
+| 10 | `SelfSubscription` | `subscriber == merchant` in `subscribe` | Use different addresses for subscriber and merchant |
+| 12 | `SubscriptionPaused` | `execute_payment` on paused subscription before resume time | Wait until pause expires or cancel |
+
+For the full parameter reference and additional administrative functions see [docs/contract-api.md](docs/contract-api.md).
 
 ### Events emitted
 
