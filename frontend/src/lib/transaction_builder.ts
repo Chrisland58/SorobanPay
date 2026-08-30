@@ -26,6 +26,7 @@ import {
 import { SorobanRpc } from '@stellar/stellar-sdk';
 import { signTx } from './wallet_manager';
 import { isValidCAddress, isValidGAddress } from './validation';
+import { withBackoff, isRpcRetryable, getErrorMessage } from './backoff';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -61,6 +62,46 @@ export interface SubmitResult {
   server: SorobanRpc.Server;
 }
 
+/** Parameters for executing a payment */
+export interface ExecutePaymentParams {
+  /** Subscriber Stellar G-address */
+  subscriber: string;
+  /** Merchant Stellar G-address (must match the signer) */
+  merchant: string;
+}
+
+/** Result of a successful execute_payment transaction */
+export interface ExecutePaymentResult {
+  /** Transaction hash on Stellar network */
+  txHash: string;
+}
+
+/** One entry in a batch payment operation */
+export interface BatchPaymentEntry {
+  /** Subscriber address */
+  subscriber: string;
+  /** Merchant address */
+  merchant: string;
+}
+
+/** Per-entry result for batch execute_payment */
+export interface BatchPaymentResultEntry {
+  subscriber: string;
+  merchant: string;
+  txHash?: string;
+  error?: string;
+}
+
+/** Result of batch_execute_payment */
+export interface BatchExecutePaymentResult {
+  /** Per-entry results */
+  results: BatchPaymentResultEntry[];
+  /** Count of successful submissions */
+  successCount: number;
+  /** Count of failed submissions */
+  failureCount: number;
+}
+
 // ── Constants ─────────────────────────────────────────────────────────────────
 
 /** @deprecated Use useTransactionPoller (exponential backoff) instead */
@@ -71,13 +112,21 @@ const MAX_POLL_ATTEMPTS = 60; // 60 seconds total
 // ── Phase 1: build, sign, and submit ─────────────────────────────────────────
 
 /**
- * Build, sign, and submit a `subscribe` transaction.
+ * Build, sign, and submit a `subscribe` transaction with adaptive retry logic.
+ *
+ * Wraps RPC calls with exponential backoff and jitter:
+ *   - getAccount: Retries up to 5 times over ~30s (transient network issues)
+ *   - prepareTransaction: Retries up to 3 times over ~15s (mempool congestion)
+ *   - sendTransaction: Retries up to 3 times over ~15s (rate limits, temporary RPC issues)
+ *
+ * Non-retryable errors (signing rejection, invalid addresses, contract errors)
+ * are thrown immediately without retry.
  *
  * Returns the transaction hash and server instance as soon as the transaction
  * is accepted by the RPC (status !== 'ERROR'). The caller is responsible for
  * polling for confirmation — use `useTransactionPoller.startPolling()`.
  *
- * @throws On validation failure, signing rejection, or submission error.
+ * @throws On validation failure, signing rejection, or persistent submission errors
  */
 export async function buildSignAndSubmitSubscribe(
   params: SubscribeParams,
@@ -86,7 +135,7 @@ export async function buildSignAndSubmitSubscribe(
   networkPassphrase: string,
   rpcUrl: string,
 ): Promise<SubmitResult> {
-  // 0. Validate addresses before making any network calls
+  // 0. Validate addresses before making any network calls (non-retryable)
   if (!isValidGAddress(params.subscriber)) {
     throw new Error(`Invalid subscriber address: ${params.subscriber}`);
   }
@@ -99,10 +148,25 @@ export async function buildSignAndSubmitSubscribe(
 
   const server = new SorobanRpc.Server(rpcUrl, { allowHttp: false });
 
-  // 1. Fetch account
-  const account = await server.getAccount(publicKey);
+  // 1. Fetch account with retry (up to 5 attempts, transient network issues)
+  const account = await withBackoff(
+    () => server.getAccount(publicKey),
+    {
+      maxRetries: 5,
+      baseDelayMs: 300,
+      maxDelayMs: 30_000,
+      jitterFactor: 0.25,
+      isRetryable,
+      onRetry: (attempt, error, delayMs) => {
+        console.warn(
+          `[subscribe] getAccount retry ${attempt}/6 after ${delayMs}ms:`,
+          getErrorMessage(error),
+        );
+      },
+    },
+  );
 
-  // 2. Build transaction
+  // 2. Build transaction (local operation, no retry needed)
   const contract = new Contract(contractId);
 
   const tx = new TransactionBuilder(account, {
@@ -122,21 +186,58 @@ export async function buildSignAndSubmitSubscribe(
     .setTimeout(30)
     .build();
 
-  // 3. Prepare transaction (simulation + resource fee injection)
+  // 3. Prepare transaction with retry (simulation + resource fee, can fail transiently)
   let preparedTx: ReturnType<typeof TransactionBuilder.fromXDR>;
   try {
-    preparedTx = await server.prepareTransaction(tx);
+    preparedTx = await withBackoff(
+      () => server.prepareTransaction(tx),
+      {
+        maxRetries: 3,
+        baseDelayMs: 500,
+        maxDelayMs: 15_000,
+        jitterFactor: 0.25,
+        isRetryable,
+        onRetry: (attempt, error, delayMs) => {
+          console.warn(
+            `[subscribe] prepareTransaction retry ${attempt}/4 after ${delayMs}ms:`,
+            getErrorMessage(error),
+          );
+        },
+      },
+    );
   } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : String(err);
-    throw new Error(`Transaction preparation failed: ${msg}`);
+    const msg = getErrorMessage(err);
+    throw new Error(`Transaction preparation failed after retries: ${msg}`);
   }
 
-  // 4. Sign with Freighter
+  // 4. Sign with Freighter (user action, no retry — if rejected, fail immediately)
   const signedXdr = await signTx(preparedTx.toXDR(), networkPassphrase);
 
-  // 5. Submit
   const parsedTx = TransactionBuilder.fromXDR(signedXdr, networkPassphrase);
-  const sendResult = await server.sendTransaction(parsedTx);
+
+  // 5. Submit with retry (rate limits, mempool backlog)
+  let sendResult: SorobanRpc.Api.SendTransactionResponse;
+  try {
+    sendResult = await withBackoff(
+      () => server.sendTransaction(parsedTx),
+      {
+        maxRetries: 3,
+        baseDelayMs: 500,
+        maxDelayMs: 15_000,
+        jitterFactor: 0.25,
+        isRetryable,
+        onRetry: (attempt, error, delayMs) => {
+          console.warn(
+            `[subscribe] sendTransaction retry ${attempt}/4 after ${delayMs}ms:`,
+            getErrorMessage(error),
+          );
+        },
+      },
+    );
+  } catch (err: unknown) {
+    const msg = getErrorMessage(err);
+    throw new Error(`Transaction submission failed after retries: ${msg}`);
+  }
 
   if (sendResult.status === 'ERROR') {
     throw new Error(
@@ -222,11 +323,19 @@ function sleep(ms: number): Promise<void> {
 // ── execute_payment builder ───────────────────────────────────────────────────
 
 /**
- * Build, sign, and submit an `execute_payment` transaction.
+ * Build, sign, and submit an `execute_payment` transaction with adaptive retry logic.
+ *
+ * Wraps RPC calls with exponential backoff and jitter:
+ *   - getAccount: Retries up to 5 times (transient network issues)
+ *   - prepareTransaction: Retries up to 3 times (mempool congestion)
+ *   - sendTransaction: Retries up to 3 times (rate limits, temporary RPC issues)
  *
  * The connected merchant wallet must authorize this call. The contract verifies
  * that `merchant == require_auth()` signer and that the payment interval has
  * elapsed (`now >= next_payment`).
+ *
+ * Non-retryable errors (signing rejection, invalid addresses, contract errors)
+ * are thrown immediately without retry.
  *
  * @param params            Subscriber and merchant addresses
  * @param contractId        Deployed SorobanPay contract address
@@ -234,7 +343,7 @@ function sleep(ms: number): Promise<void> {
  * @param networkPassphrase Stellar network passphrase
  * @param rpcUrl            Soroban RPC endpoint URL
  * @returns                 Transaction hash of the confirmed transaction
- * @throws                  On validation failure, signing rejection, or RPC errors
+ * @throws                  On validation failure, signing rejection, or persistent errors
  */
 /** Parameters for collecting a single subscriber's payment */
 export interface ExecutePaymentParams {
@@ -257,7 +366,7 @@ export async function buildAndSubmitExecutePayment(
   networkPassphrase: string,
   rpcUrl: string,
 ): Promise<ExecutePaymentResult> {
-  // Validate before any network calls
+  // Validate before any network calls (non-retryable)
   if (!isValidGAddress(params.subscriber)) {
     throw new Error(`Invalid subscriber address: ${params.subscriber}`);
   }
@@ -267,8 +376,23 @@ export async function buildAndSubmitExecutePayment(
 
   const server = new SorobanRpc.Server(rpcUrl, { allowHttp: false });
 
-  // Fetch account sequence for the signer (merchant)
-  const account = await server.getAccount(publicKey);
+  // Fetch account sequence for the signer (merchant) with retry
+  const account = await withBackoff(
+    () => server.getAccount(publicKey),
+    {
+      maxRetries: 5,
+      baseDelayMs: 300,
+      maxDelayMs: 30_000,
+      jitterFactor: 0.25,
+      isRetryable,
+      onRetry: (attempt, error, delayMs) => {
+        console.warn(
+          `[execute_payment] getAccount retry ${attempt}/6 after ${delayMs}ms:`,
+          getErrorMessage(error),
+        );
+      },
+    },
+  );
 
   const contract = new Contract(contractId);
 
@@ -286,21 +410,58 @@ export async function buildAndSubmitExecutePayment(
     .setTimeout(30)
     .build();
 
-  // Simulate + inject resource fees
+  // Simulate + inject resource fees with retry
   let preparedTx: ReturnType<typeof TransactionBuilder.fromXDR>;
   try {
-    preparedTx = await server.prepareTransaction(tx);
+    preparedTx = await withBackoff(
+      () => server.prepareTransaction(tx),
+      {
+        maxRetries: 3,
+        baseDelayMs: 500,
+        maxDelayMs: 15_000,
+        jitterFactor: 0.25,
+        isRetryable,
+        onRetry: (attempt, error, delayMs) => {
+          console.warn(
+            `[execute_payment] prepareTransaction retry ${attempt}/4 after ${delayMs}ms:`,
+            getErrorMessage(error),
+          );
+        },
+      },
+    );
   } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : String(err);
-    throw new Error(`Transaction preparation failed: ${msg}`);
+    const msg = getErrorMessage(err);
+    throw new Error(`Transaction preparation failed after retries: ${msg}`);
   }
 
-  // Sign with Freighter
+  // Sign with Freighter (user action, no retry — if rejected, fail immediately)
   const signedXdr = await signTx(preparedTx.toXDR(), networkPassphrase);
 
-  // Submit
   const parsedTx = TransactionBuilder.fromXDR(signedXdr, networkPassphrase);
-  const sendResult = await server.sendTransaction(parsedTx);
+
+  // Submit with retry
+  let sendResult: SorobanRpc.Api.SendTransactionResponse;
+  try {
+    sendResult = await withBackoff(
+      () => server.sendTransaction(parsedTx),
+      {
+        maxRetries: 3,
+        baseDelayMs: 500,
+        maxDelayMs: 15_000,
+        jitterFactor: 0.25,
+        isRetryable,
+        onRetry: (attempt, error, delayMs) => {
+          console.warn(
+            `[execute_payment] sendTransaction retry ${attempt}/4 after ${delayMs}ms:`,
+            getErrorMessage(error),
+          );
+        },
+      },
+    );
+  } catch (err: unknown) {
+    const msg = getErrorMessage(err);
+    throw new Error(`Transaction submission failed after retries: ${msg}`);
+  }
 
   if (sendResult.status === 'ERROR') {
     throw new Error(
