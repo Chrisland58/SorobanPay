@@ -1026,7 +1026,8 @@ export interface UpdateSubscriptionResult {
  *
  * @param params            Subscriber, merchant, new amount, and new interval
  * @param contractId        Deployed SorobanPay contract address
- * @param publicKey         Connected subscriber's public key (from Freighter)
+ * @param publicKey         Connected wallet's public key (from Freighter) —
+ *                          must equal `subscriber` or `oldMerchant`
  * @param networkPassphrase Stellar network passphrase
  * @param rpcUrl            Soroban RPC endpoint URL
  * @returns                 Transaction hash of the confirmed transaction
