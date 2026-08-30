@@ -30,11 +30,14 @@ const WEBHOOK_TRACER = 'sorobanpay.webhook-notifier';
  * event. Merchant endpoints use this as their idempotency key to safely
  * deduplicate retries.
  *
- * Format: sha256("<txHash>:<eventIndex>"), hex-encoded.
+ * Format (Issue #822): sha256(txHash + eventIndex), hex-encoded — matches the
+ * `WebhookDelivery.eventId` field comment in schema.prisma exactly, so it's
+ * reproducible by anyone re-deriving it off-chain from (txHash, eventIndex)
+ * alone, with no separator convention to get wrong.
  */
 export function deriveEventId(txHash: string, eventIndex: number): string {
   return createHash('sha256')
-    .update(`${txHash}:${eventIndex}`)
+    .update(txHash + eventIndex.toString())
     .digest('hex');
 }
 
