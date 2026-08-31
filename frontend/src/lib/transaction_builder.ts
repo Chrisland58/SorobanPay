@@ -35,6 +35,10 @@ export type { NormalizedRpcError, RpcErrorCategory } from './rpc_error_normalize
 // Re-export AllowanceResult for callers that want structured allowance data.
 export type { AllowanceResult } from './allowance_checker';
 
+// Re-export typed network API — callers can resolve network config here.
+export { getNetworkConfig, NETWORK_CONFIGS } from './network_config';
+export type { StellarNetwork, NetworkConfig } from './network_config';
+
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 /** Parameters for creating a new subscription */

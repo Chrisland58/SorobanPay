@@ -11,8 +11,18 @@
  * Priority order (first match wins):
  * 1. Environment variables (NEXT_PUBLIC_*)
  * 2. Runtime API endpoint (if configured)
- * 3. Defaults (for development)
+ * 3. Defaults (testnet)
+ *
+ * Network-specific constants (passphrases, RPC URLs, explorer links) are
+ * defined once in `@/lib/network_config` and consumed here — do not
+ * duplicate those string literals in this file.
  */
+
+import {
+  getNetworkConfig,
+  resolveActiveNetwork,
+  NETWORK_CONFIGS,
+} from './network_config';
 
 // ─── Types ─────────────────────────────────────────────────────────────────────
 
@@ -29,16 +39,10 @@ export interface RuntimeConfig {
   isProduction: boolean;
 }
 
-// ─── Constants ─────────────────────────────────────────────────────────────────
+// ─── Constants (sourced from network_config — no duplicated literals) ──────────
 
-/** Default Stellar testnet RPC endpoint */
-const DEFAULT_RPC_URL = "https://soroban-testnet.stellar.org";
-
-/** Default testnet network passphrase */
-const DEFAULT_NETWORK_PASSPHRASE = "Test SDF Network ; September 2015";
-
-/** Mainnet network passphrase */
-const MAINNET_PASSPHRASE = "Public Global Stellar Network ; September 2015";
+/** Mainnet network passphrase — used for network name/production detection */
+const MAINNET_PASSPHRASE = NETWORK_CONFIGS.mainnet.networkPassphrase;
 
 // ─── State ─────────────────────────────────────────────────────────────────────
 
@@ -133,18 +137,24 @@ function loadFromEnv(): Partial<RuntimeConfig> {
 }
 
 /**
- * Build complete config with defaults
+ * Build complete config with defaults.
+ * Network-specific defaults (rpcUrl, passphrase) come from network_config
+ * so there is one canonical source for those values.
  */
 function buildConfig(
   runtimeConfig: Partial<RuntimeConfig>,
 ): RuntimeConfig {
+  // Use network_config as the source of defaults for the active network.
+  const activeNetworkCfg = getNetworkConfig();
+
   const networkPassphrase =
-    runtimeConfig.networkPassphrase ?? DEFAULT_NETWORK_PASSPHRASE;
+    runtimeConfig.networkPassphrase ?? activeNetworkCfg.networkPassphrase;
   const networkName = getNetworkName(networkPassphrase);
   const isProductionNetwork = isProduction(networkPassphrase);
 
   return {
-    rpcUrl: runtimeConfig.rpcUrl ?? DEFAULT_RPC_URL,
+    // RPC URL: env var > network_config default for active network
+    rpcUrl: runtimeConfig.rpcUrl ?? activeNetworkCfg.rpcUrl,
     contractId: runtimeConfig.contractId ?? "",
     networkPassphrase,
     networkName,
@@ -244,3 +254,16 @@ export function getNetworkInfo(): {
     passphrase: config.networkPassphrase,
   };
 }
+
+// ─── Re-exports from network_config ────────────────────────────────────────────
+// Convenience re-exports so callers can import typed network utilities from
+// either `@/lib/runtime_config` or `@/lib/network_config`.
+
+export {
+  getNetworkConfig,
+  resolveActiveNetwork,
+  isStellarNetwork,
+  NETWORK_CONFIGS,
+} from './network_config';
+
+export type { StellarNetwork, NetworkConfig } from './network_config';
