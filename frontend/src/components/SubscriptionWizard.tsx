@@ -152,10 +152,12 @@ function StepMerchant({
   value,
   onChange,
   onNext,
+  subscriber,
 }: {
   value: string;
   onChange: (v: string) => void;
   onNext: () => void;
+  subscriber: string;
 }) {
   const [error, setError] = useState('');
   const inputRef = useRef<HTMLInputElement>(null);
@@ -166,6 +168,10 @@ function StepMerchant({
     if (!value.trim()) { setError('Merchant address is required.'); return false; }
     if (!isValidGAddress(value)) {
       setError('Must be a valid Stellar G-address (56 characters, starts with G).');
+      return false;
+    }
+    if (subscriber && value.trim() === subscriber.trim()) {
+      setError('Merchant address cannot be the same as your subscriber address. A subscription to yourself is not allowed.');
       return false;
     }
     setError('');
@@ -514,6 +520,10 @@ function StepReview({
   const days = Math.round(Number(form.intervalSeconds) / 86400);
   const nextPayment = new Date(Date.now() + Number(form.intervalSeconds) * 1000);
 
+  // Guard: should not be reachable, but block confirm if addresses are identical
+  const isSelfSubscription =
+    subscriber.trim() !== '' && form.merchantAddress.trim() === subscriber.trim();
+
   const rows: [string, string][] = [
     ['Subscriber', `${subscriber.slice(0, 8)}…${subscriber.slice(-6)}`],
     ['Merchant',   `${form.merchantAddress.slice(0, 8)}…${form.merchantAddress.slice(-6)}`],
@@ -544,13 +554,25 @@ function StepReview({
         To stop payments, you must call <code className="bg-yellow-900/40 px-1 rounded">cancel()</code> or revoke the token allowance.
       </div>
 
+      {isSelfSubscription && (
+        <div role="alert" className="rounded-lg bg-red-900/40 border border-red-600/60 px-4 py-3 mb-4 text-xs text-red-300 leading-relaxed">
+          <strong>Self-subscription not allowed.</strong> The merchant address matches your subscriber address.
+          Go back and enter a different merchant address.
+        </div>
+      )}
+
       <div className="flex gap-3">
         <button type="button" onClick={onBack}
           className="flex-1 rounded-lg border border-gray-600 bg-gray-800/60 text-gray-300 hover:bg-gray-700 py-3 text-sm font-semibold min-h-[48px] transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-500">
           ← Back
         </button>
-        <button type="button" onClick={onConfirm}
-          className="flex-1 rounded-lg bg-green-600 hover:bg-green-500 active:bg-green-700 py-3 text-sm font-semibold text-white min-h-[48px] transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-green-400">
+        <button
+          type="button"
+          onClick={onConfirm}
+          disabled={isSelfSubscription}
+          aria-disabled={isSelfSubscription}
+          className="flex-1 rounded-lg bg-green-600 hover:bg-green-500 active:bg-green-700 py-3 text-sm font-semibold text-white min-h-[48px] transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-green-400 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-green-600"
+        >
           Confirm &amp; Sign →
         </button>
       </div>
@@ -581,6 +603,12 @@ function StepSigning({
     setPhase('submitting');
     setErrorMsg('');
     try {
+      // Guard: belt-and-suspenders check before any network call
+      if (subscriber.trim() === form.merchantAddress.trim()) {
+        throw new Error(
+          'SelfSubscription: subscriber and merchant cannot be the same address.',
+        );
+      }
       const result = await buildAndSubmitSubscribe(
         {
           subscriber,
@@ -804,6 +832,7 @@ function WizardShell() {
           value={form.merchantAddress}
           onChange={(v) => update('merchantAddress', v)}
           onNext={goNext}
+          subscriber={publicKey ?? ''}
         />
       ) : step === 2 ? (
         <StepTokenAmount

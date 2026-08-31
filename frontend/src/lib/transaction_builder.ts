@@ -92,6 +92,11 @@ export async function buildSignAndSubmitSubscribe(
   if (!isValidGAddress(params.merchant)) {
     throw new Error(`Invalid merchant address: ${params.merchant}`);
   }
+  if (params.subscriber === params.merchant) {
+    throw new Error(
+      'SelfSubscription: subscriber and merchant cannot be the same address.',
+    );
+  }
   if (!isValidCAddress(params.token)) {
     throw new Error(`Invalid token contract address: ${params.token}`);
   }

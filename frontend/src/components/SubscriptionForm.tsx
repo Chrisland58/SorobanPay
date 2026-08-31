@@ -751,6 +751,20 @@ function classifyError(err: unknown): TxErrorInfo {
       raw,
     };
   }
+  if (
+    msg.includes("selfsubscription") ||
+    msg.includes("self_subscription") ||
+    msg.includes("error(contract, #10)") ||
+    msg.includes("subscriber and merchant cannot be the same")
+  ) {
+    return {
+      title: "Self-subscription not allowed",
+      summary:
+        "The subscriber and merchant addresses are identical. You cannot subscribe to yourself.",
+      fix: "Enter a different merchant address — it must not match your connected wallet address.",
+      raw,
+    };
+  }
 
   return {
     title: "Transaction failed",
@@ -1193,7 +1207,7 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
     !!amount.trim() &&
     !!interval.trim() &&
     isFormValid(
-      validateSubscriptionForm({ merchantAddress, tokenAddress, amount, interval }),
+      validateSubscriptionForm({ merchantAddress, tokenAddress, amount, interval, subscriberAddress: publicKey ?? undefined }),
     );
 
   const {
@@ -1290,6 +1304,7 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
       tokenAddress,
       amount,
       interval,
+      subscriberAddress: publicKey ?? undefined,
     });
     setFieldErrors(errors);
     if (!isFormValid(errors)) return;
