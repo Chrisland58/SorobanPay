@@ -1343,6 +1343,10 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
   const [amount, setAmount]                   = useState(initialValues?.amount ?? '');
   const [interval, setInterval]               = useState(initialValues?.interval ?? String(DEFAULT_INTERVAL_SECONDS));
 
+  // Issue #22 — track which address fields have been blurred so we can show
+  // inline validation errors proactively (before the user hits submit).
+  const [touchedFields, setTouchedFields] = useState<Record<string, boolean>>({});
+
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isConfirming, setIsConfirming] = useState(false);
   const [confirmingTxHash, setConfirmingTxHash] = useState<string | null>(null);
@@ -1485,6 +1489,7 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
     setFieldErrors({});
     setShowConfirm(false);
     setAllowanceResult(null);
+    setTouchedFields({});
     setMerchantAddress("");
     setTokenAddress("");
     setAmount("");
@@ -1520,6 +1525,27 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
       setTxError(classifyError(err));
       setCancelStatus('idle');
     }
+  }
+
+  /**
+   * Issue #22 — Proactive blur validation for address fields.
+   * When a user leaves a field (onBlur) we mark it as touched and
+   * immediately validate just that field, giving faster feedback than
+   * waiting for form submission.
+   */
+  function handleFieldBlur(field: keyof FieldErrors) {
+    setTouchedFields((prev) => ({ ...prev, [field]: true }));
+    const errors = validateSubscriptionForm({
+      merchantAddress,
+      tokenAddress,
+      amount,
+      interval,
+    });
+    // Only surface errors for fields the user has already interacted with.
+    setFieldErrors((prev) => ({
+      ...prev,
+      [field]: errors[field],
+    }));
   }
 
   function handleSubmit(e: FormEvent) {
@@ -1911,7 +1937,8 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
               placeholder="e.g. GXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
               autoComplete="off"
               value={merchantAddress}
-              onChange={(e) => setMerchantAddress(e.target.value)}
+              onChange={(e) => { setMerchantAddress(e.target.value); if (touchedFields.merchantAddress) handleFieldBlur('merchantAddress'); }}
+              onBlur={() => handleFieldBlur('merchantAddress')}
               disabled={isSubmitting || isConfirming}
               required
               aria-required="true"
@@ -1954,7 +1981,8 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
             <TokenCombobox
               id="tokenAddress"
               value={tokenAddress}
-              onChange={setTokenAddress}
+              onChange={(v) => { setTokenAddress(v); if (touchedFields.tokenAddress) handleFieldBlur('tokenAddress'); }}
+              onBlur={() => handleFieldBlur('tokenAddress')}
               disabled={isSubmitting || isConfirming}
               hasError={!!fieldErrors.tokenAddress}
               tokens={getKnownTokens(NETWORK_NAME)}

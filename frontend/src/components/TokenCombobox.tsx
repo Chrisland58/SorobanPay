@@ -53,6 +53,8 @@ export interface TokenComboboxProps {
   id: string;
   value: string;
   onChange: (value: string) => void;
+  /** Issue #22 — called when the combobox input loses focus */
+  onBlur?: () => void;
   disabled?: boolean;
   hasError?: boolean;
   tokens: KnownToken[];
@@ -85,6 +87,7 @@ export function TokenCombobox({
   id,
   value,
   onChange,
+  onBlur,
   disabled = false,
   hasError = false,
   tokens,
@@ -333,6 +336,7 @@ export function TokenCombobox({
         onChange={handleInputChange}
         onFocus={openDropdown}
         onKeyDown={handleKeyDown}
+        onBlur={onBlur}
         className={`${inputCls} ${errorCls} pr-10`}
       />
 
