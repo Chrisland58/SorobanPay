@@ -161,7 +161,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Download artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: "sorobanpay-artifact-${{ needs.build-artifact.outputs.artifact_id }}"
           path: artifact/
@@ -254,7 +254,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Download artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: "sorobanpay-artifact-${{ needs.build-artifact.outputs.artifact_id }}"
           path: artifact/
@@ -357,7 +357,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Download artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: "sorobanpay-artifact-${{ needs.build-artifact.outputs.artifact_id }}"
           path: artifact/
@@ -476,7 +476,7 @@ jobs:
           fi
 
       - name: Download rollback artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           # Download from the specified run — real implementation uses gh CLI
           name: "sorobanpay-artifact-*"
