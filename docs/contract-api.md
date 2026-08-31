@@ -749,6 +749,118 @@ if (SorobanRpc.Api.isSimulationSuccess(simResult)) {
 
 Add a 10–25% buffer to the simulated `instructions` count to absorb minor host-version variance between simulation and submission.
 
+### Error cases
+
+| Error | Code | Trigger |
+|-------|------|---------|
+| `NoActiveSubscription` | 4 | No subscription found for this pair |
+
+---
+
+## Query entry points
+
+### `get_subscription`
+
+Read-only. Returns the full `SubscriptionData` for a subscriber-merchant pair, or `None` if no subscription exists.
+
+Calling this function also silently extends the entry's TTL (same thresholds as `subscribe`).
+
+**Auth:** none.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `subscriber` | `Address` | Subscriber to look up |
+| `merchant` | `Address` | Merchant counterparty |
+
+**Return type:** `Option<SubscriptionData>`
+
+```rust
+pub struct SubscriptionData {
+    pub token:        Address,  // SEP-41 token contract
+    pub amount:       i128,     // payment amount per interval
+    pub interval:     u64,      // seconds between payments
+    pub next_payment: u64,      // unix timestamp of next valid payment window
+    pub is_paused:    bool,     // true when payments are suspended
+}
+```
+
+**CLI:**
+```bash
+stellar contract invoke \
+  --id $CONTRACT_ID --source alice --network testnet \
+  -- get_subscription \
+  --subscriber GABC...ALICE \
+  --merchant   GXYZ...MERCHANT
+```
+
+**TypeScript:**
+```typescript
+const result = await server.simulateTransaction(
+  buildGetSubscriptionTx(contract, subscriber, merchant, account, networkPassphrase)
+);
+const data = scValToNative(result.result?.retval);
+// data: { token, amount, interval, next_payment, is_paused } or null
+```
+
+---
+
+## Utility entry points
+
+### `compute_subscription_key`
+
+Returns the 32-byte `sha256(subscriber_xdr ++ merchant_xdr)` storage key for a given pair. Useful for off-chain tooling that needs to inspect raw ledger entries.
+
+**Auth:** none.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `subscriber` | `Address` | Subscriber address |
+| `merchant` | `Address` | Merchant address |
+
+Returns `BytesN<32>`.
+
+---
+
+### `get_merchant_subscription_keys`
+
+Returns all 32-byte subscription key hashes currently indexed for the given merchant. Off-chain tools can iterate these hashes to enumerate all active subscriptions the merchant participates in.
+
+**Auth:** none.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `merchant` | `Address` | Merchant to look up |
+
+Returns `Vec<BytesN<32>>`. Returns an empty vector if the merchant has no subscriptions or the index entry has expired.
+
+> **Note:** The index is stored under **temporary** storage (not persistent). It may be evicted if the ledger TTL lapses. Always treat the result as advisory and verify individual entries with `get_subscription`.
+
+---
+
+## All error codes
+
+| Code | Name | Trigger |
+|------|------|---------|
+| 1 | `AmountMustBePositive` | `amount ≤ 0` in `subscribe` |
+| 2 | `IntervalTooShort` | `interval < 86400` in `subscribe` |
+| 3 | `IntervalTooLong` | `interval > 31536000` in `subscribe` |
+| 4 | `NoActiveSubscription` | No subscription found for `(subscriber, merchant)` |
+| 5 | `PaymentNotDue` | `now < next_payment` in `execute_payment` |
+| 6 | `Unauthorized` | Authorization check failed |
+| 7 | `TransferFailed` | Insufficient subscriber balance at payment time |
+| 8 | `InvalidTimestamp` | Ledger timestamp is zero or would overflow |
+| 9 | `AmountTooLarge` | `amount > 10¹⁸` in `subscribe` |
+| 10 | `SelfSubscription` | `subscriber == merchant` in `subscribe` |
+| 11 | `InvalidTokenAddress` | `token` is the contract's own address |
+| 12 | `EmptyBatch` | `subscribers` list is empty in `batch_execute_payment` |
+| 13 | `BatchTooLarge` | `subscribers.len() > 50` in `batch_execute_payment` |
+| 14 | `InsufficientAllowance` | `strict == true` and `allowance < amount` in `subscribe` |
+| 15 | `AlreadyMigrated` | Schema already at current version in `migrate` |
+| 16 | `NotAdmin` | Caller is not the stored admin in `migrate` |
+| 17 | `NotInitialized` | `initialize` was never called |
+
+Error codes 1–17 are **stable** — they will never be reassigned. New codes will use numbers ≥ 18.
+
 ---
 
 ## End-to-end flow example

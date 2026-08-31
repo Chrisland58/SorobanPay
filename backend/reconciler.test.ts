@@ -296,4 +296,99 @@ describe('reconcile()', () => {
     expect(db.get(SUB, MER, TOK2)).toBeDefined();
     expect(result.errors).toHaveLength(0);
   });
+
+  // BigInt comparison: stored amount as string (from DB) vs chain amount as bigint
+  test('BigInt comparison: string amount from DB matches bigint from chain', () => {
+    // Simulate a DB record where amount is stored as a string (Prisma stores as string)
+    const dbRecord: StoredSubscription = {
+      subscriber: SUB,
+      merchant: MER,
+      token: TOK,
+      amount: '100000', // String, as it comes from Prisma DB
+      interval: IVL,
+      next_payment: T0 + IVL,
+      last_payment_at: null,
+    };
+    const db = makeDB([dbRecord]);
+
+    // Chain event has amount as bigint
+    const chainEvent: ChainEvent = {
+      type: 'subscribe',
+      subscriber: SUB,
+      merchant: MER,
+      token: TOK,
+      amount: 100000n, // BigInt
+      timestamp: T0,
+    };
+
+    const result = reconcile([chainEvent], db, IVL);
+
+    // Should detect no mismatch — strings and bigints should compare equal
+    expect(result.repairs).toHaveLength(0);
+    expect(result.errors).toHaveLength(0);
+  });
+
+  // BigInt comparison: mismatched amounts (one as string, one as bigint)
+  test('BigInt comparison: detects actual amount mismatch despite string/bigint types', () => {
+    const dbRecord: StoredSubscription = {
+      subscriber: SUB,
+      merchant: MER,
+      token: TOK,
+      amount: '999999', // Wrong amount, as string
+      interval: IVL,
+      next_payment: T0 + IVL,
+      last_payment_at: null,
+    };
+    const db = makeDB([dbRecord]);
+
+    const chainEvent: ChainEvent = {
+      type: 'subscribe',
+      subscriber: SUB,
+      merchant: MER,
+      token: TOK,
+      amount: 100000n, // Different amount, as bigint
+      timestamp: T0,
+    };
+
+    const result = reconcile([chainEvent], db, IVL);
+
+    // Should detect the amount mismatch and generate an update repair
+    expect(result.repairs).toHaveLength(1);
+    expect(result.repairs[0].kind).toBe('update');
+    if (result.repairs[0].kind === 'update') {
+      expect(result.repairs[0].previous.amount).toBe('999999');
+      expect(result.repairs[0].next.amount).toBe(100000n);
+    }
+    expect(result.errors).toHaveLength(0);
+  });
+
+  // BigInt comparison: large stroops amounts with potential floating point rounding
+  test('BigInt comparison: handles large stroops amounts that would lose precision in float', () => {
+    const largeAmount = '92233720368547758070'; // Large number beyond safe integer range
+    const dbRecord: StoredSubscription = {
+      subscriber: SUB,
+      merchant: MER,
+      token: TOK,
+      amount: largeAmount,
+      interval: IVL,
+      next_payment: T0 + IVL,
+      last_payment_at: null,
+    };
+    const db = makeDB([dbRecord]);
+
+    const chainEvent: ChainEvent = {
+      type: 'subscribe',
+      subscriber: SUB,
+      merchant: MER,
+      token: TOK,
+      amount: BigInt(largeAmount),
+      timestamp: T0,
+    };
+
+    const result = reconcile([chainEvent], db, IVL);
+
+    // Should match exactly without precision loss
+    expect(result.repairs).toHaveLength(0);
+    expect(result.errors).toHaveLength(0);
+  });
 });
