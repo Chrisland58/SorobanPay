@@ -43,11 +43,17 @@ export interface SubscriptionFormInputsProps {
   onTokenChange: (value: string) => void;
   onAmountChange: (value: string) => void;
   onIntervalChange: (value: string) => void;
+  onMerchantBlur?: () => void;
+  onTokenBlur?: () => void;
 }
 
 /**
  * Form inputs for subscription creation.
  * Displays merchant address, token, payment amount, and interval fields.
+ * 
+ * Issue #22: Proactive validation on blur for address fields.
+ * When users leave the merchant or token address field, validation runs immediately
+ * for faster feedback compared to only validating on submit.
  */
 export function SubscriptionFormInputs({
   merchantAddress,
@@ -60,6 +66,8 @@ export function SubscriptionFormInputs({
   onTokenChange,
   onAmountChange,
   onIntervalChange,
+  onMerchantBlur,
+  onTokenBlur,
 }: SubscriptionFormInputsProps) {
   return (
     <div className="space-y-4">
@@ -81,6 +89,7 @@ export function SubscriptionFormInputs({
           autoComplete="off"
           value={merchantAddress}
           onChange={(e) => onMerchantChange(e.target.value)}
+          onBlur={onMerchantBlur}
           disabled={isDisabled}
           required
           aria-required="true"
@@ -122,6 +131,7 @@ export function SubscriptionFormInputs({
           id="tokenAddress"
           value={tokenAddress}
           onChange={onTokenChange}
+          onBlur={onTokenBlur}
           disabled={isDisabled}
           hasError={!!fieldErrors.tokenAddress}
           tokens={getKnownTokens(NETWORK_NAME)}
