@@ -978,14 +978,28 @@ function classifyError(err: unknown): TxErrorInfo {
   };
 }
 
+/**
+ * Issue #24 — Returns true when the error is a network/RPC/fetch error.
+ * Used to decide whether to show the Retry button in ErrorCard.
+ */
+function isNetworkError(error: TxErrorInfo): boolean {
+  return /network|rpc|fetch|failed to fetch|timeout|timed out/i.test(
+    `${error.title} ${error.raw}`,
+  );
+}
+
 function ErrorCard({
   error,
   onDismiss,
   explorerUrl,
+  onRetry,
 }: {
   error: TxErrorInfo;
   onDismiss: () => void;
   explorerUrl?: string | null;
+  /** Issue #24 — optional retry callback. When provided and the error is a
+   *  network error a prominent "Try Again" button is rendered. */
+  onRetry?: () => void;
 }) {
   const [showDetails, setShowDetails] = useState(false);
   const showConfig = /network|rpc|contract|passphrase/i.test(`${error.title} ${error.raw}`);
@@ -1081,6 +1095,40 @@ function ErrorCard({
             {error.raw}
           </pre>
           <CopyButton text={error.raw} label="Copy" />
+        </div>
+      )}
+
+      {/* Issue #24 — Retry button for network errors */}
+      {onRetry && isNetworkError(error) && (
+        <div className="mt-4 pt-3 border-t border-red-800/40">
+          <button
+            type="button"
+            onClick={() => { onDismiss(); onRetry(); }}
+            className="w-full flex items-center justify-center gap-2 rounded-lg
+                       bg-blue-600 hover:bg-blue-500 active:bg-blue-700
+                       py-3 text-sm font-semibold text-white transition-colors
+                       focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400
+                       focus-visible:ring-offset-2 focus-visible:ring-offset-gray-900"
+            aria-label="Retry the transaction"
+          >
+            <svg
+              xmlns="http://www.w3.org/2000/svg"
+              className="h-4 w-4"
+              viewBox="0 0 20 20"
+              fill="currentColor"
+              aria-hidden="true"
+            >
+              <path
+                fillRule="evenodd"
+                d="M4 2a1 1 0 011 1v2.101a7.002 7.002 0 0111.601 2.566 1 1 0 11-1.885.666A5.002 5.002 0 005.999 7H9a1 1 0 010 2H4a1 1 0 01-1-1V3a1 1 0 011-1zm.008 9.057a1 1 0 011.276.61A5.002 5.002 0 0014.001 13H11a1 1 0 110-2h5a1 1 0 011 1v5a1 1 0 11-2 0v-2.101a7.002 7.002 0 01-11.601-2.566 1 1 0 01.61-1.276z"
+                clipRule="evenodd"
+              />
+            </svg>
+            Try Again
+          </button>
+          <p className="mt-2 text-center text-xs text-gray-500">
+            Your form data has been preserved — no need to re-enter anything.
+          </p>
         </div>
       )}
     </div>
@@ -1522,6 +1570,42 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
     }
   }
 
+  /**
+   * Issue #24 — Retry handler for network errors.
+   * Clears the current error and re-submits using existing form values.
+   * Form data is preserved so the user doesn't need to re-enter anything.
+   */
+  async function handleRetry() {
+    if (!publicKey) return;
+    setTxError(null);
+    setTxErrorExplorerUrl(null);
+    setIsSubmitting(true);
+    try {
+      const { txHash, server } = await buildSignAndSubmitSubscribe(
+        {
+          subscriber: publicKey,
+          merchant: merchantAddress.trim(),
+          token: tokenAddress.trim(),
+          amount: Number(amount),
+          interval: Number(interval),
+        },
+        CONTRACT_ID,
+        publicKey,
+        NETWORK_PASSPHRASE,
+        RPC_URL,
+      );
+      setIsSubmitting(false);
+      setIsConfirming(true);
+      setConfirmingTxHash(txHash);
+      startPolling(txHash, server);
+    } catch (err) {
+      const mapped = mapError(err);
+      setTxError(classifyError(err));
+      showToast({ variant: 'error', message: mapped.message, action: mapped.action, docsUrl: mapped.docsUrl });
+      setIsSubmitting(false);
+    }
+  }
+
   function handleSubmit(e: FormEvent) {
     e.preventDefault();
     setTxError(null);
@@ -1859,6 +1943,7 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
           error={txError}
           onDismiss={() => { setTxError(null); setTxErrorExplorerUrl(null); }}
           explorerUrl={txErrorExplorerUrl}
+          onRetry={handleRetry}
         />
       )}
 
