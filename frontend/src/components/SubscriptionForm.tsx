@@ -39,6 +39,8 @@ import { SkeletonForm } from "@/components/Skeleton";
 import { downloadReceipt, type ReceiptData } from "@/components/SubscriptionReceipt";
 import { ShareQRCode } from "@/components/ShareQRCode";
 import { FeeEstimate } from "@/components/FeeEstimate";
+import { SubscriptionFormInputs } from "@/components/SubscriptionFormInputs";
+import { SubscriptionSummary } from "@/components/SubscriptionSummary";
 import {
   getPersistedFormData,
   persistFormData,
@@ -1892,186 +1894,27 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
           aria-labelledby="form-heading"
           className="space-y-4"
         >
-          {/* Merchant address */}
-          <div>
-            <label
-              htmlFor="merchantAddress"
-              className={labelCls}
-            >
-              Merchant address{requiredMark}
-              <span className="sr-only">(required)</span>
-              {" "}<HelpTooltip
-                content="The Stellar G-address of whoever will receive your recurring payments. Must be 56 characters starting with G."
-                articleId="merchant-address"
-              />
-            </label>
-            <input
-              id="merchantAddress"
-              type="text"
-              placeholder="e.g. GXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
-              autoComplete="off"
-              value={merchantAddress}
-              onChange={(e) => setMerchantAddress(e.target.value)}
-              disabled={isSubmitting || isConfirming}
-              required
-              aria-required="true"
-              aria-describedby={`help-merchant${fieldErrors.merchantAddress ? " err-merchant" : ""}`}
-              aria-invalid={!!fieldErrors.merchantAddress}
-              className={fieldClass(!!fieldErrors.merchantAddress)}
-            />
-            <p id="help-merchant" className={hintCls}>
-              The merchant&apos;s Stellar account public key — starts with{" "}
-              <code className="bg-gray-800 px-1 rounded text-gray-200 text-xs">G</code>,
-              56 characters. Example:{" "}
-              <code className="bg-gray-800 px-1 rounded text-gray-200 text-xs font-mono">
-                GABC…WXYZ
-              </code>
-            </p>
-            {fieldErrors.merchantAddress && (
-              <p
-                id="err-merchant"
-                role="alert"
-                className="mt-2 text-xs text-red-400 font-medium"
-              >
-                {fieldErrors.merchantAddress}
-              </p>
-            )}
-          </div>
+          {/* Form inputs — extracted to SubscriptionFormInputs for reusability */}
+          <SubscriptionFormInputs
+            merchantAddress={merchantAddress}
+            tokenAddress={tokenAddress}
+            amount={amount}
+            interval={interval}
+            fieldErrors={fieldErrors}
+            isDisabled={isSubmitting || isConfirming}
+            onMerchantChange={setMerchantAddress}
+            onTokenChange={setTokenAddress}
+            onAmountChange={setAmount}
+            onIntervalChange={setInterval}
+          />
 
-          {/* Token contract address — combobox with known-token autocomplete */}
-          <div>
-            <label
-              htmlFor="tokenAddress"
-              className={labelCls}
-            >
-              Token contract address{requiredMark}
-              {" "}<HelpTooltip
-                content="The SEP-41 token contract address (C-address) to use for payments. Must not be the SorobanPay contract itself."
-                articleId="token-contract"
-              />
-              <span className="sr-only"> (required)</span>
-            </label>
-            <TokenCombobox
-              id="tokenAddress"
-              value={tokenAddress}
-              onChange={setTokenAddress}
-              disabled={isSubmitting || isConfirming}
-              hasError={!!fieldErrors.tokenAddress}
-              tokens={getKnownTokens(NETWORK_NAME)}
-              ariaDescribedBy={`help-token${fieldErrors.tokenAddress ? " err-token" : ""}`}
+          {/* Inline low-allowance hint — shown when confirm modal is closed */}
+          {!showConfirm && allowanceResult && !allowanceResult.sufficient && (
+            <AllowanceWarning
+              allowance={allowanceResult.allowance}
+              shortfall={allowanceResult.shortfall}
             />
-            <p id="help-token" className={hintCls}>
-              Search by symbol (e.g. <code className="bg-gray-800 px-1 rounded text-gray-200 text-xs">USDC</code>)
-              or paste a full SEP-41 contract address (starts with{" "}
-              <code className="bg-gray-800 px-1 rounded text-gray-200 text-xs">C</code>,
-              56 characters). Token list is network-aware ({NETWORK_NAME}).
-            </p>
-            {fieldErrors.tokenAddress && (
-              <p
-                id="err-token"
-                role="alert"
-                className="mt-2 text-xs text-red-400 font-medium"
-              >
-                {fieldErrors.tokenAddress}
-              </p>
-            )}
-          </div>
-
-          {/* Amount */}
-          <div>
-            <label
-              htmlFor="amount"
-              className={labelCls}
-            >
-              Amount{requiredMark}
-              <span className="sr-only"> (required)</span>
-              {" "}<HelpTooltip
-                content="Token units to transfer per interval. Must be positive and at most 10¹⁸. The first payment is collectable immediately after subscribing."
-                articleId="create-subscription"
-              />
-            </label>
-            <input
-              id="amount"
-              type="number"
-              inputMode="numeric"
-              pattern="[0-9]*"
-              min="1"
-              step="1"
-              placeholder="100"
-              autoComplete="off"
-              value={amount}
-              onChange={(e) => setAmount(e.target.value)}
-              disabled={isSubmitting || isConfirming}
-              required
-              aria-required="true"
-              aria-describedby={`help-amount${fieldErrors.amount ? " err-amount" : ""}`}
-              aria-invalid={!!fieldErrors.amount}
-              className={fieldClass(!!fieldErrors.amount)}
-            />
-            <p id="help-amount" className={hintCls}>
-              Required. Enter the recurring payment amount in token units.
-            </p>
-            {fieldErrors.amount && (
-              <p
-                id="err-amount"
-                role="alert"
-                className="mt-2 text-xs text-red-400 font-medium"
-              >
-                {fieldErrors.amount}
-              </p>
-            )}
-            {/* Inline low-allowance hint — shown when we have a result and the
-                confirm modal is closed (avoids duplicate warning) */}
-            {!showConfirm && allowanceResult && !allowanceResult.sufficient && (
-              <div className="mt-2">
-                <AllowanceWarning
-                  allowance={allowanceResult.allowance}
-                  shortfall={allowanceResult.shortfall}
-                />
-              </div>
-            )}
-          </div>
-
-          {/* Interval */}
-          <div>
-            <label
-              htmlFor="interval"
-              className={labelCls}
-            >
-              Interval{requiredMark}
-              <span className="sr-only"> (required)</span>
-              {" "}<HelpTooltip
-                content="How often payments recur in seconds. Min 86,400 (1 day), max 31,536,000 (365 days). E.g. 2,592,000 ≈ monthly."
-                articleId="payment-interval"
-              />
-            </label>
-            <input
-              id="interval"
-              type="number"
-              inputMode="numeric"
-              pattern="[0-9]*"
-              min="86400"
-              max="31536000"
-              step="1"
-              autoComplete="off"
-              value={interval}
-              onChange={(e) => setInterval(e.target.value)}
-              disabled={isSubmitting || isConfirming}
-              required
-              aria-required="true"
-              aria-describedby={`help-interval${intervalError ? ' err-interval' : ''}`}
-              aria-invalid={!!intervalError}
-              className={fieldClass(!!intervalError)}
-            />
-            <p id="help-interval" className={hintCls}>
-              Required. The recurrence cadence for the subscription. Default is 30 days.
-            </p>
-            {intervalError && (
-              <p id="err-interval" role="alert" className="mt-2 text-xs text-red-400 font-medium">
-                {intervalError}
-              </p>
-            )}
-          </div>
+          )}
 
           {/* Share / QR code (FE-37) — merchant portal share button */}
           <ShareQRCode
@@ -2079,6 +1922,16 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
             token={tokenAddress}
             amount={amount}
             interval={interval}
+          />
+
+          {/* Subscription summary — shows compact review before submission */}
+          <SubscriptionSummary
+            merchantAddress={merchantAddress}
+            tokenAddress={tokenAddress}
+            amount={amount}
+            interval={interval}
+            isValid={isFormValid(fieldErrors) && !!publicKey && !!merchantAddress && !!tokenAddress && !!amount && !!interval}
+            getLabel={abGetLabel}
           />
 
           {/* Fee estimate (shown when all fields are valid, before submission) */}
