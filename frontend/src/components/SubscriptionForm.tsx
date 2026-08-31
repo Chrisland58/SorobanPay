@@ -781,21 +781,39 @@ function ConfirmModal({
   onConfirm: () => void;
   onCancel: () => void;
 }) {
+  // Issue #21 — truncate long addresses for mobile-friendly display
+  const truncate = (addr: string) =>
+    addr.length > 16 ? `${addr.slice(0, 8)}…${addr.slice(-6)}` : addr;
+
   const days = Math.round(Number(interval) / 86400);
   return (
     <div
       role="dialog"
       aria-modal="true"
       aria-labelledby="confirm-title"
+      aria-describedby="confirm-subtitle"
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4"
     >
       <div className="w-full max-w-md bg-gray-900 border border-gray-700 rounded-2xl shadow-2xl p-6 space-y-5 text-white">
-        <h3 id="confirm-title" className="text-lg font-bold">
-          Confirm subscription
-        </h3>
-        <p className="text-sm text-gray-400">
-          Review the details before authorizing the on-chain transaction.
-        </p>
+        {/* Issue #21 — header with icon for clarity */}
+        <div className="flex items-center gap-3">
+          <span className="text-2xl flex-shrink-0" aria-hidden="true">📋</span>
+          <div>
+            {/* autoFocus moves keyboard focus into the dialog on open */}
+            <h3
+              id="confirm-title"
+              className="text-lg font-bold leading-tight"
+              // eslint-disable-next-line jsx-a11y/no-autofocus
+              autoFocus
+              tabIndex={-1}
+            >
+              Review your subscription
+            </h3>
+            <p id="confirm-subtitle" className="text-sm text-gray-400 mt-0.5">
+              Confirm the details below before calling Freighter.
+            </p>
+          </div>
+        </div>
 
         {/* Low-allowance warning inside the confirmation dialog */}
         {allowanceResult && !allowanceResult.sufficient && (
@@ -805,22 +823,27 @@ function ConfirmModal({
           />
         )}
 
+        {/* Issue #21 — full summary: merchant, token, amount, interval */}
         <dl className="bg-gray-800/60 rounded-lg divide-y divide-gray-700 text-sm">
           {[
-            ["Merchant", merchantAddress],
-            ["Token", tokenAddress],
-            ["Amount", `${amount} tokens`],
-            ["Interval", `${days} day${days !== 1 ? "s" : ""} (${interval} s)`],
-          ].map(([label, value]) => (
+            { label: "Merchant address", value: merchantAddress, truncated: truncate(merchantAddress), full: merchantAddress },
+            { label: "Token address",    value: tokenAddress,    truncated: truncate(tokenAddress),    full: tokenAddress },
+            { label: "Amount",           value: `${amount} tokens`, truncated: `${amount} tokens`,       full: null },
+            { label: "Interval",         value: `Every ${days} day${days !== 1 ? "s" : ""}`, truncated: `Every ${days} day${days !== 1 ? "s" : ""} (${Number(interval).toLocaleString()} s)`, full: null },
+          ].map(({ label, truncated, full }) => (
             <div key={label} className="flex flex-col gap-0.5 px-4 py-3">
               <dt className="text-xs text-gray-400 font-medium">{label}</dt>
-              <dd className="break-all font-mono text-xs text-gray-100">
-                {value}
+              <dd
+                className="font-mono text-xs text-gray-100 break-all"
+                title={full ?? undefined}
+              >
+                {truncated}
               </dd>
             </div>
           ))}
         </dl>
 
+        {/* Issue #21 — Go Back first in tab order (logical: cancel before confirm) */}
         <div className="flex gap-3 pt-1">
           <button
             onClick={onCancel}
@@ -832,7 +855,7 @@ function ConfirmModal({
             onClick={onConfirm}
             className="flex-1 rounded-lg bg-blue-600 hover:bg-blue-500 active:bg-blue-700 py-3 text-sm font-semibold transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400"
           >
-            Confirm & Authorize
+            Confirm &amp; Authorize
           </button>
         </div>
       </div>
