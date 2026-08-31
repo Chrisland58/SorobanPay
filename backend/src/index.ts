@@ -28,6 +28,7 @@ import notificationsRouter from './routes/notifications';
 import kycRouter from './routes/kyc';
 import versionRouter from './routes/version';
 import analyticsRouter from './routes/analytics';   // FE-50 / BE-52
+import reportsRouter from './routes/reports';        // BE-58: revenue reporting export
 import adminRouter from './routes/admin';
 import authRouter from './routes/auth';                        // BE-55: merchant auth
 import { buildHealthRouter } from './routes/health';
@@ -96,6 +97,7 @@ app.use('/api/v1/reconcile',     reconcileRouter);
 app.use('/api/v1/notifications', notificationsRouter);  // BE-68
 app.use('/api/v1/admin',         adminRouter);          // BE-75: admin dashboard
 app.use('/api/v1/analytics',     requireMerchant, analyticsRouter);  // FE-50: revenue analytics
+app.use('/api/v1/reports',       requireMerchant, reportsRouter);    // BE-58 / #798: payment reports export
 
 // ─── Prometheus metrics (unauthenticated — restrict to internal network) ─────
 app.get('/metrics', (_req, res) => {
@@ -111,6 +113,7 @@ app.use('/api/summaries',     summariesRouter);
 app.use('/api/reconcile',     reconcileRouter);
 app.use('/api/notifications', notificationsRouter);
 app.use('/api/analytics',     analyticsRouter);        // FE-50: backward-compat alias
+app.use('/api/reports',       reportsRouter);          // BE-58 / #798: backward-compat alias
 
 // GET /api  →  same version manifest
 app.use('/api', versionRouter);
@@ -174,6 +177,13 @@ cron.schedule('0 * * * *', async () => {
   } catch (err) {
     console.error('[cron] Reconciliation error:', err);
   }
+});
+
+// #733: Process scheduled push notifications every minute
+cron.schedule('* * * * *', async () => {
+  await processScheduledNotifications().catch(err =>
+    console.error('[cron] Scheduled push notifications error:', err)
+  );
 });
 
 // ─── Start ───────────────────────────────────────────────────────────────────

@@ -92,6 +92,13 @@ model WebhookEndpoint {
   @@unique([merchant, url])
 }
 
+// BE-51: stores the RPC cursor so the indexer can resume after restart
+model IndexerState {
+  id         Int      @id @default(1)
+  lastCursor String?  // opaque cursor returned by getEvents(); null = start from genesis
+  updatedAt  DateTime @updatedAt
+}
+
 model WebhookDelivery {
   id          Int      @id @default(autoincrement())
   /// Stable event identifier — sha256(txHash + eventIndex).
@@ -193,4 +200,25 @@ model RetryConfig {
   webhookUrl      String?  // override webhook for max_retries_exceeded
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
+}
+
+// Merged from two duplicate PaymentRetry blocks.
+// Superset of all fields from both definitions.
+model PaymentRetry {
+  id           Int      @id @default(autoincrement())
+  subscriber   String
+  merchant     String
+  token        String
+  amount       String   // Payment amount in token's smallest unit (stored as string)
+  attemptCount Int      @default(0)
+  lastAttempt  DateTime?
+  nextRetryAt  DateTime?
+  status       String   @default("pending") // "pending" | "succeeded" | "failed" | "abandoned"
+  errorMessage String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@index([subscriber, merchant])
+  @@index([nextRetryAt])
+  @@index([status])
 }

@@ -170,7 +170,8 @@ mod property_tests {
                 &p.merchant,
                 &p.token,
                 &amount,
-                &MIN_INTERVAL,
+                &MIN_INTERVAL,,
+            &false,
             );
             prop_assert!(
                 matches!(result, Err(Ok(ContractError::AmountMustBePositive))),
@@ -194,7 +195,8 @@ mod property_tests {
                 &p.merchant,
                 &p.token,
                 &amount,
-                &MIN_INTERVAL,
+                &MIN_INTERVAL,,
+            &false,
             );
             prop_assert!(
                 matches!(result, Err(Ok(ContractError::AmountTooLarge))),
@@ -381,7 +383,8 @@ mod property_tests {
     fn prop_boundary_amount_minimum() {
         let p = PropEnv::new();
         let result = p.client.try_subscribe(
-            &p.subscriber, &p.merchant, &p.token, &1_i128, &MIN_INTERVAL,
+            &p.subscriber, &p.merchant, &p.token, &1_i128, &MIN_INTERVAL,,
+        &false,
         );
         assert!(result.is_ok(), "amount=1 must succeed; got {:?}", result);
     }
@@ -391,7 +394,8 @@ mod property_tests {
     fn prop_boundary_amount_maximum() {
         let p = PropEnv::new();
         let result = p.client.try_subscribe(
-            &p.subscriber, &p.merchant, &p.token, &MAX_AMOUNT, &MIN_INTERVAL,
+            &p.subscriber, &p.merchant, &p.token, &MAX_AMOUNT, &MIN_INTERVAL,,
+        &false,
         );
         assert!(result.is_ok(), "amount=MAX_AMOUNT must succeed; got {:?}", result);
     }
@@ -401,7 +405,8 @@ mod property_tests {
     fn prop_boundary_amount_just_above_maximum() {
         let p = PropEnv::new();
         let result = p.client.try_subscribe(
-            &p.subscriber, &p.merchant, &p.token, &(MAX_AMOUNT + 1), &MIN_INTERVAL,
+            &p.subscriber, &p.merchant, &p.token, &(MAX_AMOUNT + 1), &MIN_INTERVAL,,
+        &false,
         );
         assert!(
             matches!(result, Err(Ok(ContractError::AmountTooLarge))),
@@ -415,7 +420,8 @@ mod property_tests {
     fn prop_boundary_amount_zero() {
         let p = PropEnv::new();
         let result = p.client.try_subscribe(
-            &p.subscriber, &p.merchant, &p.token, &0_i128, &MIN_INTERVAL,
+            &p.subscriber, &p.merchant, &p.token, &0_i128, &MIN_INTERVAL,,
+        &false,
         );
         assert!(
             matches!(result, Err(Ok(ContractError::AmountMustBePositive))),
@@ -429,7 +435,8 @@ mod property_tests {
     fn prop_boundary_interval_minimum() {
         let p = PropEnv::new();
         let result = p.client.try_subscribe(
-            &p.subscriber, &p.merchant, &p.token, &1_000_i128, &MIN_INTERVAL,
+            &p.subscriber, &p.merchant, &p.token, &1_000_i128, &MIN_INTERVAL,,
+        &false,
         );
         assert!(result.is_ok(), "interval=86_400 must succeed; got {:?}", result);
     }
@@ -453,7 +460,8 @@ mod property_tests {
     fn prop_boundary_interval_maximum() {
         let p = PropEnv::new();
         let result = p.client.try_subscribe(
-            &p.subscriber, &p.merchant, &p.token, &1_000_i128, &MAX_INTERVAL,
+            &p.subscriber, &p.merchant, &p.token, &1_000_i128, &MAX_INTERVAL,,
+        &false,
         );
         assert!(result.is_ok(), "interval=31_536_000 must succeed; got {:?}", result);
     }

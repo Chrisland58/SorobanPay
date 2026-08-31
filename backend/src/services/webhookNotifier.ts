@@ -30,11 +30,14 @@ const WEBHOOK_TRACER = 'sorobanpay.webhook-notifier';
  * event. Merchant endpoints use this as their idempotency key to safely
  * deduplicate retries.
  *
- * Format: sha256("<txHash>:<eventIndex>"), hex-encoded.
+ * Format (Issue #822): sha256(txHash + eventIndex), hex-encoded — matches the
+ * `WebhookDelivery.eventId` field comment in schema.prisma exactly, so it's
+ * reproducible by anyone re-deriving it off-chain from (txHash, eventIndex)
+ * alone, with no separator convention to get wrong.
  */
 export function deriveEventId(txHash: string, eventIndex: number): string {
   return createHash('sha256')
-    .update(`${txHash}:${eventIndex}`)
+    .update(txHash + eventIndex.toString())
     .digest('hex');
 }
 
@@ -50,6 +53,26 @@ export function signPayload(body: string, secret: string): string {
 }
 
 /**
+ * BE-53: Check whether an endpoint's event filter list includes the given
+ * event type.
+ *
+ * The `events` field on WebhookEndpoint is a comma-separated list of event
+ * type strings, e.g. "payment.executed,payment.failed".  An empty string
+ * (or null/undefined) means "deliver all event types".
+ */
+function isEventAllowed(endpointEvents: string | null | undefined, eventType: string): boolean {
+  // No filter configured → deliver everything
+  if (!endpointEvents || endpointEvents.trim() === '') return true;
+
+  const allowed = endpointEvents
+    .split(',')
+    .map((e) => e.trim())
+    .filter(Boolean);
+
+  return allowed.includes(eventType);
+}
+
+/**
  * Deliver a webhook notification to all registered endpoints for the merchant.
  *
  * BE-53: When the BullMQ webhook queue is available (Redis connected), jobs are
@@ -57,7 +80,7 @@ export function signPayload(body: string, secret: string): string {
  * Falls back to direct synchronous delivery when Redis is unavailable.
  */
 export async function notifyWebhooks(payload: WebhookPayload): Promise<void> {
-  const endpoints = await prisma.webhookEndpoint.findMany({
+  const endpoints = await (prisma as any).webhookEndpoint.findMany({
     where: { merchant: payload.merchant, active: true },
   });
 
@@ -201,3 +224,6 @@ async function deliverWithRetry(
 function sleep(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
 }
+
+// Export for unit testing
+export { isEventAllowed };
