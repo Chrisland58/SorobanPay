@@ -142,13 +142,6 @@ export interface BatchExecutePaymentResult {
   failureCount: number;
 }
 
-// ── Constants ─────────────────────────────────────────────────────────────────
-
-/** @deprecated Use useTransactionPoller (exponential backoff) instead */
-const POLL_INTERVAL_MS = 1_000;
-/** @deprecated Use useTransactionPoller (exponential backoff) instead */
-const MAX_POLL_ATTEMPTS = 60; // 60 seconds total
-
 // ΓöÇΓöÇ Phase 1: build, sign, and submit ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
 /**
@@ -450,44 +443,6 @@ export async function buildSignAndSubmitCancel(
   return { txHash, allowanceCheck };
 }
 
-// ── Legacy polling helper ─────────────────────────────────────────────────────
-
-/** @deprecated Use useTransactionPoller (exponential backoff) instead */
-async function pollForConfirmation(
-  server: SorobanRpc.Server,
-  hash: string,
-): Promise<string> {
-  for (let attempt = 0; attempt < MAX_POLL_ATTEMPTS; attempt++) {
-    await sleep(POLL_INTERVAL_MS);
-
-    const result = await server.getTransaction(hash);
-
-    if (result.status === SorobanRpc.Api.GetTransactionStatus.SUCCESS) {
-      return hash;
-    }
-
-    if (result.status === SorobanRpc.Api.GetTransactionStatus.FAILED) {
-      const meta = (result as SorobanRpc.Api.GetFailedTransactionResponse).resultMetaXdr;
-      throw normalizeRpcError(
-        new Error(
-          `Transaction failed on-chain: ${meta ?? 'no result meta available'}`
-        )
-      );
-    }
-
-    // status === NOT_FOUND ΓÇö still in mempool, continue polling
-  }
-
-  throw normalizeRpcError(
-    new Error(
-      `Transaction confirmation timeout after ${MAX_POLL_ATTEMPTS} seconds. Hash: ${hash}`
-    )
-  );
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
 
 // ΓöÇΓöÇ execute_payment builder ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
