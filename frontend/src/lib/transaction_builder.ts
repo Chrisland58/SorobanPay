@@ -221,7 +221,7 @@ export async function buildSignAndSubmitSubscribe(
   let preparedTx: ReturnType<typeof TransactionBuilder.fromXDR>;
   try {
     preparedTx = await withBackoff(
-      () => server.prepareTransaction(tx),
+      () => prepareTransactionWithDiagnostics(server, tx),
       {
         maxRetries: 3,
         baseDelayMs: 500,
@@ -414,7 +414,7 @@ export async function buildSignAndSubmitCancel(
   // 4. Prepare transaction (simulation + resource fee injection)
   let preparedTx: ReturnType<typeof TransactionBuilder.fromXDR>;
   try {
-    preparedTx = await server.prepareTransaction(tx);
+    preparedTx = await prepareTransactionWithDiagnostics(server, tx);
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
     // Wrap in a descriptive message so the normalizer can classify it, then
@@ -534,7 +534,7 @@ export async function buildAndSubmitExecutePayment(
   let preparedTx: ReturnType<typeof TransactionBuilder.fromXDR>;
   try {
     preparedTx = await withBackoff(
-      () => server.prepareTransaction(tx),
+      () => prepareTransactionWithDiagnostics(server, tx),
       {
         maxRetries: 3,
         baseDelayMs: 500,
@@ -806,7 +806,7 @@ async function submitAtomicBatchPayment(
     let preparedTx: ReturnType<typeof TransactionBuilder.fromXDR>;
     try {
       preparedTx = await withBackoff(
-        () => server.prepareTransaction(tx),
+        () => prepareTransactionWithDiagnostics(server, tx),
         {
           maxRetries: 3,
           baseDelayMs: 500,
@@ -994,7 +994,7 @@ export async function buildAndSubmitUpdateSubscription(
 
   let preparedTx: ReturnType<typeof TransactionBuilder.fromXDR>;
   try {
-    preparedTx = await server.prepareTransaction(tx);
+    preparedTx = await prepareTransactionWithDiagnostics(server, tx);
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
     throw new Error(`Transaction preparation failed: ${msg}`);
@@ -1096,7 +1096,7 @@ export async function buildAndSubmitUpdateSubscription(
 
   let preparedTx: ReturnType<typeof TransactionBuilder.fromXDR>;
   try {
-    preparedTx = await server.prepareTransaction(tx);
+    preparedTx = await prepareTransactionWithDiagnostics(server, tx);
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
     throw new Error(`Transaction preparation failed: ${msg}`);
@@ -1193,7 +1193,7 @@ export async function buildAndSubmitTransferSubscription(
 
   let preparedTx: ReturnType<typeof TransactionBuilder.fromXDR>;
   try {
-    preparedTx = await server.prepareTransaction(tx);
+    preparedTx = await prepareTransactionWithDiagnostics(server, tx);
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
     throw new Error(`Transaction preparation failed: ${msg}`);
