@@ -1017,6 +1017,7 @@ interface TxErrorInfo {
   summary: string;
   fix: string;
   raw: string;
+  retryable: boolean;
 }
 
 /**
@@ -1035,17 +1036,22 @@ function classifyError(err: unknown): TxErrorInfo {
     summary: normalized.summary,
     fix:     normalized.action,
     raw:     normalized.rawMessage,
+    retryable: normalized.retryable,
   };
 }
 
 function ErrorCard({
   error,
   onDismiss,
+  onRetry,
   explorerUrl,
+  isRetryable,
 }: {
   error: TxErrorInfo;
   onDismiss: () => void;
+  onRetry?: () => void;
   explorerUrl?: string | null;
+  isRetryable?: boolean;
 }) {
   const [showDetails, setShowDetails] = useState(false);
   const showConfig = /network|rpc|contract|passphrase/i.test(`${error.title} ${error.raw}`);
@@ -1093,6 +1099,35 @@ function ErrorCard({
         </span>
         <p className="text-gray-200 text-xs leading-relaxed">{error.fix}</p>
       </div>
+
+      {/* Retry button for retryable errors (Issue #24) */}
+      {isRetryable && onRetry && (
+        <button
+          type="button"
+          onClick={onRetry}
+          aria-label="Retry the subscription"
+          className="w-full mb-3 rounded-lg bg-blue-700 hover:bg-blue-600 active:bg-blue-800
+                     px-4 py-2.5 text-sm font-semibold text-white transition-all duration-150
+                     focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400"
+        >
+          <span className="inline-flex items-center gap-2">
+            <svg
+              xmlns="http://www.w3.org/2000/svg"
+              className="h-4 w-4"
+              viewBox="0 0 20 20"
+              fill="currentColor"
+              aria-hidden="true"
+            >
+              <path
+                fillRule="evenodd"
+                d="M4 2a1 1 0 011 1v2.101a7.002 7.002 0 0111.601 2.566 1 1 0 11-1.885.666A5.002 5.002 0 005.999 7H9a1 1 0 010 2H4a1 1 0 01-1-1V3a1 1 0 011-1zm.008 9.057a1 1 0 011.276.61A5.002 5.002 0 0014.001 13H11a1 1 0 110-2h5a1 1 0 011 1v5a1 1 0 11-2 0v-2.101a7.002 7.002 0 01-11.601-2.566 1 1 0 01.61-1.276z"
+                clipRule="evenodd"
+              />
+            </svg>
+            Try Again
+          </span>
+        </button>
+      )}
 
       {showConfig && (
         <dl className="bg-gray-900/70 rounded-lg p-3 mb-3 space-y-2 text-xs">
@@ -1918,7 +1953,9 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
       {txError && (
         <ErrorCard
           error={txError}
+          isRetryable={txError.retryable}
           onDismiss={() => { setTxError(null); setTxErrorExplorerUrl(null); }}
+          onRetry={txError.retryable ? () => confirmAndSubmit() : undefined}
           explorerUrl={txErrorExplorerUrl}
         />
       )}
