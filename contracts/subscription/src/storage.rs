@@ -41,6 +41,7 @@ pub fn subscription_key(
 
 /// Storage keys used by the contract.
 #[contracttype]
+#[derive(Clone)]
 pub enum DataKey {
     /// Per-subscription record, keyed by sha256(subscriber_xdr ++ merchant_xdr).
     /// Compact 32-byte key instead of the old two-Address tuple (~70 bytes).
@@ -63,18 +64,14 @@ pub enum DataKey {
     /// Designated admin address authorised to call `migrate`.
     Admin,
 
-    /// Protocol fee configuration: fee rate in basis points and fee collector address.
-    /// Stored in instance storage. Absent means fee is disabled (0 bps).
-    ProtocolFeeConfig,
+    /// Optional admin configuration (rate limits, caps).
+    AdminConfig,
+
+    /// Per-merchant active subscriber count.
+    MerchantSubscriberCount(Address),
 }
 
 /// Persistent on-chain record for a subscription.
-///
-/// ## Schema versioning
-///
-/// `last_payment` was added in schema v2 (Issue #50).  It is `Option<u64>` so that
-/// old entries written by schema v1 (which lack this field) deserialise correctly as
-/// `None`.  `None` means no payment has been collected yet for this subscription.
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct SubscriptionData {
@@ -115,6 +112,14 @@ pub struct SubscriptionEntry {
     pub subscriber: Address,
     /// The full subscription state for this subscriber-merchant pair.
     pub data:       SubscriptionData,
+}
+
+/// Optional admin configuration stored in instance storage.
+#[contracttype]
+#[derive(Clone)]
+pub struct AdminConfig {
+    /// Maximum number of active subscribers allowed per merchant (0 = unlimited).
+    pub max_subscribers_per_merchant: u32,
 }
 
 /// Safe upper bound for a single subscription payment amount (1 × 10¹⁸ stroops).
