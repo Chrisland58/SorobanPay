@@ -9,6 +9,9 @@
  *   3. prepareTransaction (simulates and fills resource fees)
  *   4. Sign with Freighter via signTx()
  *   5. Submit and poll for confirmation (up to 60 seconds)
+ *
+ * Read-only helpers (no signing required):
+ *   - querySubscription   — call `get_subscription` via simulation
  */
 
 import {
@@ -18,6 +21,9 @@ import {
   nativeToScVal,
   Address,
   xdr,
+  scValToNative,
+  Keypair,
+  Networks,
 } from '@stellar/stellar-sdk';
 import { SorobanRpc } from '@stellar/stellar-sdk';
 import { signTx } from './wallet_manager';
@@ -49,6 +55,141 @@ export interface SubscribeResult {
 
 const POLL_INTERVAL_MS = 1_000;
 const MAX_POLL_ATTEMPTS = 60; // 60 seconds total
+
+// ── Query types ───────────────────────────────────────────────────────────────
+
+/**
+ * On-chain subscription record returned by `get_subscription`.
+ *
+ * All fields mirror `SubscriptionData` in the Soroban contract:
+ * - `token`        SEP-41 token contract address (`C…`)
+ * - `amount`       Payment amount per interval in the token's base unit (i128 as bigint)
+ * - `interval`     Seconds between payments [86400, 31536000]
+ * - `next_payment` Unix timestamp of the next valid payment window
+ * - `is_paused`    Whether payments are currently suspended
+ */
+export interface SubscriptionData {
+  token: string;
+  amount: bigint;
+  interval: bigint;
+  next_payment: bigint;
+  is_paused: boolean;
+}
+
+/** Parameters for querying an existing subscription */
+export interface QuerySubscriptionParams {
+  /** Subscriber Stellar G-address */
+  subscriber: string;
+  /** Merchant Stellar G-address */
+  merchant: string;
+}
+
+/** Result of a successful get_subscription query */
+export interface QuerySubscriptionResult {
+  /** Active subscription data, or null if no subscription exists */
+  subscription: SubscriptionData | null;
+}
+
+// ── Query functions ───────────────────────────────────────────────────────────
+
+/**
+ * Query the on-chain subscription record for a (subscriber, merchant) pair.
+ *
+ * Uses `simulateTransaction` — no signing or fees required. Safe to call
+ * from any read-only context such as a dApp dashboard or CLI tool.
+ *
+ * Returns `null` in `subscription` if no active subscription exists for the pair.
+ *
+ * @example
+ * ```typescript
+ * const { subscription } = await querySubscription(
+ *   { subscriber: "GABC...", merchant: "GXYZ..." },
+ *   contractId,
+ *   rpcUrl,
+ *   networkPassphrase,
+ * );
+ *
+ * if (subscription) {
+ *   const due = new Date(Number(subscription.next_payment) * 1000);
+ *   console.log("Next payment due:", due.toISOString());
+ *   console.log("Amount:", subscription.amount.toString(), "base units");
+ * } else {
+ *   console.log("No active subscription found.");
+ * }
+ * ```
+ */
+export async function querySubscription(
+  params: QuerySubscriptionParams,
+  contractId: string,
+  rpcUrl: string,
+  networkPassphrase: string,
+): Promise<QuerySubscriptionResult> {
+  if (!isValidGAddress(params.subscriber)) {
+    throw new Error(`Invalid subscriber address: ${params.subscriber}`);
+  }
+  if (!isValidGAddress(params.merchant)) {
+    throw new Error(`Invalid merchant address: ${params.merchant}`);
+  }
+
+  const server = new SorobanRpc.Server(rpcUrl, { allowHttp: false });
+  const contract = new Contract(contractId);
+
+  // Use a throwaway keypair as the source — simulation does not consume
+  // sequence numbers or require a real funded account.
+  const sourceKeypair = Keypair.random();
+  const account = await server.getAccount(sourceKeypair.publicKey()).catch(() => {
+    // If the random account doesn't exist on-chain, build a minimal AccountResponse
+    // by using the subscriber's account (which must exist to have a subscription).
+    return server.getAccount(params.subscriber);
+  });
+
+  const tx = new TransactionBuilder(account, {
+    fee: BASE_FEE,
+    networkPassphrase,
+  })
+    .addOperation(
+      contract.call(
+        'get_subscription',
+        new Address(params.subscriber).toScVal(),
+        new Address(params.merchant).toScVal(),
+      )
+    )
+    .setTimeout(30)
+    .build();
+
+  const simResult = await server.simulateTransaction(tx);
+
+  if (!SorobanRpc.Api.isSimulationSuccess(simResult)) {
+    const errMsg =
+      (simResult as SorobanRpc.Api.SimulateTransactionErrorResponse).error ??
+      'Simulation failed';
+    throw new Error(`get_subscription simulation failed: ${errMsg}`);
+  }
+
+  const retval = simResult.result?.retval;
+  if (!retval) {
+    // Should not happen for a valid contract call, but guard defensively.
+    return { subscription: null };
+  }
+
+  const native = scValToNative(retval) as Record<string, unknown> | null | undefined;
+
+  if (native == null) {
+    // Contract returned None — no active subscription.
+    return { subscription: null };
+  }
+
+  // Map the native decoded object to our typed interface.
+  const data: SubscriptionData = {
+    token:        String(native['token']),
+    amount:       BigInt(String(native['amount'])),
+    interval:     BigInt(String(native['interval'])),
+    next_payment: BigInt(String(native['next_payment'])),
+    is_paused:    Boolean(native['is_paused']),
+  };
+
+  return { subscription: data };
+}
 
 // ── Main function ─────────────────────────────────────────────────────────────
 
