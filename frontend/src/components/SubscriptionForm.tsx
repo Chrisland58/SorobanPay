@@ -32,7 +32,7 @@
  *   Success → Connected/idle (click "Create another")
  */
 
-import { useState, useEffect, useCallback, type FormEvent } from "react";
+import { useState, useEffect, useCallback, useRef, type FormEvent } from "react";
 import { useWallet } from "@/hooks/useWallet";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { SkeletonForm } from "@/components/Skeleton";
@@ -782,11 +782,42 @@ function ConfirmModal({
   onCancel: () => void;
 }) {
   const days = Math.round(Number(interval) / 86400);
+
+  // ── Focus management ──────────────────────────────────────────────────────
+  const cancelBtnRef = useRef<HTMLButtonElement>(null);
+  const confirmBtnRef = useRef<HTMLButtonElement>(null);
+  const dialogRef = useRef<HTMLDivElement>(null);
+
+  // Move focus to "Go Back" when the modal opens
+  useEffect(() => {
+    cancelBtnRef.current?.focus();
+  }, []);
+
+  // Close on Escape; trap Tab within the two buttons
+  function handleKeyDown(e: React.KeyboardEvent<HTMLDivElement>) {
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      onCancel();
+      return;
+    }
+    if (e.key === 'Tab') {
+      e.preventDefault();
+      // Toggle focus between the two action buttons
+      if (document.activeElement === cancelBtnRef.current) {
+        confirmBtnRef.current?.focus();
+      } else {
+        cancelBtnRef.current?.focus();
+      }
+    }
+  }
+
   return (
     <div
+      ref={dialogRef}
       role="dialog"
       aria-modal="true"
       aria-labelledby="confirm-title"
+      onKeyDown={handleKeyDown}
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4"
     >
       <div className="w-full max-w-md bg-gray-900 border border-gray-700 rounded-2xl shadow-2xl p-6 space-y-5 text-white">
@@ -823,12 +854,14 @@ function ConfirmModal({
 
         <div className="flex gap-3 pt-1">
           <button
+            ref={cancelBtnRef}
             onClick={onCancel}
             className="flex-1 rounded-lg border border-gray-600 bg-gray-800/50 text-gray-300 hover:bg-gray-700 active:bg-gray-800 py-3 text-sm font-semibold transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-500"
           >
             Go Back
           </button>
           <button
+            ref={confirmBtnRef}
             onClick={onConfirm}
             className="flex-1 rounded-lg bg-blue-600 hover:bg-blue-500 active:bg-blue-700 py-3 text-sm font-semibold transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400"
           >
@@ -851,11 +884,38 @@ function CancelConfirmModal({
   onConfirm: () => void;
   onCancel: () => void;
 }) {
+  // ── Focus management ──────────────────────────────────────────────────────
+  const keepBtnRef = useRef<HTMLButtonElement>(null);
+  const cancelBtnRef = useRef<HTMLButtonElement>(null);
+
+  // Move focus to "Keep Subscription" (safe default) when the modal opens
+  useEffect(() => {
+    keepBtnRef.current?.focus();
+  }, []);
+
+  // Close on Escape; trap Tab within the two buttons
+  function handleKeyDown(e: React.KeyboardEvent<HTMLDivElement>) {
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      onCancel();
+      return;
+    }
+    if (e.key === 'Tab') {
+      e.preventDefault();
+      if (document.activeElement === keepBtnRef.current) {
+        cancelBtnRef.current?.focus();
+      } else {
+        keepBtnRef.current?.focus();
+      }
+    }
+  }
+
   return (
     <div
       role="dialog"
       aria-modal="true"
       aria-labelledby="cancel-confirm-title"
+      onKeyDown={handleKeyDown}
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4"
     >
       <div className="w-full max-w-md bg-gray-900 border border-gray-700 rounded-2xl shadow-2xl p-6 space-y-5 text-white">
@@ -877,12 +937,14 @@ function CancelConfirmModal({
 
         <div className="flex gap-3 pt-1">
           <button
+            ref={keepBtnRef}
             onClick={onCancel}
             className="flex-1 rounded-lg border border-gray-600 bg-gray-800/50 text-gray-300 hover:bg-gray-700 active:bg-gray-800 py-3 text-sm font-semibold transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-500"
           >
             Keep Subscription
           </button>
           <button
+            ref={cancelBtnRef}
             onClick={onConfirm}
             className="flex-1 rounded-lg bg-red-600 hover:bg-red-500 active:bg-red-700 py-3 text-sm font-semibold transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-red-400"
           >
@@ -2041,10 +2103,59 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
               Interval{requiredMark}
               <span className="sr-only"> (required)</span>
               {" "}<HelpTooltip
-                content="How often payments recur in seconds. Min 86,400 (1 day), max 31,536,000 (365 days). E.g. 2,592,000 ≈ monthly."
+                content={[
+                  "How often payments recur, in seconds.",
+                  "",
+                  "Valid range: 86,400 s (1 day) → 31,536,000 s (365 days).",
+                  "",
+                  "Common presets:",
+                  "• Daily    — 86,400 s",
+                  "• Weekly   — 604,800 s",
+                  "• Monthly  — 2,592,000 s  (30 days)",
+                  "• Quarterly — 7,776,000 s (90 days)",
+                  "• Yearly   — 31,536,000 s",
+                ].join("\n")}
                 articleId="payment-interval"
               />
             </label>
+
+            {/* Quick-select preset buttons */}
+            <div
+              className="flex flex-wrap gap-2 mb-2"
+              role="group"
+              aria-label="Interval presets"
+            >
+              {[
+                { label: "Daily",     seconds: 86400 },
+                { label: "Weekly",    seconds: 604800 },
+                { label: "Monthly",   seconds: 2592000 },
+                { label: "Quarterly", seconds: 7776000 },
+                { label: "Yearly",    seconds: 31536000 },
+              ].map(({ label, seconds }) => {
+                const isActive = interval === String(seconds);
+                return (
+                  <button
+                    key={seconds}
+                    type="button"
+                    aria-pressed={isActive}
+                    aria-label={`Set interval to ${label} (${seconds.toLocaleString()} seconds)`}
+                    disabled={isSubmitting || isConfirming}
+                    onClick={() => setInterval(String(seconds))}
+                    className={`rounded-full border px-3 py-1 text-xs font-medium transition-colors
+                      focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400
+                      focus-visible:ring-offset-1 focus-visible:ring-offset-gray-900
+                      disabled:opacity-50 disabled:cursor-not-allowed
+                      ${isActive
+                        ? "border-blue-500 bg-blue-600/30 text-blue-200"
+                        : "border-gray-600 bg-gray-800/60 text-gray-400 hover:border-gray-500 hover:text-gray-200"
+                      }`}
+                  >
+                    {label}
+                  </button>
+                );
+              })}
+            </div>
+
             <input
               id="interval"
               type="number"
@@ -2064,7 +2175,10 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
               className={fieldClass(!!intervalError)}
             />
             <p id="help-interval" className={hintCls}>
-              Required. The recurrence cadence for the subscription. Default is 30 days.
+              Seconds between payments. Valid range:{" "}
+              <strong className="text-gray-300">86,400</strong> s (1 day) to{" "}
+              <strong className="text-gray-300">31,536,000</strong> s (365 days).
+              Default: 2,592,000 s (30 days). Use the presets above or type any value in seconds.
             </p>
             {intervalError && (
               <p id="err-interval" role="alert" className="mt-2 text-xs text-red-400 font-medium">
@@ -2145,7 +2259,7 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
 
       {/* ── Cancel subscription section ─────────────────────────────────────── */}
       <div className="mt-8 pt-6 border-t border-gray-700/60">
-        <h3 className="text-base font-semibold text-gray-200 mb-1">
+        <h3 id="cancel-section-heading" className="text-base font-semibold text-gray-200 mb-1">
           Cancel a subscription
         </h3>
         <p className="text-xs text-gray-400 mb-4 leading-relaxed">
@@ -2220,11 +2334,12 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
         )}
 
         {!cancelSuccess && (
-          <form onSubmit={handleCancelRequest} noValidate aria-busy={isCancelling} className="space-y-3">
+          <form onSubmit={handleCancelRequest} noValidate aria-busy={isCancelling} aria-labelledby="cancel-section-heading" className="space-y-3">
             <div>
               <label htmlFor="cancelMerchant" className="block text-sm font-semibold text-gray-100 mb-2">
                 Merchant address
                 <span aria-hidden="true" className="text-red-400 ml-1">*</span>
+                <span className="sr-only"> (required)</span>
               </label>
               <input
                 id="cancelMerchant"
@@ -2236,9 +2351,11 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
                 disabled={isCancelling}
                 required
                 aria-required="true"
+                aria-describedby="help-cancel-merchant"
+                aria-invalid={!!cancelError}
                 className={inputCls}
               />
-              <p className="mt-1.5 text-xs text-gray-400 leading-relaxed">
+              <p id="help-cancel-merchant" className="mt-1.5 text-xs text-gray-400 leading-relaxed">
                 The merchant&apos;s Stellar G-address for the subscription you want to cancel.
               </p>
             </div>
@@ -2246,6 +2363,7 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
               <label htmlFor="cancelToken" className="block text-sm font-semibold text-gray-100 mb-2">
                 Token contract address
                 <span aria-hidden="true" className="text-red-400 ml-1">*</span>
+                <span className="sr-only"> (required)</span>
               </label>
               <input
                 id="cancelToken"
@@ -2257,9 +2375,11 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
                 disabled={isCancelling}
                 required
                 aria-required="true"
+                aria-describedby="help-cancel-token"
+                aria-invalid={!!cancelError}
                 className={inputCls}
               />
-              <p className="mt-1.5 text-xs text-gray-400 leading-relaxed">
+              <p id="help-cancel-token" className="mt-1.5 text-xs text-gray-400 leading-relaxed">
                 The token contract tied to the active subscription being cancelled.
               </p>
             </div>

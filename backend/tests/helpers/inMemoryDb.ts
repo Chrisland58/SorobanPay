@@ -190,7 +190,30 @@ export class InMemoryPrismaClient {
     },
   };
 
-  // BE-53: webhook endpoint table
+  indexerState = {
+    findUnique: async (args: { where: { id: number } }) => {
+      return this.indexerStates.find((s) => s.id === args.where.id) ?? null;
+    },
+    upsert: async (args: {
+      where: { id: number };
+      create: { id: number; lastCursor: string | null };
+      update: { lastCursor: string | null };
+    }) => {
+      const idx = this.indexerStates.findIndex((s) => s.id === args.where.id);
+      if (idx === -1) {
+        const record: StoredIndexerState = {
+          ...args.create,
+          updatedAt: new Date(),
+        };
+        this.indexerStates.push(record);
+        return record;
+      } else {
+        this.indexerStates[idx] = { ...this.indexerStates[idx], ...args.update, updatedAt: new Date() };
+        return this.indexerStates[idx];
+      }
+    },
+  };
+
   webhookEndpoint = {
     findMany: async (args?: { where?: Partial<StoredWebhookEndpoint> }) => {
       if (!args?.where) return [...this.webhookEndpoints];
@@ -209,7 +232,6 @@ export class InMemoryPrismaClient {
     },
   };
 
-  // BE-53: webhook delivery table
   webhookDelivery = {
     create: async (args: { data: Omit<StoredWebhookDelivery, 'id' | 'createdAt'> }) => {
       const record: StoredWebhookDelivery = {
@@ -227,6 +249,15 @@ export class InMemoryPrismaClient {
       );
     },
   };
+
+  /**
+   * Minimal $transaction implementation that runs callbacks sequentially.
+   * Passes a proxy of this client as the tx argument so service code that
+   * calls tx.event.create(...) etc. operates on the same in-memory store.
+   */
+  async $transaction<T>(fn: (tx: InMemoryPrismaClient) => Promise<T>): Promise<T> {
+    return fn(this);
+  }
 
   private matchesEvent(record: StoredEvent, where: Record<string, any>): boolean {
     return Object.entries(where).every(([k, v]) => {
