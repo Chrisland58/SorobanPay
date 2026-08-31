@@ -67,12 +67,45 @@ export interface StoredSummary {
   createdAt: Date;
 }
 
+export interface StoredIndexerState {
+  id: number;
+  lastCursor: string | null;
+  updatedAt: Date;
+}
+
+export interface StoredWebhookEndpoint {
+  id: number;
+  merchant: string;
+  url: string;
+  active: boolean;
+  events: string;
+  createdAt: Date;
+}
+
+export interface StoredWebhookDelivery {
+  id: number;
+  url: string;
+  merchant: string;
+  event: string;
+  payload: string;
+  statusCode: number;
+  attempt: number;
+  success: boolean;
+  error?: string;
+  createdAt: Date;
+}
+
 /** Minimal Prisma-compatible client for use in integration tests. */
 export class InMemoryPrismaClient {
   private events: StoredEvent[] = [];
   private summaries: StoredSummary[] = [];
+  private indexerStates: StoredIndexerState[] = [];
+  private webhookEndpoints: StoredWebhookEndpoint[] = [];
+  private webhookDeliveries: StoredWebhookDelivery[] = [];
   private nextEventId = 1;
   private nextSummaryId = 1;
+  private nextEndpointId = 1;
+  private nextDeliveryId = 1;
 
   event = {
     findFirst: async (args: { where: Partial<StoredEvent> }) => {
@@ -127,6 +160,75 @@ export class InMemoryPrismaClient {
     },
   };
 
+  indexerState = {
+    findUnique: async (args: { where: { id: number } }) => {
+      return this.indexerStates.find((s) => s.id === args.where.id) ?? null;
+    },
+    upsert: async (args: {
+      where: { id: number };
+      create: { id: number; lastCursor: string | null };
+      update: { lastCursor: string | null };
+    }) => {
+      const idx = this.indexerStates.findIndex((s) => s.id === args.where.id);
+      if (idx === -1) {
+        const record: StoredIndexerState = {
+          ...args.create,
+          updatedAt: new Date(),
+        };
+        this.indexerStates.push(record);
+        return record;
+      } else {
+        this.indexerStates[idx] = { ...this.indexerStates[idx], ...args.update, updatedAt: new Date() };
+        return this.indexerStates[idx];
+      }
+    },
+  };
+
+  webhookEndpoint = {
+    findMany: async (args?: { where?: Partial<StoredWebhookEndpoint> }) => {
+      if (!args?.where) return [...this.webhookEndpoints];
+      return this.webhookEndpoints.filter((ep) =>
+        Object.entries(args.where!).every(([k, v]) => (ep as any)[k] === v),
+      );
+    },
+    create: async (args: { data: Omit<StoredWebhookEndpoint, 'id' | 'createdAt'> }) => {
+      const record: StoredWebhookEndpoint = {
+        ...args.data,
+        id: this.nextEndpointId++,
+        createdAt: new Date(),
+      };
+      this.webhookEndpoints.push(record);
+      return record;
+    },
+  };
+
+  webhookDelivery = {
+    create: async (args: { data: Omit<StoredWebhookDelivery, 'id' | 'createdAt'> }) => {
+      const record: StoredWebhookDelivery = {
+        ...args.data,
+        id: this.nextDeliveryId++,
+        createdAt: new Date(),
+      };
+      this.webhookDeliveries.push(record);
+      return record;
+    },
+    findMany: async (args?: { where?: Partial<StoredWebhookDelivery> }) => {
+      if (!args?.where) return [...this.webhookDeliveries];
+      return this.webhookDeliveries.filter((d) =>
+        Object.entries(args.where!).every(([k, v]) => (d as any)[k] === v),
+      );
+    },
+  };
+
+  /**
+   * Minimal $transaction implementation that runs callbacks sequentially.
+   * Passes a proxy of this client as the tx argument so service code that
+   * calls tx.event.create(...) etc. operates on the same in-memory store.
+   */
+  async $transaction<T>(fn: (tx: InMemoryPrismaClient) => Promise<T>): Promise<T> {
+    return fn(this);
+  }
+
   private matchesEvent(record: StoredEvent, where: Record<string, any>): boolean {
     return Object.entries(where).every(([k, v]) => {
       if (v === undefined) return true;
@@ -148,10 +250,22 @@ export class InMemoryPrismaClient {
     }
   }
 
+  /** Seed webhook endpoints directly for test setup. */
+  seedEndpoints(endpoints: Omit<StoredWebhookEndpoint, 'id' | 'createdAt'>[]): void {
+    for (const ep of endpoints) {
+      this.webhookEndpoints.push({ ...ep, id: this.nextEndpointId++, createdAt: new Date() });
+    }
+  }
+
   reset(): void {
     this.events = [];
     this.summaries = [];
+    this.indexerStates = [];
+    this.webhookEndpoints = [];
+    this.webhookDeliveries = [];
     this.nextEventId = 1;
     this.nextSummaryId = 1;
+    this.nextEndpointId = 1;
+    this.nextDeliveryId = 1;
   }
 }
