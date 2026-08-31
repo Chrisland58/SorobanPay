@@ -1,5 +1,7 @@
 # Backend Event-Indexing Architecture for SorobanPay
 
+> **Looking for visual diagrams?** See [docs/architecture-diagrams.md](./architecture-diagrams.md) for Mermaid flow and sequence diagrams covering the system overview, subscribe/execute/cancel flows, deployment pipeline, and event indexing workflow.
+
 This document describes the recommended architecture for indexing and processing off-chain events from the SorobanPay smart contract. Contributors building integrations, dashboards, or payment analytics should use this guide to design a robust event processing pipeline.
 
 ---
