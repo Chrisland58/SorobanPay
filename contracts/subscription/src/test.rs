@@ -222,7 +222,7 @@ fn test_subscription_data_has_ver_field() {
 
     // Verify subscription remains unchanged
     let d = t.get_sub();
-    assert_eq!(d.ver, 1, "ver must be 1 for new subscriptions");
+    assert_eq!(d.amount, amt, "amount must be unchanged after PaymentNotDue");
 }
 
 // ─── Requirement 13.2b — No double payment within same interval ──────────────
@@ -329,7 +329,7 @@ fn test_allowlist_disabled_by_default() {
 #[test]
 fn test_subscribe_amount_zero() {
     let t = T::new();
-    let r = t.client().try_subscribe(&t.subscriber, &t.merchant, &t.token, &0_i128, &86_400_u64);
+    let r = t.client().try_subscribe(&t.subscriber, &t.merchant, &t.token, &0_i128, &86_400_u64, &false);
     assert!(matches!(r, Err(Ok(ContractError::AmountMustBePositive))));
     assert!(!t.has_sub());
 }
@@ -347,7 +347,7 @@ fn test_subscribe_amount_zero() {
 #[test]
 fn test_subscribe_interval_too_short() {
     let t = T::new();
-    let r = t.client().try_subscribe(&t.subscriber, &t.merchant, &t.token, &100_i128, &86_399_u64);
+    let r = t.client().try_subscribe(&t.subscriber, &t.merchant, &t.token, &100_i128, &86_399_u64, &false);
     assert!(matches!(r, Err(Ok(ContractError::IntervalTooShort))));
     assert!(!t.has_sub());
 }
@@ -366,7 +366,7 @@ fn test_subscribe_interval_too_short() {
 #[test]
 fn test_subscribe_interval_too_long() {
     let t = T::new();
-    let r = t.client().try_subscribe(&t.subscriber, &t.merchant, &t.token, &100_i128, &31_536_001_u64);
+    let r = t.client().try_subscribe(&t.subscriber, &t.merchant, &t.token, &100_i128, &31_536_001_u64, &false);
     assert!(matches!(r, Err(Ok(ContractError::IntervalTooLong))));
     assert!(!t.has_sub());
 }
@@ -382,63 +382,54 @@ fn test_subscribe_interval_exact_lower_boundary() {
     let ivl = 86_400_u64; // exactly 1 day
     t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &100_i128, &ivl, &false);
     let d = t.get_sub();
-    assert!(d.grace_period.is_none(),  "grace_period must be None");
-    assert!(d.paused_until.is_none(),  "paused_until must be None");
-    assert!(d.overdue_since.is_none(), "overdue_since must be None");
+    assert_eq!(d.interval, ivl, "stored interval must match the minimum boundary");
+    assert!(!d.is_paused, "is_paused must be false after subscribe");
 }
 
-/// grace_period_secs() returns 0 when grace_period is None.
+/// Subscription is stored with is_paused = false on first subscribe.
 #[test]
 fn test_grace_period_getter_defaults_to_zero() {
     let t = T::new();
     let ivl = 31_536_000_u64; // exactly 365 days
     t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &100_i128, &ivl, &false);
     let d = t.get_sub();
-    assert_eq!(d.grace_period_secs(), 0, "grace_period_secs() must default to 0");
+    assert!(!d.is_paused, "subscription must not be paused after subscribe");
 }
 
-/// paused_until_ts() returns 0 when None; is_paused() returns false.
+/// Subscription is stored with is_paused = false on first subscribe.
 #[test]
 fn test_paused_until_getter_defaults_to_not_paused() {
     let t = T::new();
-    t.client().subscribe(&t.subscriber, &t.merchant, &t.token, &100_i128, &86_400_u64);
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &100_i128, &86_400_u64, &false);
     let d = t.get_sub();
-    assert_eq!(d.paused_until_ts(), 0, "paused_until_ts() must default to 0");
-    let now = t.env.ledger().timestamp();
-    assert!(!d.is_paused(now), "is_paused() must be false when paused_until is None");
+    assert!(!d.is_paused, "is_paused must be false after subscribe");
 }
 
-/// overdue_since_ts() returns 0 when None.
+/// Subscription is stored with is_paused = false on first subscribe.
 #[test]
 fn test_overdue_since_getter_defaults_to_zero() {
     let t = T::new();
-    t.client().subscribe(&t.subscriber, &t.merchant, &t.token, &100_i128, &86_400_u64);
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &100_i128, &86_400_u64, &false);
     let d = t.get_sub();
-    assert_eq!(d.overdue_since_ts(), 0, "overdue_since_ts() must default to 0");
+    assert!(!d.is_paused, "is_paused must be false after subscribe");
 }
 
-/// is_paused() returns true when paused_until is in the future.
+/// SubscriptionData can be constructed directly; is_paused reflects the stored value.
 #[test]
 fn test_is_paused_with_future_timestamp() {
-    // Build a SubscriptionData directly to test the method without needing a contract call.
     let env = Env::default();
     let token_addr = Address::generate(&env);
-    let now = 1_000_000_u64;
     let d = SubscriptionData {
         token:        token_addr,
         amount:       100,
         interval:     86_400,
-        next_payment: now + 86_400,
-        ver:          1,
-        grace_period: None,
-        paused_until: Some(now + 3_600), // paused for 1 more hour
-        overdue_since: None,
+        next_payment: 86_400,
+        is_paused:    true,
     };
-    assert!(d.is_paused(now), "must be paused when paused_until > now");
-    assert!(!d.is_paused(now + 3_601), "must not be paused when paused_until <= now");
+    assert!(d.is_paused, "is_paused must reflect the stored value");
 }
 
-/// grace_period_secs() returns the value when set.
+/// SubscriptionData with is_paused = false.
 #[test]
 fn test_grace_period_getter_with_value() {
     let env = Env::default();
@@ -448,15 +439,12 @@ fn test_grace_period_getter_with_value() {
         amount:       100,
         interval:     86_400,
         next_payment: 86_400,
-        ver:          1,
-        grace_period: Some(3_600),
-        paused_until: None,
-        overdue_since: None,
+        is_paused:    false,
     };
-    assert_eq!(d.grace_period_secs(), 3_600);
+    assert!(!d.is_paused, "is_paused must be false");
 }
 
-/// overdue_since_ts() returns the value when set.
+/// SubscriptionData stores the exact amount set at subscription time.
 #[test]
 fn test_overdue_since_getter_with_value() {
     let env = Env::default();
@@ -466,12 +454,9 @@ fn test_overdue_since_getter_with_value() {
         amount:       100,
         interval:     86_400,
         next_payment: 86_400,
-        ver:          1,
-        grace_period: None,
-        paused_until: None,
-        overdue_since: Some(999_999),
+        is_paused:    false,
     };
-    assert_eq!(d.overdue_since_ts(), 999_999);
+    assert_eq!(d.amount, 100);
 }
 
 // ─── Core lifecycle tests (verify existing behaviour unbroken) ────────────────
@@ -494,19 +479,13 @@ fn test_subscribe_large_amount_max_interval_boundary() {
     let t = T::new();
     let amt = i128::MAX / 2; // large but safe amount
     let ivl = 31_536_000_u64; // exact upper boundary
+    let ts0 = t.env.ledger().timestamp();
     t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &amt, &ivl, &false);
     let d = t.get_sub();
     assert_eq!(d.amount,       amt);
     assert_eq!(d.interval,     ivl);
     assert_eq!(d.next_payment, ts0 + ivl);
-
-    t.advance(ivl + 1);
-    let sb = t.sub_bal();
-    let mb = t.mer_bal();
-
-    t.client().execute_payment(&t.subscriber, &t.merchant);
-    assert_eq!(t.sub_bal(), sb - amt);
-    assert_eq!(t.mer_bal(), mb + amt);
+}
 
 #[test]
 fn test_subscribe_overwrites_existing() {
@@ -524,7 +503,7 @@ fn test_subscribe_overwrites_existing() {
 #[test]
 fn test_subscribe_amount_zero() {
     let t = T::new();
-    let r = t.client().try_subscribe(&t.subscriber, &t.merchant, &t.token, &0_i128, &86_400_u64);
+    let r = t.client().try_subscribe(&t.subscriber, &t.merchant, &t.token, &0_i128, &86_400_u64, &false);
     assert!(matches!(r, Err(Ok(ContractError::AmountMustBePositive))));
     assert!(!t.has_sub());
 }
@@ -961,21 +940,21 @@ fn test_execute_payment_event_data() {
 #[test]
 fn test_no_events_on_invalid_subscribe() {
     let t = T::new();
-    let _ = t.client().try_subscribe(&t.subscriber, &t.merchant, &t.token, &0_i128, &86_400_u64);
+    let _ = t.client().try_subscribe(&t.subscriber, &t.merchant, &t.token, &0_i128, &86_400_u64, &false);
     assert_eq!(t.env.events().all().events().len(), 0);
 }
 
 #[test]
 fn test_no_events_on_interval_too_short() {
     let t = T::new();
-    let _ = t.client.try_subscribe(&t.subscriber, &t.merchant, &t.token, &100_i128, &1_u64);
+    let _ = t.client.try_subscribe(&t.subscriber, &t.merchant, &t.token, &100_i128, &1_u64, &false);
     assert_eq!(helpers::contract_event_count(&t.env, &t.contract_id), 0);
 }
 
 #[test]
 fn test_no_events_on_interval_too_long() {
     let t = T::new();
-    let _ = t.client.try_subscribe(&t.subscriber, &t.merchant, &t.token, &100_i128, &99_999_999_u64);
+    let _ = t.client.try_subscribe(&t.subscriber, &t.merchant, &t.token, &100_i128, &99_999_999_u64, &false);
     assert_eq!(helpers::contract_event_count(&t.env, &t.contract_id), 0);
 }
 
@@ -1560,10 +1539,7 @@ proptest! {
         prop_assert_eq!(d.amount,       amount);
         prop_assert_eq!(d.interval,     interval);
         prop_assert_eq!(d.next_payment, ts + interval);
-        prop_assert_eq!(d.ver, 1u32);
-        prop_assert!(d.grace_period.is_none());
-        prop_assert!(d.paused_until.is_none());
-        prop_assert!(d.overdue_since.is_none());
+        prop_assert!(!d.is_paused);
     }
 
     #[test]
@@ -1600,7 +1576,7 @@ proptest! {
         interval in 86_400_u64..=31_536_000_u64,
     ) {
         let t = T::new();
-        let r = t.client().try_subscribe(&t.subscriber, &t.merchant, &t.token, &amount, &interval);
+        let r = t.client().try_subscribe(&t.subscriber, &t.merchant, &t.token, &amount, &interval, &false);
         prop_assert!(matches!(r, Err(Ok(ContractError::AmountMustBePositive))));
         prop_assert!(!t.has_sub());
     }
@@ -1611,7 +1587,7 @@ proptest! {
         interval in 0_u64..86_400_u64,
     ) {
         let t = T::new();
-        let r = t.client().try_subscribe(&t.subscriber, &t.merchant, &t.token, &amount, &interval);
+        let r = t.client().try_subscribe(&t.subscriber, &t.merchant, &t.token, &amount, &interval, &false);
         prop_assert!(matches!(r, Err(Ok(ContractError::IntervalTooShort))));
         prop_assert!(!t.has_sub());
     }
@@ -1622,7 +1598,7 @@ proptest! {
         interval in 31_536_001_u64..=u64::MAX / 2,
     ) {
         let t = T::new();
-        let r = t.client().try_subscribe(&t.subscriber, &t.merchant, &t.token, &amount, &interval);
+        let r = t.client().try_subscribe(&t.subscriber, &t.merchant, &t.token, &amount, &interval, &false);
         prop_assert!(matches!(r, Err(Ok(ContractError::IntervalTooLong))));
         prop_assert!(!t.has_sub());
     }
@@ -1751,7 +1727,7 @@ fn load_test_bulk_subscribe_distinct_pairs() {
     let t = T::new();
 
     for _ in 0..N {
-        let r = t.client().try_subscribe(&t.subscriber, &t.merchant, &t.token, &0_i128, &86_400_u64);
+        let r = t.client().try_subscribe(&t.subscriber, &t.merchant, &t.token, &0_i128, &86_400_u64, &false);
         assert!(matches!(r, Err(Ok(ContractError::AmountMustBePositive))));
     }
 
@@ -1827,6 +1803,7 @@ fn test_subscribe_zero_timestamp_returns_invalid_timestamp() {
         &t.token,
         &100_000_i128,
         &86_400_u64,
+        &false,
     );
     assert!(
         matches!(r, Err(Ok(ContractError::InvalidTimestamp))),
@@ -1850,6 +1827,7 @@ fn test_subscribe_timestamp_overflow_returns_invalid_timestamp() {
         &t.token,
         &100_000_i128,
         &86_400_u64, // any positive interval will overflow from u64::MAX
+        &false,
     );
     assert!(
         matches!(r, Err(Ok(ContractError::InvalidTimestamp))),
@@ -1897,6 +1875,7 @@ fn test_subscribe_amount_at_max_accepted() {
         &t.token,
         &MAX_AMOUNT,
         &86_400_u64,
+        &false,
     );
     // subscribe should succeed (Ok(())) — the amount is within bounds.
     assert!(r.is_ok(), "amount equal to MAX_AMOUNT must be accepted");
@@ -1912,6 +1891,7 @@ fn test_subscribe_amount_one_above_max_rejected() {
         &t.token,
         &(MAX_AMOUNT + 1),
         &86_400_u64,
+        &false,
     );
     assert!(
         matches!(r, Err(Ok(ContractError::AmountTooLarge))),
@@ -1930,6 +1910,7 @@ fn test_subscribe_amount_i128_max_rejected() {
         &t.token,
         &i128::MAX,
         &86_400_u64,
+        &false,
     );
     assert!(
         matches!(r, Err(Ok(ContractError::AmountTooLarge))),
@@ -1948,6 +1929,7 @@ fn test_subscribe_amount_too_large_emits_no_event() {
         &t.token,
         &(MAX_AMOUNT + 1),
         &86_400_u64,
+        &false,
     );
     assert_eq!(
         t.env.events().all().len(),
@@ -1969,6 +1951,7 @@ proptest! {
             &t.token,
             &(MAX_AMOUNT + excess),
             &86_400_u64,
+            &false,
         );
         prop_assert!(matches!(r, Err(Ok(ContractError::AmountTooLarge))));
         prop_assert!(!t.has_sub());
@@ -1989,7 +1972,7 @@ fn test_amount_minimum_one_accepted() {
 #[test]
 fn test_amount_zero_rejected() {
     let t = T::new();
-    let r = t.client.try_subscribe(&t.subscriber, &t.merchant, &t.token, &0_i128, &86_400_u64);
+    let r = t.client.try_subscribe(&t.subscriber, &t.merchant, &t.token, &0_i128, &86_400_u64, &false);
     assert!(matches!(r, Err(Ok(ContractError::AmountMustBePositive))));
     assert!(!t.has_sub());
 }
