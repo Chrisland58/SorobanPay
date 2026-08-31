@@ -33,7 +33,7 @@
     "@opentelemetry/sdk-node": "^0.52.1",
     "@opentelemetry/sdk-trace-base": "^1.25.1",
     "@opentelemetry/semantic-conventions": "^1.25.1",
-    "@stellar/stellar-sdk": "^16.0.1",
+    "@stellar/stellar-sdk": "^17.0.1",
     "@types/jsonwebtoken": "^9.0.10",
     "bullmq": "^5.31.0",
     "cors": "^2.8.6",
