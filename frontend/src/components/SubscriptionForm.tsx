@@ -55,6 +55,7 @@ import {
   NETWORK_NAME,
   RPC_URL,
 } from "@/constants/network";
+import TxHashLink from "@/components/TxHashLink";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -365,9 +366,10 @@ function SuccessCard({
         <p className="text-gray-400 text-xs mb-1.5 font-medium">
           Transaction hash
         </p>
-        <p className="text-gray-200 break-all font-mono text-xs leading-relaxed">
-          {data.txHash}
-        </p>
+        <TxHashLink
+          txHash={data.txHash}
+          network={NETWORK_NAME === "Mainnet" ? "mainnet" : "testnet"}
+        />
       </div>
 
       {/* Summary */}
@@ -708,7 +710,7 @@ function ErrorCard({
 // ─── Component ────────────────────────────────────────────────────────────────
 
 export default function SubscriptionForm() {
-  const { publicKey } = useWallet();
+  const { publicKey, freighterInstalled, isCheckingFreighter } = useWallet();
 
   // Guard: must have a valid contract address before rendering the form
   if (!CONTRACT_ID) return <ContractConfigError />;
