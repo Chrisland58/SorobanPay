@@ -2145,7 +2145,7 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
 
       {/* ── Cancel subscription section ─────────────────────────────────────── */}
       <div className="mt-8 pt-6 border-t border-gray-700/60">
-        <h3 className="text-base font-semibold text-gray-200 mb-1">
+        <h3 id="cancel-section-heading" className="text-base font-semibold text-gray-200 mb-1">
           Cancel a subscription
         </h3>
         <p className="text-xs text-gray-400 mb-4 leading-relaxed">
@@ -2220,11 +2220,12 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
         )}
 
         {!cancelSuccess && (
-          <form onSubmit={handleCancelRequest} noValidate aria-busy={isCancelling} className="space-y-3">
+          <form onSubmit={handleCancelRequest} noValidate aria-busy={isCancelling} aria-labelledby="cancel-section-heading" className="space-y-3">
             <div>
               <label htmlFor="cancelMerchant" className="block text-sm font-semibold text-gray-100 mb-2">
                 Merchant address
                 <span aria-hidden="true" className="text-red-400 ml-1">*</span>
+                <span className="sr-only"> (required)</span>
               </label>
               <input
                 id="cancelMerchant"
@@ -2236,9 +2237,11 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
                 disabled={isCancelling}
                 required
                 aria-required="true"
+                aria-describedby="help-cancel-merchant"
+                aria-invalid={!!cancelError}
                 className={inputCls}
               />
-              <p className="mt-1.5 text-xs text-gray-400 leading-relaxed">
+              <p id="help-cancel-merchant" className="mt-1.5 text-xs text-gray-400 leading-relaxed">
                 The merchant&apos;s Stellar G-address for the subscription you want to cancel.
               </p>
             </div>
@@ -2246,6 +2249,7 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
               <label htmlFor="cancelToken" className="block text-sm font-semibold text-gray-100 mb-2">
                 Token contract address
                 <span aria-hidden="true" className="text-red-400 ml-1">*</span>
+                <span className="sr-only"> (required)</span>
               </label>
               <input
                 id="cancelToken"
@@ -2257,9 +2261,11 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
                 disabled={isCancelling}
                 required
                 aria-required="true"
+                aria-describedby="help-cancel-token"
+                aria-invalid={!!cancelError}
                 className={inputCls}
               />
-              <p className="mt-1.5 text-xs text-gray-400 leading-relaxed">
+              <p id="help-cancel-token" className="mt-1.5 text-xs text-gray-400 leading-relaxed">
                 The token contract tied to the active subscription being cancelled.
               </p>
             </div>
