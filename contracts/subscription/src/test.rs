@@ -1772,3 +1772,80 @@ fn test_execute_payment_before_due_does_not_mutate_subscription() {
     assert_eq!(before.next_payment, after.next_payment);
     assert_eq!(before.amount, after.amount);
 }
+
+// ─── update_subscription ──────────────────────────────────────────────────────
+
+/// Verify that update_subscription reads and writes the same storage slot as subscribe.
+/// This is the core acceptance criterion for #758.
+#[test]
+fn test_update_subscription_reads_same_slot_as_subscribe() {
+    let t = T::new();
+    let original_amount   = 100_000_i128;
+    let original_interval = 86_400_u64;
+    let new_amount        = 200_000_i128;
+    let new_interval      = 172_800_u64;
+
+    // Subscribe first — writes DataKey::Subscription(subscriber, merchant).
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &original_amount, &original_interval);
+    assert!(t.has_sub(), "subscription must exist after subscribe");
+
+    let before = t.get_sub();
+    assert_eq!(before.amount,   original_amount,   "initial amount stored correctly");
+    assert_eq!(before.interval, original_interval, "initial interval stored correctly");
+
+    // Update — must read/write the same storage slot as subscribe.
+    t.client.update_subscription(&t.subscriber, &t.merchant, &new_amount, &new_interval);
+
+    // Verify update was applied to the same slot.
+    assert!(t.has_sub(), "subscription must still exist after update");
+    let after = t.get_sub();
+    assert_eq!(after.amount,   new_amount,   "amount must be updated");
+    assert_eq!(after.interval, new_interval, "interval must be updated");
+    // Token must be unchanged — update_subscription does not allow changing the token.
+    assert_eq!(after.token, t.token, "token must be unchanged by update");
+}
+
+/// update_subscription on a non-existent subscription must return NoActiveSubscription.
+#[test]
+fn test_update_subscription_no_subscription_returns_error() {
+    let t = T::new();
+    // No subscribe call — update must fail.
+    let result = t.client.try_update_subscription(
+        &t.subscriber, &t.merchant, &100_000_i128, &86_400_u64,
+    );
+    assert_eq!(
+        result.unwrap_err().unwrap(),
+        crate::error::ContractError::NoActiveSubscription,
+        "update on missing subscription must return NoActiveSubscription"
+    );
+}
+
+/// update_subscription with zero amount must return AmountMustBePositive.
+#[test]
+fn test_update_subscription_zero_amount_rejected() {
+    let t = T::new();
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &100_000_i128, &86_400_u64);
+
+    let result = t.client.try_update_subscription(
+        &t.subscriber, &t.merchant, &0_i128, &86_400_u64,
+    );
+    assert_eq!(
+        result.unwrap_err().unwrap(),
+        crate::error::ContractError::AmountMustBePositive
+    );
+}
+
+/// update_subscription with too-short interval must return IntervalTooShort.
+#[test]
+fn test_update_subscription_interval_too_short_rejected() {
+    let t = T::new();
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &100_000_i128, &86_400_u64);
+
+    let result = t.client.try_update_subscription(
+        &t.subscriber, &t.merchant, &100_000_i128, &3_600_u64,
+    );
+    assert_eq!(
+        result.unwrap_err().unwrap(),
+        crate::error::ContractError::IntervalTooShort
+    );
+}

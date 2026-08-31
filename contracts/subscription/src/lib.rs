@@ -786,6 +786,84 @@ impl SubscriptionProtocol {
             .extend_ttl(&key, MIN_TTL_LEDGERS, MAX_TTL_LEDGERS);
         Some(data)
     }
+
+    /// Update the amount and/or interval of an existing subscription.
+    ///
+    /// Uses the same `DataKey::Subscription(subscriber, merchant)` key as `subscribe`
+    /// and `execute_payment`, so it reads and writes the same storage slot.
+    ///
+    /// # Authorization
+    /// Requires a valid signature from `subscriber`.
+    ///
+    /// # Parameters
+    /// - `subscriber`: The subscribing account (must be the caller).
+    /// - `merchant`:   The merchant account.
+    /// - `amount`:     New payment amount per interval. Must be > 0 and <= 10^18.
+    /// - `interval`:   New seconds between payments. Must be in [86400, 31536000].
+    ///
+    /// # Errors
+    /// - `ContractError::NoActiveSubscription` — no subscription exists for the pair.
+    /// - `ContractError::AmountMustBePositive` — if `amount <= 0`.
+    /// - `ContractError::AmountTooLarge`       — if `amount > 10^18`.
+    /// - `ContractError::IntervalTooShort`     — if `interval < 86400`.
+    /// - `ContractError::IntervalTooLong`      — if `interval > 31536000`.
+    /// - `ContractError::InvalidTimestamp`     — if ledger timestamp is zero or overflows.
+    pub fn update_subscription(
+        env: Env,
+        subscriber: Address,
+        merchant: Address,
+        amount: i128,
+        interval: u64,
+    ) -> Result<(), ContractError> {
+        // 1. Authorization.
+        subscriber.require_auth();
+
+        // 2. Build key — MUST match subscribe() and execute_payment() exactly so that
+        //    update_subscription reads the same storage slot that subscribe() wrote.
+        let key = DataKey::Subscription(subscriber.clone(), merchant.clone());
+
+        // 3. Load existing subscription — error if absent.
+        let mut data: SubscriptionData = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .ok_or(ContractError::NoActiveSubscription)?;
+
+        // 4. Validate new amount.
+        if amount <= 0 {
+            return Err(ContractError::AmountMustBePositive);
+        }
+        if amount > MAX_AMOUNT {
+            return Err(ContractError::AmountTooLarge);
+        }
+
+        // 5. Validate new interval.
+        if interval < 86_400 {
+            return Err(ContractError::IntervalTooShort);
+        }
+        if interval > 31_536_000 {
+            return Err(ContractError::IntervalTooLong);
+        }
+
+        // 6. Apply updates — token and merchant are immutable after subscription creation.
+        let ts = ledger_timestamp(&env)?;
+        data.amount   = amount;
+        data.interval = interval;
+        data.next_payment = checked_next_payment(ts, interval)?;
+
+        // 7. Persist updated subscription.
+        env.storage().persistent().set(&key, &data);
+
+        // 8. Extend TTL so the updated entry survives the next billing cycle.
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, MIN_TTL_LEDGERS, MAX_TTL_LEDGERS);
+
+        // 9. Emit subscribe event to signal that the subscription was updated.
+        events::emit_subscribe(&env, &subscriber, &merchant, &data.token, amount);
+
+        Ok(())
+    }
 }
 
 #[cfg(test)]
