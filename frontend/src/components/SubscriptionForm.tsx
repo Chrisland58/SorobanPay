@@ -1965,6 +1965,24 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
             onTokenChange={setTokenAddress}
             onAmountChange={setAmount}
             onIntervalChange={setInterval}
+            onMerchantBlur={() => {
+              const errors = validateSubscriptionForm({
+                merchantAddress,
+                tokenAddress,
+                amount,
+                interval,
+              });
+              setFieldErrors(errors);
+            }}
+            onTokenBlur={() => {
+              const errors = validateSubscriptionForm({
+                merchantAddress,
+                tokenAddress,
+                amount,
+                interval,
+              });
+              setFieldErrors(errors);
+            }}
           />
 
           {/* Interval */}
