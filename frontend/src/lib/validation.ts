@@ -25,6 +25,8 @@ export interface SubscriptionFormValues {
   tokenAddress: string;
   amount: string;
   interval: string;
+  /** The connected subscriber's public key. When provided, used to guard against self-subscription. */
+  subscriberAddress?: string;
 }
 
 // ─── Interval bounds ──────────────────────────────────────────────────────────
@@ -126,12 +128,18 @@ export function validateSubscriptionForm(
 ): FieldErrors {
   const errors: FieldErrors = {};
 
-  // merchantAddress — valid Stellar G-address
+  // merchantAddress — valid Stellar G-address, and must not equal the subscriber
   if (!values.merchantAddress.trim()) {
     errors.merchantAddress = 'Merchant address is required.';
   } else if (!isValidGAddress(values.merchantAddress)) {
     errors.merchantAddress =
       'Must be a valid Stellar G-address (56 characters, starts with G).';
+  } else if (
+    values.subscriberAddress &&
+    values.merchantAddress.trim() === values.subscriberAddress.trim()
+  ) {
+    errors.merchantAddress =
+      'Merchant address cannot be the same as your subscriber address. A subscription to yourself is not allowed.';
   }
 
   // tokenAddress — valid Stellar C-address (contract)
