@@ -92,6 +92,13 @@ model WebhookEndpoint {
   @@unique([merchant, url])
 }
 
+// BE-51: stores the RPC cursor so the indexer can resume after restart
+model IndexerState {
+  id         Int      @id @default(1)
+  lastCursor String?  // opaque cursor returned by getEvents(); null = start from genesis
+  updatedAt  DateTime @updatedAt
+}
+
 model WebhookDelivery {
   id          Int      @id @default(autoincrement())
   /// Stable event identifier — sha256(txHash + eventIndex).
