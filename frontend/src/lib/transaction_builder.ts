@@ -90,6 +90,48 @@ export interface CancelResult {
   txHash: string;
 }
 
+/** Parameters for collecting a recurring payment from a single subscriber */
+export interface ExecutePaymentParams {
+  /** Subscriber Stellar G-address (the account being charged) */
+  subscriber: string;
+  /** Merchant Stellar G-address (the account receiving payment) */
+  merchant: string;
+}
+
+/** Result of a successful execute_payment transaction */
+export interface ExecutePaymentResult {
+  /** Transaction hash on Stellar network */
+  txHash: string;
+}
+
+/** A single entry in a batch payment collection request */
+export interface BatchPaymentEntry {
+  /** Subscriber Stellar G-address */
+  subscriber: string;
+  /** Merchant Stellar G-address */
+  merchant: string;
+}
+
+/** Per-entry result from a batch execute_payment run */
+export interface BatchPaymentEntryResult {
+  subscriber: string;
+  merchant: string;
+  /** Set on success */
+  txHash?: string;
+  /** Set on failure */
+  error?: string;
+}
+
+/** Aggregate result returned by buildAndSubmitBatchExecutePayment */
+export interface BatchExecutePaymentResult {
+  /** Individual outcome per (subscriber, merchant) pair */
+  results: BatchPaymentEntryResult[];
+  /** Number of entries that succeeded */
+  successCount: number;
+  /** Number of entries that failed */
+  failureCount: number;
+}
+
 /**
  * Intermediate result returned after the transaction is submitted but before
  * it has been confirmed. The caller should pass `txHash` and `server` to
