@@ -55,6 +55,7 @@ import {
   NETWORK_NAME,
   RPC_URL,
 } from "@/constants/network";
+import AddressBook from "@/components/AddressBook";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -708,7 +709,7 @@ function ErrorCard({
 // ─── Component ────────────────────────────────────────────────────────────────
 
 export default function SubscriptionForm() {
-  const { publicKey } = useWallet();
+  const { publicKey, freighterInstalled, isCheckingFreighter } = useWallet();
 
   // Guard: must have a valid contract address before rendering the form
   if (!CONTRACT_ID) return <ContractConfigError />;
@@ -723,6 +724,9 @@ export default function SubscriptionForm() {
   const [txError, setTxError]           = useState<TxErrorInfo | null>(null);
   const [successData, setSuccessData]   = useState<SuccessData | null>(null);
   const [showConfirm, setShowConfirm]   = useState(false);
+
+  // Address book modal state — "merchant" | "token" | null
+  const [addressBookTarget, setAddressBookTarget] = useState<"merchant" | "token" | null>(null);
   const intervalNum = Number(interval);
   const liveIntervalError =
     interval.trim() && Number.isInteger(intervalNum) &&
@@ -807,6 +811,22 @@ export default function SubscriptionForm() {
           onCancel={() => setShowConfirm(false)}
         />
       )}
+
+      {/* Address Book modal — opened from merchant or token input */}
+      <AddressBook
+        isOpen={addressBookTarget !== null}
+        onClose={() => setAddressBookTarget(null)}
+        onSelect={(addr) => {
+          if (addressBookTarget === "merchant") setMerchantAddress(addr);
+          else if (addressBookTarget === "token") setTokenAddress(addr);
+          setAddressBookTarget(null);
+        }}
+        title={
+          addressBookTarget === "merchant"
+            ? "Select merchant address"
+            : "Select token contract address"
+        }
+      />
       <div className="flex items-center justify-between mb-2 gap-3">
         <h2 className="text-2xl sm:text-3xl font-bold">Create Subscription</h2>
         <span
@@ -904,22 +924,38 @@ export default function SubscriptionForm() {
               </span>
               <span className="sr-only"> (required)</span>
             </label>
-            <input
-              id="merchantAddress"
-              type="text"
-              placeholder="GABC…"
-              autoComplete="off"
-              value={merchantAddress}
-              onChange={(e) => setMerchantAddress(e.target.value)}
-              disabled={isSubmitting}
-              required
-              aria-required="true"
-              aria-describedby={
-                fieldErrors.merchantAddress ? "err-merchant" : undefined
-              }
-              aria-invalid={!!fieldErrors.merchantAddress}
-              className={inputCls}
-            />
+            <div className="flex gap-2 items-start">
+              <input
+                id="merchantAddress"
+                type="text"
+                placeholder="GABC…"
+                autoComplete="off"
+                value={merchantAddress}
+                onChange={(e) => setMerchantAddress(e.target.value)}
+                disabled={isSubmitting}
+                required
+                aria-required="true"
+                aria-describedby={
+                  fieldErrors.merchantAddress ? "err-merchant" : undefined
+                }
+                aria-invalid={!!fieldErrors.merchantAddress}
+                className={inputCls}
+              />
+              <button
+                type="button"
+                onClick={() => setAddressBookTarget("merchant")}
+                disabled={isSubmitting}
+                aria-label="Open address book for merchant address"
+                title="Address book"
+                className="shrink-0 flex items-center justify-center rounded-lg bg-gray-700 hover:bg-gray-600 active:bg-gray-500
+                           border border-gray-600 text-gray-300 hover:text-white transition-colors min-h-[48px] px-3
+                           focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400 disabled:opacity-50"
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                  <path d="M9 4.804A7.968 7.968 0 005.5 4c-1.255 0-2.443.29-3.5.804v10A7.969 7.969 0 015.5 14c1.669 0 3.218.51 4.5 1.385A7.962 7.962 0 0114.5 14c1.255 0 2.443.29 3.5.804v-10A7.968 7.968 0 0014.5 4c-1.255 0-2.443.29-3.5.804V12a1 1 0 11-2 0V4.804z" />
+                </svg>
+              </button>
+            </div>
             {fieldErrors.merchantAddress && (
               <p
                 id="err-merchant"
@@ -943,22 +979,38 @@ export default function SubscriptionForm() {
               </span>
               <span className="sr-only"> (required)</span>
             </label>
-            <input
-              id="tokenAddress"
-              type="text"
-              placeholder="CABC…"
-              autoComplete="off"
-              value={tokenAddress}
-              onChange={(e) => setTokenAddress(e.target.value)}
-              disabled={isSubmitting}
-              required
-              aria-required="true"
-              aria-describedby={
-                fieldErrors.tokenAddress ? "err-token" : undefined
-              }
-              aria-invalid={!!fieldErrors.tokenAddress}
-              className={inputCls}
-            />
+            <div className="flex gap-2 items-start">
+              <input
+                id="tokenAddress"
+                type="text"
+                placeholder="CABC…"
+                autoComplete="off"
+                value={tokenAddress}
+                onChange={(e) => setTokenAddress(e.target.value)}
+                disabled={isSubmitting}
+                required
+                aria-required="true"
+                aria-describedby={
+                  fieldErrors.tokenAddress ? "err-token" : undefined
+                }
+                aria-invalid={!!fieldErrors.tokenAddress}
+                className={inputCls}
+              />
+              <button
+                type="button"
+                onClick={() => setAddressBookTarget("token")}
+                disabled={isSubmitting}
+                aria-label="Open address book for token contract address"
+                title="Address book"
+                className="shrink-0 flex items-center justify-center rounded-lg bg-gray-700 hover:bg-gray-600 active:bg-gray-500
+                           border border-gray-600 text-gray-300 hover:text-white transition-colors min-h-[48px] px-3
+                           focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400 disabled:opacity-50"
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                  <path d="M9 4.804A7.968 7.968 0 005.5 4c-1.255 0-2.443.29-3.5.804v10A7.969 7.969 0 015.5 14c1.669 0 3.218.51 4.5 1.385A7.962 7.962 0 0114.5 14c1.255 0 2.443.29 3.5.804v-10A7.968 7.968 0 0014.5 4c-1.255 0-2.443.29-3.5.804V12a1 1 0 11-2 0V4.804z" />
+                </svg>
+              </button>
+            </div>
             {fieldErrors.tokenAddress && (
               <p
                 id="err-token"

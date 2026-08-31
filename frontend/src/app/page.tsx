@@ -17,7 +17,6 @@ export default function Home() {
     isConnecting,
     connectError,
     freighterInstalled,
-    sessionInvalid,
     connect,
     disconnect,
   } = useWallet();
@@ -47,25 +46,6 @@ export default function Home() {
 
       {/* Wallet section */}
       <div className="w-full max-w-lg mb-6">
-        {/* Session-invalid fallback — shown when Freighter is removed while connected */}
-        {sessionInvalid && (
-          <div
-            role="alert"
-            className="mb-4 rounded-lg bg-orange-900/60 border border-orange-600 p-4 text-sm text-orange-200"
-          >
-            <p className="font-semibold mb-1">Wallet session lost</p>
-            <p className="text-xs mb-3">
-              Freighter is no longer available. Disconnect and reconnect to restore your session.
-            </p>
-            <button
-              onClick={disconnect}
-              className="rounded-lg bg-orange-700 hover:bg-orange-600 px-4 py-2 text-xs font-semibold transition-colors focus:outline-none focus:ring-2 focus:ring-orange-400"
-            >
-              Disconnect &amp; reconnect
-            </button>
-          </div>
-        )}
-
         {!publicKey ? (
           <div className="bg-gray-900 rounded-2xl p-6 shadow-lg">
             {/* Req 9.1 — Freighter install prompt */}
