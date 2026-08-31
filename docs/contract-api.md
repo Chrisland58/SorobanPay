@@ -254,6 +254,9 @@ const events = await server.getEvents({
 - `executed` — on successful transfer
 - `payment_transfer_failure` — when subscriber balance < `amount` (subscription not modified)
 
+For a complete guide on when and how to retry after a `TransferFailed` or revoked
+allowance, see [docs/retry-semantics.md](retry-semantics.md).
+
 #### CLI example
 
 ```bash
@@ -508,6 +511,58 @@ if (SorobanRpc.Api.isSimulationSuccess(simResult)) {
   }
 }
 ```
+
+#### Frontend helper — `querySubscription`
+
+The SorobanPay frontend exposes a typed wrapper in
+`frontend/src/lib/transaction_builder.ts` that handles account lookup, transaction
+building, and result decoding in one call. No signing or fees are required.
+
+```typescript
+import { querySubscription } from "@/lib/transaction_builder";
+
+// Query from a Next.js component or server action
+const { subscription } = await querySubscription(
+  { subscriber: "GABC...SUBSCRIBER", merchant: "GXYZ...MERCHANT" },
+  process.env.NEXT_PUBLIC_CONTRACT_ID!,
+  process.env.NEXT_PUBLIC_RPC_URL!,
+  process.env.NEXT_PUBLIC_NETWORK_PASSPHRASE!,
+);
+
+if (subscription) {
+  const due = new Date(Number(subscription.next_payment) * 1000);
+  console.log("Token:          ", subscription.token);
+  console.log("Amount:         ", subscription.amount.toString(), "base units");
+  console.log("Interval:       ", subscription.interval.toString(), "seconds");
+  console.log("Next payment:   ", due.toISOString());
+  console.log("Is paused:      ", subscription.is_paused);
+} else {
+  console.log("No active subscription.");
+}
+```
+
+**`QuerySubscriptionParams`**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `subscriber` | `string` | Subscriber Stellar G-address |
+| `merchant` | `string` | Merchant Stellar G-address |
+
+**`SubscriptionData`** (returned in `subscription`)
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `token` | `string` | SEP-41 token contract address (`C…`) |
+| `amount` | `bigint` | Payment amount per interval in token base units |
+| `interval` | `bigint` | Seconds between payments |
+| `next_payment` | `bigint` | Unix timestamp of next valid payment window |
+| `is_paused` | `boolean` | Whether payments are currently suspended |
+
+#### Notes
+
+- `get_subscription` is **read-only** — no authorization required, no fee consumed.
+- As a side effect, it extends the subscription entry's TTL if it is below `MIN_TTL_LEDGERS` (~30 days). This prevents the entry from expiring between payment cycles even on long billing intervals.
+- Returns `None` / `null` for expired or cancelled subscriptions. Distinguish from an active subscription with zero balance by also checking the on-chain token balance.
 
 ---
 
