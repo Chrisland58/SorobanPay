@@ -59,12 +59,7 @@ import {
   type FieldErrors,
 } from "@/lib/validation";
 import { isValidGAddress } from "@/lib/validation";
-import {
-  CONTRACT_ID,
-  NETWORK_PASSPHRASE,
-  NETWORK_NAME,
-  RPC_URL,
-} from "@/constants/network";
+import { getRuntimeConfig } from "@/lib/runtime_config";
 import { mapError } from "@/lib/errors";
 import { useToast } from "@/components/Toast";
 import { useAddressBook } from "@/hooks/useAddressBook";
@@ -167,7 +162,7 @@ function NetworkBadge() {
 
   useEffect(() => {
     let cancelled = false;
-    fetch(RPC_URL, {
+    fetch(config.rpcUrl, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: "{}",
@@ -220,10 +215,11 @@ function NetworkBadge() {
 // ─── Contract config guard ─────────────────────────────────────────────────────
 
 function ContractConfigError() {
+  const runtimeConfig = getRuntimeConfig();
   const config = [
-    ['RPC URL', RPC_URL],
-    ['Network passphrase', NETWORK_PASSPHRASE],
-    ['Contract ID', CONTRACT_ID || 'Not configured'],
+    ['RPC URL', runtimeConfig.rpcUrl],
+    ['Network passphrase', runtimeConfig.networkPassphrase],
+    ['Contract ID', runtimeConfig.contractId || 'Not configured'],
   ];
 
   return (
@@ -1101,9 +1097,9 @@ function ErrorCard({
       {showConfig && (
         <dl className="bg-gray-900/70 rounded-lg p-3 mb-3 space-y-2 text-xs">
           {[
-            ['RPC URL', RPC_URL],
-            ['Network passphrase', NETWORK_PASSPHRASE],
-            ['Contract ID', CONTRACT_ID || 'Not configured'],
+            ['RPC URL', config.rpcUrl],
+            ['Network passphrase', config.networkPassphrase],
+            ['Contract ID', config.contractId || 'Not configured'],
           ].map(([label, value]) => (
             <div key={label}>
               <dt className="text-red-300 font-semibold">{label}</dt>
@@ -1190,7 +1186,7 @@ function TokenInfoPanel({
   const { status, balance, allowance, error, refresh } = useTokenInfo(
     tokenAddress,
     subscriberAddress,
-    CONTRACT_ID,
+    config.contractId,
   );
 
   // Parse the entered amount into stroops for comparison
@@ -1363,7 +1359,7 @@ function TokenInfoPanel({
   --id ${tokenAddress} --source <your-key> --network testnet \\
   -- approve \\
   --from <subscriber-address> \\
-  --spender ${CONTRACT_ID} \\
+  --spender ${config.contractId} \\
   --amount <desired-amount> \\
   --expiration-ledger 9999999`}
             </pre>
@@ -1400,6 +1396,7 @@ export interface SubscriptionFormProps {
 export default function SubscriptionForm({ initialValues }: SubscriptionFormProps = {}) {
   const { publicKey, isCheckingFreighter, freighterInstalled } = useWallet();
   const { showToast } = useToast();
+  const config = getRuntimeConfig();
 
   // All hooks must be declared before any early return (rules-of-hooks)
   const [merchantAddress, setMerchantAddress] = useState(initialValues?.merchantAddress ?? '');
@@ -1505,7 +1502,7 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
 
   // Guard: must have a valid contract address before rendering the form
   // (placed after hooks so rules-of-hooks is satisfied)
-  if (!CONTRACT_ID) return <ContractConfigError />;
+  if (!config.contractId) return <ContractConfigError />;
 
   // FE-47: Defer wallet-state-dependent rendering until after client mount.
   // On the server, publicKey is always null and freighterInstalled is always
@@ -1573,10 +1570,10 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
     try {
       const { txHash } = await buildAndSubmitCancel(
         { subscriber: publicKey, merchant: successData.merchant },
-        CONTRACT_ID,
+        config.contractId,
         publicKey,
-        NETWORK_PASSPHRASE,
-        RPC_URL,
+        config.networkPassphrase,
+        config.rpcUrl,
       );
       setCancelTxHash(txHash);
       setCancelStatus('done');
@@ -1609,10 +1606,10 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
     checkAllowance({
       subscriberAddress: publicKey,
       tokenContractId: tokenAddress.trim(),
-      contractId: CONTRACT_ID,
+      contractId: config.contractId,
       requiredAmount: BigInt(Number(amount)),
-      rpcUrl: RPC_URL,
-      networkPassphrase: NETWORK_PASSPHRASE,
+      rpcUrl: config.rpcUrl,
+      networkPassphrase: config.networkPassphrase,
     })
       .then((result) => setAllowanceResult(result))
       .catch(() => setAllowanceResult(null))
@@ -1639,10 +1636,10 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
           amount: Number(amount),
           interval: Number(interval),
         },
-        CONTRACT_ID,
+        config.contractId,
         publicKey,
-        NETWORK_PASSPHRASE,
-        RPC_URL,
+        config.networkPassphrase,
+        config.rpcUrl,
       );
 
       // Transition to confirming state — show spinner with explorer link
@@ -1712,10 +1709,10 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
           merchant: cancelMerchant.trim(),
           token: cancelToken.trim(),
         },
-        CONTRACT_ID,
+        config.contractId,
         publicKey,
-        NETWORK_PASSPHRASE,
-        RPC_URL,
+        config.networkPassphrase,
+        config.rpcUrl,
       );
 
       setCancelSuccess({
@@ -1750,10 +1747,10 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
           subscriber: publicKey,
           merchant: successData.merchant,
         },
-        CONTRACT_ID,
+        config.contractId,
         publicKey,
-        NETWORK_PASSPHRASE,
-        RPC_URL,
+        config.networkPassphrase,
+        config.rpcUrl,
       );
 
       setCancelSuccess({
@@ -1881,11 +1878,11 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
         </span>
         <code
           className="flex-1 text-xs text-gray-300 font-mono truncate"
-          title={CONTRACT_ID}
+          title={config.contractId}
         >
-          {CONTRACT_ID}
+          {config.contractId}
         </code>
-        <CopyButton text={CONTRACT_ID} label="Copy" />
+        <CopyButton text={config.contractId} label="Copy" />
       </div>
 
       {/* Progress indicator — Phase 1: awaiting Freighter signature */}
