@@ -975,6 +975,7 @@ print(format_amount(10_000_000))  # "1.0000000"
 
 ## Related documentation
 
+- [event-schema.md](event-schema.md) — Canonical machine-readable schema for all 9 event types (XDR types, field semantics, encoding rules)
 - [contract-api.md](contract-api.md) — Full entry point reference and error code table
 - [docs/architecture.md](architecture.md) — Event indexing architecture and storage recommendations
 - [docs/token-decimals.md](token-decimals.md) — Token decimal handling
