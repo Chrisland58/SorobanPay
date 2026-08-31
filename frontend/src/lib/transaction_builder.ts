@@ -48,6 +48,48 @@ export interface SubscribeResult {
   txHash: string;
 }
 
+/** Parameters for collecting a recurring payment from a single subscriber */
+export interface ExecutePaymentParams {
+  /** Subscriber Stellar G-address (the account being charged) */
+  subscriber: string;
+  /** Merchant Stellar G-address (the account receiving payment) */
+  merchant: string;
+}
+
+/** Result of a successful execute_payment transaction */
+export interface ExecutePaymentResult {
+  /** Transaction hash on Stellar network */
+  txHash: string;
+}
+
+/** A single entry in a batch payment collection request */
+export interface BatchPaymentEntry {
+  /** Subscriber Stellar G-address */
+  subscriber: string;
+  /** Merchant Stellar G-address */
+  merchant: string;
+}
+
+/** Per-entry result from a batch execute_payment run */
+export interface BatchPaymentEntryResult {
+  subscriber: string;
+  merchant: string;
+  /** Set on success */
+  txHash?: string;
+  /** Set on failure */
+  error?: string;
+}
+
+/** Aggregate result returned by buildAndSubmitBatchExecutePayment */
+export interface BatchExecutePaymentResult {
+  /** Individual outcome per (subscriber, merchant) pair */
+  results: BatchPaymentEntryResult[];
+  /** Number of entries that succeeded */
+  successCount: number;
+  /** Number of entries that failed */
+  failureCount: number;
+}
+
 /**
  * Intermediate result returned after the transaction is submitted but before
  * it has been confirmed. The caller should pass `txHash` and `server` to
@@ -68,6 +110,80 @@ const POLL_INTERVAL_MS = 1_000;
 const MAX_POLL_ATTEMPTS = 60; // 60 seconds total
 
 // ── Phase 1: build, sign, and submit ─────────────────────────────────────────
+//
+// HOW buildAndSubmitSubscribe WORKS
+// ──────────────────────────────────
+// The two exported entry points for creating a subscription follow the same
+// five-step pipeline under the hood:
+//
+//   Step 1  getAccount(publicKey)
+//           Fetches the current sequence number from the Soroban RPC so the
+//           TransactionBuilder can construct a valid envelope.
+//
+//   Step 2  TransactionBuilder.addOperation(contract.call('subscribe', …))
+//           Encodes the on-chain `subscribe` call with the five contract
+//           arguments (subscriber, merchant, token, amount, interval) as
+//           ScVal types. No network round-trip yet.
+//
+//   Step 3  server.prepareTransaction(tx)
+//           Sends a simulation request to the RPC. The RPC runs the contract
+//           in a sandbox, calculates the exact resource fee, and returns an
+//           updated transaction XDR with the fee injected.  This step also
+//           surfaces contract-level errors (bad args, rule violations) early —
+//           before any signature is requested from the user.
+//
+//   Step 4  signTx(preparedTx.toXDR(), networkPassphrase)
+//           Passes the XDR to Freighter (via wallet_manager.signTx), which
+//           shows the user a signing prompt. Returns the signed XDR on
+//           approval; throws on rejection.
+//
+//   Step 5  server.sendTransaction(parsedTx)
+//           Submits the signed transaction to the Soroban RPC. Returns
+//           immediately with a status of PENDING, DUPLICATE, or ERROR.
+//           The function throws on ERROR; for PENDING/DUPLICATE it returns
+//           { txHash, server } so the caller can poll for confirmation via
+//           `useTransactionPoller.startPolling(txHash, server)`.
+//
+// The legacy `buildAndSubmitSubscribe` wraps this pipeline and additionally
+// polls in-process (fixed 1 s interval) until the transaction is confirmed or
+// times out, returning only the confirmed hash.  Prefer the two-phase approach
+// (`buildSignAndSubmitSubscribe` + `useTransactionPoller`) for UIs that need
+// intermediate loading states.
+//
+//
+// HOW TO ADD A NEW CONTRACT ENTRY POINT
+// ──────────────────────────────────────
+// All on-chain operations in this file share the same five-step structure.
+// To wrap a new contract function (e.g. `pause(subscriber, merchant)`):
+//
+//   1. Define the parameter / result interfaces above (SubscribeParams style).
+//
+//   2. Validate all Address arguments with isValidGAddress / isValidCAddress
+//      before making any network calls so the user gets a clear error
+//      message rather than an opaque RPC rejection.
+//
+//   3. Construct the operation:
+//        contract.call(
+//          'pause',
+//          new Address(params.subscriber).toScVal(),
+//          new Address(params.merchant).toScVal(),
+//        )
+//      Use nativeToScVal(BigInt(n), { type: 'i128' }) for integers,
+//      nativeToScVal(BigInt(n), { type: 'u64' }) for timestamps/intervals,
+//      and nativeToScVal(flag, { type: 'bool' }) for booleans.
+//
+//   4. Wrap prepareTransaction in a try/catch and re-throw with a
+//      human-readable message (see the pattern in buildSignAndSubmitSubscribe).
+//
+//   5. Decide whether to poll in-process (like buildAndSubmitExecutePayment)
+//      or return early for the two-phase UX (like buildSignAndSubmitSubscribe).
+//      For user-facing flows that benefit from a live progress indicator,
+//      prefer the two-phase approach.
+//
+//   6. Export the function and add it to the barrel export in src/lib/index.ts
+//      (if one exists), then import it in the relevant component.
+//
+// ─────────────────────────────────────────────────────────────────────────────
 
 /**
  * Build, sign, and submit a `subscribe` transaction.

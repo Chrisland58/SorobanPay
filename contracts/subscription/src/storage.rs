@@ -39,26 +39,42 @@ pub fn subscription_key(
 // ==================== Storage & Data Structures ====================
 
 /// Storage keys used by the contract.
+///
+/// All `Subscription` entries use **persistent** storage (survives ledger archival
+/// when TTL is extended).  `MerchantIndex` entries use **temporary** storage
+/// (lower cost; acceptable loss in the unlikely case of archival).
+/// `SchemaVersion`, `Admin`, `AdminConfig`, and `ProtocolFeeConfig` use
+/// **instance** storage (tied to the contract instance lifetime).
 #[contracttype]
 pub enum DataKey {
-    /// Per-subscription record, keyed by sha256(subscriber_xdr ++ merchant_xdr).
+    /// Per-subscription record, keyed by sha256(subscriber_xdr ++ merchant_xdr ++ token_xdr).
     /// Compact 32-byte key instead of the old two-Address tuple (~70 bytes).
+    /// Storage type: **persistent**.
     Subscription(BytesN<32>),
 
     /// Merchant subscription index: maps merchant → Vec<BytesN<32>> of
     /// all hashed subscription keys the merchant is party to.
-    /// Enables enumeration ("all subscriptions for merchant X") on-chain.
+    /// Enables on-chain enumeration ("all subscriptions for merchant X").
+    /// Storage type: **temporary**.
     MerchantIndex(Address),
 
     /// On-chain schema version; updated by `migrate(admin)`.
+    /// Storage type: **instance**.
     SchemaVersion,
 
-    /// Designated admin address authorised to call `migrate`.
+    /// Designated admin address authorised to call `migrate` and `set_protocol_fee`.
+    /// Storage type: **instance**.
     Admin,
 
     /// Protocol fee configuration: fee rate in basis points and fee collector address.
     /// Stored in instance storage. Absent means fee is disabled (0 bps).
+    /// Storage type: **instance**.
     ProtocolFeeConfig,
+
+    /// Combined admin address + per-contract maximum payment amount.
+    /// Set by `initialize`; updated by `set_max_amount`.
+    /// Storage type: **instance**.
+    AdminConfig,
 }
 
 /// Persistent on-chain record for a subscription.
@@ -78,25 +94,39 @@ pub enum DataKey {
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct SubscriptionData {
-    /// SEP-41 token contract address
+    /// SEP-41 token contract address used for transfers.
     pub token: Address,
-    /// Payment amount per interval (strictly positive, <= MAX_AMOUNT)
+    /// Payment amount per interval (strictly positive, ≤ `MAX_AMOUNT`).
     pub amount: i128,
-    /// Seconds between payments  [86_400, 31_536_000]
+    /// Seconds between payment windows  [86_400 (1 day), 31_536_000 (1 year)].
     pub interval: u64,
-    /// Unix timestamp of the next valid payment window
+    /// Unix timestamp (seconds) after which the next payment may be collected.
     pub next_payment: u64,
-    /// True when subscription payments are suspended
-    pub is_paused:    bool,
+    /// When `true`, `execute_payment` is blocked until the subscription is
+    /// explicitly resumed (see `paused_until` usage in `execute_payment`).
+    pub is_paused: bool,
+    /// Seconds after `overdue_since` before `expire_subscription` may be called.
+    /// `0` disables the grace period (subscription can be expired immediately).
     pub grace_period: u64,
+    /// Unix timestamp when the most recent payment attempt failed due to
+    /// insufficient subscriber balance.  `None` when the subscription is current.
     pub overdue_since: Option<u64>,
+    /// Monotonically incrementing counter of successful `execute_payment` calls.
+    /// Used for idempotency checks and off-chain event deduplication.
     pub payment_nonce: u64,
 }
 
+/// Admin-level configuration stored per contract instance.
+///
+/// Set during `initialize`; `max_amount` may be updated via `set_max_amount`.
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct AdminConfig {
+    /// The privileged address that may call `migrate`, `set_protocol_fee`,
+    /// and `set_max_amount`.
     pub admin: Address,
+    /// Per-contract ceiling on `SubscriptionData.amount`.
+    /// Defaults to `MAX_AMOUNT` (10¹⁸) at initialisation.
     pub max_amount: i128,
 }
 
