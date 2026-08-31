@@ -193,7 +193,7 @@ jobs:
 
       - name: Notify Slack — dev deployment
         if: always()
-        uses: slackapi/slack-github-action@v1.26.0
+        uses: slackapi/slack-github-action@v4.0.0
         with:
           payload: |
             {
@@ -284,7 +284,7 @@ jobs:
 
       - name: Notify Slack — staging deployment
         if: always()
-        uses: slackapi/slack-github-action@v1.26.0
+        uses: slackapi/slack-github-action@v4.0.0
         with:
           payload: |
             {
@@ -325,7 +325,7 @@ jobs:
 
       - name: Notify Slack — staging smoke result
         if: failure()
-        uses: slackapi/slack-github-action@v1.26.0
+        uses: slackapi/slack-github-action@v4.0.0
         with:
           payload: |
             {
@@ -405,7 +405,7 @@ jobs:
 
       - name: Notify Slack — prod deployment
         if: always()
-        uses: slackapi/slack-github-action@v1.26.0
+        uses: slackapi/slack-github-action@v4.0.0
         with:
           payload: |
             {
@@ -439,7 +439,7 @@ jobs:
 
       - name: Notify Slack — prod smoke result
         if: failure()
-        uses: slackapi/slack-github-action@v1.26.0
+        uses: slackapi/slack-github-action@v4.0.0
         with:
           payload: |
             {
@@ -501,7 +501,7 @@ jobs:
 
       - name: Notify Slack — rollback
         if: always()
-        uses: slackapi/slack-github-action@v1.26.0
+        uses: slackapi/slack-github-action@v4.0.0
         with:
           payload: |
             {
