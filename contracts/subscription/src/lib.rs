@@ -295,7 +295,7 @@ impl SubscriptionProtocol {
 
         token_client.transfer(&subscriber, &merchant, &data.amount);
 
-        data.next_payment = now + data.interval;
+        data.next_payment = checked_next_payment(now, data.interval)?;
         env.storage().persistent().set(&key, &data);
         env.storage()
             .persistent()
@@ -359,7 +359,15 @@ impl SubscriptionProtocol {
 
             token_client.transfer(&subscriber, &merchant, &data.amount);
 
-            data.next_payment = now + data.interval;
+            data.next_payment = match checked_next_payment(now, data.interval) {
+                Ok(np) => np,
+                Err(_) => {
+                    // Overflow computing next_payment: skip this subscriber rather than
+                    // silently wrapping or aborting the entire batch.
+                    results.push_back((subscriber.clone(), false));
+                    continue;
+                }
+            };
             env.storage().persistent().set(&key, &data);
             keys_to_extend.push_back(key);
 
