@@ -1,36 +1,67 @@
 /**
  * network.ts
  *
- * Network configuration constants derived from runtime config.
- * These values are loaded at runtime from environment variables
- * or a configuration endpoint, allowing changes without rebuilding.
+ * Network configuration constants for SorobanPay.
  *
- * @deprecated Use getRuntimeConfig() from @/lib/runtime_config instead
- * to access the latest configuration values. These exports are maintained
- * for backward compatibility but will be removed in a future version.
+ * Named string constants (`RPC_URL`, `NETWORK_PASSPHRASE`, etc.) are derived
+ * from the single source of truth: `@/lib/network_config` via
+ * `@/lib/runtime_config`. Do not hard-code passphrase or URL strings in
+ * components — import from here or directly from `@/lib/network_config`.
+ *
+ * ## Quick-start for new code
+ *
+ * ```ts
+ * // Preferred — typed config object, picks the active network automatically:
+ * import { getNetworkConfig } from '@/lib/network_config';
+ * const { rpcUrl, networkPassphrase, name } = getNetworkConfig();
+ *
+ * // Or pick a specific network:
+ * import { NETWORK_CONFIGS } from '@/lib/network_config';
+ * const testnet = NETWORK_CONFIGS.testnet;
+ * const mainnet = NETWORK_CONFIGS.mainnet;
+ * ```
+ *
+ * The flat constants below (`RPC_URL`, `NETWORK_PASSPHRASE`, …) are kept for
+ * backward compatibility with existing components. Prefer the typed API above
+ * in new code.
  */
 
 import { getRuntimeConfig } from '@/lib/runtime_config';
 
-// Get initial config at module load time
+// Re-export typed network API so consumers only need one import path.
+export {
+  getNetworkConfig,
+  resolveActiveNetwork,
+  isStellarNetwork,
+  NETWORK_CONFIGS,
+} from '@/lib/network_config';
+export type { StellarNetwork, NetworkConfig } from '@/lib/network_config';
+
+// ── Flat constants (backward compatibility) ───────────────────────────────────
+
+// Get initial config at module load time.
 const _initialConfig = getRuntimeConfig();
 
 /**
- * @deprecated Use getRuntimeConfig().rpcUrl instead
+ * Soroban RPC endpoint URL for the active network.
+ * @deprecated Use `getNetworkConfig().rpcUrl` instead.
  */
 export const RPC_URL = _initialConfig.rpcUrl;
 
 /**
- * @deprecated Use getRuntimeConfig().networkPassphrase instead
+ * Stellar network passphrase for the active network.
+ * @deprecated Use `getNetworkConfig().networkPassphrase` instead.
  */
 export const NETWORK_PASSPHRASE = _initialConfig.networkPassphrase;
 
 /**
- * @deprecated Use getRuntimeConfig().contractId instead
+ * Deployed SorobanPay contract address.
+ * @deprecated Use `getRuntimeConfig().contractId` instead.
  */
 export const CONTRACT_ID = _initialConfig.contractId;
 
 /**
- * @deprecated Use getRuntimeConfig().networkName instead
+ * Display name of the active network (e.g. "Testnet", "Mainnet").
+ * @deprecated Use `getNetworkConfig().name` instead.
  */
 export const NETWORK_NAME = _initialConfig.networkName;
