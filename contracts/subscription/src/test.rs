@@ -1898,6 +1898,205 @@ fn test_subscribe_amount_at_max_accepted() {
         &MAX_AMOUNT,
         &86_400_u64,
     );
+}
+
+// ─── expire_subscription: Grace Period Boundary Tests ────────────────────────
+
+/// expire_subscription before grace period ends must return GracePeriodActive.
+/// 
+/// Scenario: A subscription is overdue, but the grace period has not yet expired.
+/// Calling expire_subscription should fail and leave the subscription intact.
+#[test]
+fn test_expire_subscription_before_grace_period_end_returns_grace_period_active() {
+    let t = T::new();
+    let amt = 100_000_i128;
+    let ivl = 86_400_u64;
+    let grace = 259_200_u64; // 3 days
+    
+    // Subscribe and advance past payment window to trigger overdue state
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &amt, &ivl, &false);
+    
+    // Manually set the subscription to overdue by advancing past the payment window
+    // with insufficient balance
+    let insufficient = 1_i128; // Not enough for the payment
+    let token_client = token::Client::new(&t.env, &t.token);
+    token_client.approve(&t.subscriber, &t.contract_id, &insufficient, &(t.env.ledger().sequence() + 100_000_u32));
+    
+    t.advance(ivl);
+    
+    // This should fail due to insufficient balance and set overdue_since
+    let _ = t.client.try_execute_payment(&t.subscriber, &t.merchant);
+    
+    // Verify subscription is overdue
+    let sub = t.get_sub();
+    assert!(sub.overdue_since.is_some(), "subscription must be marked overdue");
+    
+    // Advance only halfway through grace period
+    t.advance(grace / 2);
+    
+    // expire_subscription should fail with GracePeriodActive
+    let result = t.client.try_expire_subscription(&t.subscriber, &t.merchant);
+    assert!(
+        matches!(result, Err(Ok(ContractError::GracePeriodActive))),
+        "expire_subscription before grace period end must return GracePeriodActive"
+    );
+    
+    // Subscription must still exist
+    assert!(t.has_sub(), "subscription must remain intact when grace period is active");
+}
+
+/// expire_subscription at exactly the grace period end timestamp must succeed.
+///
+/// Scenario: The grace period has just ended (now == overdue_since + grace_period).
+/// The subscription should be removed.
+#[test]
+fn test_expire_subscription_at_exact_grace_period_boundary() {
+    let t = T::new();
+    let amt = 100_000_i128;
+    let ivl = 86_400_u64;
+    let grace = 259_200_u64; // 3 days
+    
+    // Subscribe
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &amt, &ivl, &false);
+    
+    // Set to overdue by advancing past payment with insufficient balance
+    let insufficient = 1_i128;
+    let token_client = token::Client::new(&t.env, &t.token);
+    token_client.approve(&t.subscriber, &t.contract_id, &insufficient, &(t.env.ledger().sequence() + 100_000_u32));
+    
+    t.advance(ivl);
+    let _ = t.client.try_execute_payment(&t.subscriber, &t.merchant);
+    
+    let sub = t.get_sub();
+    let overdue_since = sub.overdue_since.unwrap();
+    
+    // Advance exactly to the grace period boundary
+    let current_ts = t.env.ledger().timestamp();
+    let time_until_expiry = overdue_since + grace - current_ts;
+    t.advance(time_until_expiry);
+    
+    // expire_subscription should succeed
+    let result = t.client.try_expire_subscription(&t.subscriber, &t.merchant);
+    assert!(result.is_ok(), "expire_subscription at exact grace period boundary must succeed");
+    
+    // Subscription must be removed
+    assert!(!t.has_sub(), "subscription must be removed after grace period expires");
+}
+
+/// expire_subscription after grace period ends must succeed and remove storage.
+///
+/// Scenario: Grace period has fully elapsed. Calling expire_subscription should
+/// remove the subscription entry and update the MerchantIndex.
+#[test]
+fn test_expire_subscription_after_grace_period_succeeds_and_removes_storage() {
+    let t = T::new();
+    let amt = 100_000_i128;
+    let ivl = 86_400_u64;
+    let grace = 259_200_u64; // 3 days
+    
+    // Subscribe
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &amt, &ivl, &false);
+    
+    // Verify subscription is in index
+    let keys_before = t.client.get_merchant_subscription_keys(&t.merchant);
+    assert!(!keys_before.is_empty(), "merchant index must contain subscription key");
+    
+    // Set to overdue
+    let insufficient = 1_i128;
+    let token_client = token::Client::new(&t.env, &t.token);
+    token_client.approve(&t.subscriber, &t.contract_id, &insufficient, &(t.env.ledger().sequence() + 100_000_u32));
+    
+    t.advance(ivl);
+    let _ = t.client.try_execute_payment(&t.subscriber, &t.merchant);
+    
+    // Advance well past grace period
+    t.advance(grace + 86_400_u64); // Plus 1 day extra
+    
+    // expire_subscription should succeed
+    let result = t.client.try_expire_subscription(&t.subscriber, &t.merchant);
+    assert!(result.is_ok(), "expire_subscription after grace period must succeed");
+    
+    // Subscription storage must be removed
+    assert!(!t.has_sub(), "subscription must be removed from storage");
+    
+    // MerchantIndex must be updated (subscription key removed)
+    let keys_after = t.client.get_merchant_subscription_keys(&t.merchant);
+    assert!(
+        keys_after.is_empty() || keys_after.len() < keys_before.len(),
+        "MerchantIndex must be updated after expiry"
+    );
+}
+
+/// expire_subscription when overdue_since is not set must return GracePeriodActive.
+///
+/// Scenario: A subscription exists but has never been marked overdue.
+/// Calling expire_subscription should fail because there is no grace period to check.
+#[test]
+fn test_expire_subscription_when_not_overdue_returns_grace_period_active() {
+    let t = T::new();
+    let amt = 100_000_i128;
+    let ivl = 86_400_u64;
+    
+    // Subscribe with sufficient balance
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &amt, &ivl, &false);
+    
+    // Verify subscription is not overdue
+    let sub = t.get_sub();
+    assert!(sub.overdue_since.is_none(), "subscription must not be overdue initially");
+    
+    // Try to expire without being overdue (even well into the future)
+    t.advance(86_400_u64 * 100); // 100 days
+    
+    let result = t.client.try_expire_subscription(&t.subscriber, &t.merchant);
+    assert!(
+        matches!(result, Err(Ok(ContractError::GracePeriodActive))),
+        "expire_subscription on non-overdue subscription must return GracePeriodActive"
+    );
+    
+    // Subscription must remain intact
+    assert!(t.has_sub(), "subscription must remain after failed expiry");
+}
+
+/// After successful expiry, MerchantIndex entry must be removed.
+///
+/// Scenario: A subscription is expired and removed from storage.
+/// The MerchantIndex must no longer reference this subscription.
+#[test]
+fn test_expire_subscription_removes_merchant_index_entry() {
+    let t = T::new();
+    let amt = 100_000_i128;
+    let ivl = 86_400_u64;
+    let grace = 259_200_u64;
+    
+    // Subscribe
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &amt, &ivl, &false);
+    let hash = subscription_key(&t.env, &t.subscriber, &t.merchant);
+    
+    // Get the subscription key from the merchant index
+    let keys_before = t.client.get_merchant_subscription_keys(&t.merchant);
+    assert!(keys_before.contains(&hash), "subscription key must be in merchant index");
+    
+    // Set to overdue
+    let insufficient = 1_i128;
+    let token_client = token::Client::new(&t.env, &t.token);
+    token_client.approve(&t.subscriber, &t.contract_id, &insufficient, &(t.env.ledger().sequence() + 100_000_u32));
+    
+    t.advance(ivl);
+    let _ = t.client.try_execute_payment(&t.subscriber, &t.merchant);
+    
+    // Advance past grace period
+    t.advance(grace + 1_u64);
+    
+    // Expire the subscription
+    t.client.expire_subscription(&t.subscriber, &t.merchant);
+    
+    // Verify the key is no longer in the merchant index
+    let keys_after = t.client.get_merchant_subscription_keys(&t.merchant);
+    assert!(
+        !keys_after.contains(&hash),
+        "expired subscription key must be removed from merchant index"
+    );
+}
     // subscribe should succeed (Ok(())) — the amount is within bounds.
     assert!(r.is_ok(), "amount equal to MAX_AMOUNT must be accepted");
 }

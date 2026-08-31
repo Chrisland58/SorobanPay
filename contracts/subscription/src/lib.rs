@@ -336,9 +336,8 @@ impl SubscriptionProtocol {
         env: Env,
         subscriber: Address,
         merchant: Address,
-        token: Address,
     ) -> BytesN<32> {
-        subscription_key(&env, &subscriber, &merchant, &token)
+        subscription_key(&env, &subscriber, &merchant)
     }
 
     /// Return all subscription key hashes indexed for a given merchant.
@@ -486,7 +485,7 @@ impl SubscriptionProtocol {
         };
 
         // Compact key (#347): sha256(subscriber_xdr ++ merchant_xdr).
-        let hash = subscription_key(&env, &subscriber, &merchant, &token);
+        let hash = subscription_key(&env, &subscriber, &merchant);
         let key = DataKey::Subscription(hash.clone());
         env.storage().persistent().set(&key, &data);
         env.storage()
@@ -617,7 +616,7 @@ impl SubscriptionProtocol {
     ) -> Result<(), ContractError> {
         subscriber.require_auth();
 
-        let hash = subscription_key(&env, &subscriber, &merchant, &token);
+        let hash = subscription_key(&env, &subscriber, &merchant);
         let key = DataKey::Subscription(hash);
         let mut data: SubscriptionData = env
             .storage()
@@ -668,7 +667,7 @@ impl SubscriptionProtocol {
     ) -> Result<(), ContractError> {
         subscriber.require_auth();
 
-        let hash = subscription_key(&env, &subscriber, &merchant, &token);
+        let hash = subscription_key(&env, &subscriber, &merchant);
         let key = DataKey::Subscription(hash);
         let mut data: SubscriptionData = env
             .storage()
@@ -723,7 +722,7 @@ impl SubscriptionProtocol {
     ) -> Result<(), ContractError> {
         merchant.require_auth();
 
-        let hash = subscription_key(&env, &subscriber, &merchant, &token);
+        let hash = subscription_key(&env, &subscriber, &merchant);
         let key = DataKey::Subscription(hash.clone());
         let mut data: SubscriptionData = env
             .storage()
@@ -862,7 +861,7 @@ impl SubscriptionProtocol {
         let mut hashes_to_extend: Vec<soroban_sdk::BytesN<32>> = Vec::new(&env);
 
         for subscriber in subscribers.iter() {
-            let hash = subscription_key(&env, &subscriber, &merchant, &token);
+            let hash = subscription_key(&env, &subscriber, &merchant);
             let key = DataKey::Subscription(hash.clone());
 
             let mut data: SubscriptionData = match env.storage().persistent().get(&key) {
@@ -961,7 +960,7 @@ impl SubscriptionProtocol {
     ) -> Result<(), ContractError> {
         subscriber.require_auth();
 
-        let hash = subscription_key(&env, &subscriber, &merchant, &token);
+        let hash = subscription_key(&env, &subscriber, &merchant);
         let key = DataKey::Subscription(hash.clone());
         if !env.storage().persistent().has(&key) {
             return Err(ContractError::NoActiveSubscription);
@@ -1078,7 +1077,7 @@ impl SubscriptionProtocol {
         merchant: Address,
         token: Address,
     ) -> Option<SubscriptionData> {
-        let hash = subscription_key(&env, &subscriber, &merchant, &token);
+        let hash = subscription_key(&env, &subscriber, &merchant);
         let key = DataKey::Subscription(hash);
         let data = env.storage().persistent().get(&key)?;
         env.storage()

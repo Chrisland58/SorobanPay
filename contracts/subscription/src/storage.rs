@@ -14,7 +14,7 @@ pub const CURRENT_SCHEMA_VERSION: u32 = 2;
 
 /// Derive the compact 32-byte storage key for a subscription.
 ///
-/// Uses SHA-256 over the concatenation of the subscriber, merchant, and token address
+/// Uses SHA-256 over the concatenation of the subscriber and merchant address
 /// bytes, producing a fixed-size `BytesN<32>` that replaces the old
 /// `(Address, Address, Address)` tuple key.
 ///
@@ -28,12 +28,10 @@ pub fn subscription_key(
     env: &Env,
     subscriber: &Address,
     merchant: &Address,
-    token: &Address,
 ) -> BytesN<32> {
     let mut preimage = soroban_sdk::Bytes::new(env);
     preimage.append(&subscriber.to_xdr(env));
     preimage.append(&merchant.to_xdr(env));
-    preimage.append(&token.to_xdr(env));
     env.crypto().sha256(&preimage)
 }
 
