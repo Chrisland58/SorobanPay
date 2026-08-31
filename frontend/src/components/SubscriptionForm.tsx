@@ -34,6 +34,11 @@
 
 import { useState, useEffect, useCallback, type FormEvent } from "react";
 import { useWallet } from "@/hooks/useWallet";
+import { ErrorBoundary } from "@/components/ErrorBoundary";
+import { SkeletonForm } from "@/components/Skeleton";
+import { downloadReceipt, type ReceiptData } from "@/components/SubscriptionReceipt";
+import { ShareQRCode } from "@/components/ShareQRCode";
+import { FeeEstimate } from "@/components/FeeEstimate";
 import {
   getPersistedFormData,
   persistFormData,
@@ -41,6 +46,8 @@ import {
   useFormPersist,
 } from "@/hooks/useFormPersist";
 import { buildAndSubmitSubscribe } from "@/lib/transaction_builder";
+import { checkAllowance, type AllowanceResult } from "@/lib/allowance_checker";
+import { normalizeRpcError } from "@/lib/rpc_error_normalizer";
 import {
   validateSubscriptionForm,
   isFormValid,
@@ -49,23 +56,33 @@ import {
   MAX_INTERVAL_SECONDS,
   type FieldErrors,
 } from "@/lib/validation";
+import { isValidGAddress } from "@/lib/validation";
 import {
   CONTRACT_ID,
   NETWORK_PASSPHRASE,
   NETWORK_NAME,
   RPC_URL,
 } from "@/constants/network";
-import TxHashLink from "@/components/TxHashLink";
-
-// ─── Types ────────────────────────────────────────────────────────────────────
+import { mapError } from "@/lib/errors";
+import { useToast } from "@/components/Toast";
+import { useAddressBook } from "@/hooks/useAddressBook";
+import { AddressBookModal } from "@/components/AddressBookModal";
+import { AddressDisplay } from "@/components/AddressDisplay";// ─── Types ────────────────────────────────────────────────────────────────────
 
 interface SuccessData {
   txHash: string;
   merchant: string;
+  subscriber: string;
   token: string;
   amount: string;
   interval: string;
+  issuedAt: string;
+  /** Unix timestamp (seconds) of the last successful payment, or null if none yet (Issue #50). */
+  lastPayment: number | null;
 }
+
+/** State for the pause/resume controls shown inside the success card. */
+type PauseState = 'active' | 'pausing' | 'paused' | 'resuming';
 
 // ─── Shared input className (larger py for ≥48px touch target on mobile) ─────
 const inputCls =
@@ -183,7 +200,7 @@ function NetworkBadge() {
   return (
     <div
       aria-label={`Network: ${NETWORK_NAME}. Status: ${statusLabel[status]}`}
-      className={`inline-flex items-center gap-2 rounded-full border px-3 py-1 text-xs font-semibold ${networkColor}`}
+      className="flex items-center gap-2 flex-wrap"
     >
       <span aria-hidden="true">{NETWORK_NAME === "Mainnet" ? "🌐" : "🧪"}</span>
       {NETWORK_NAME}
@@ -288,12 +305,23 @@ function ContractConfigError() {
 
 // ─── Progress bar ──────────────────────────────────────────────────────────────
 
-function ProgressBar() {
+function ProgressBar({ phase = 'submitting', explorerUrl }: { phase?: 'submitting' | 'confirming'; explorerUrl?: string | null }) {
+  const label = phase === 'confirming' ? 'Confirming on-chain…' : 'Submitting transaction…';
+  const ariaLabel =
+    phase === 'confirming'
+      ? 'Transaction submitted. Waiting for on-chain confirmation.'
+      : 'Transaction in progress. Submitting to the Soroban network.';
+  const subtext =
+    phase === 'confirming'
+      ? 'Polling for confirmation. This usually takes 5–15 seconds.'
+      : 'This may take 10-30 seconds. Keep the window open.';
+
   return (
     <div
       className="w-full mb-6 p-4 sm:p-5 bg-blue-900/20 border border-blue-600/40 rounded-lg"
       role="status"
-      aria-label="Transaction in progress"
+      aria-live="polite"
+      aria-label={ariaLabel}
     >
       <div className="flex justify-between items-center mb-3">
         <div className="flex items-center gap-2">
@@ -302,8 +330,10 @@ function ProgressBar() {
             xmlns="http://www.w3.org/2000/svg"
             fill="none"
             viewBox="0 0 24 24"
-            aria-hidden="true"
+            role="img"
+            aria-label="Loading spinner"
           >
+            <title>Loading spinner</title>
             <circle
               className="opacity-25"
               cx="12"
@@ -319,19 +349,39 @@ function ProgressBar() {
             />
           </svg>
           <span className="text-sm font-medium text-blue-300">
-            Submitting transaction…
+            {label}
           </span>
         </div>
-        <span className="text-xs text-blue-200 animate-pulse">
-          Processing on blockchain
+        <span className="text-xs text-blue-200 animate-pulse" aria-hidden="true">
+          {phase === 'confirming' ? 'On-chain verification' : 'Processing on blockchain'}
         </span>
       </div>
-      <div className="h-2 w-full bg-gray-700 rounded-full overflow-hidden shadow-inner">
-        <div className="h-full bg-gradient-to-r from-blue-400 via-blue-500 to-blue-400 rounded-full animate-progress" />
+      <div
+        className="h-2 w-full bg-gray-700 rounded-full overflow-hidden shadow-inner"
+        role="progressbar"
+        aria-label="Transaction progress"
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-valuenow={50}
+        aria-valuetext="Transaction in progress"
+      >
+        <div className="h-full bg-gradient-to-r from-blue-400 via-blue-500 to-blue-400 rounded-full animate-progress" aria-hidden="true" />
       </div>
-      <p className="mt-2 text-xs text-gray-300 text-center">
-        This may take 10-30 seconds. Keep the window open.
+      <p className="mt-2 text-xs text-gray-300 text-center" aria-live="off">
+        {subtext}
       </p>
+      {phase === 'confirming' && explorerUrl && (
+        <p className="mt-2 text-xs text-center">
+          <a
+            href={explorerUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-blue-400 hover:text-blue-300 underline underline-offset-2 transition-colors"
+          >
+            View on Stellar Expert ↗
+          </a>
+        </p>
+      )}
     </div>
   );
 }
@@ -341,35 +391,146 @@ function ProgressBar() {
 function SuccessCard({
   data,
   onReset,
+  onCancelSubscription,
+  isCancelling,
+  getLabel,
+  isPaused,
+  pausedUntil,
+  onPauseClick,
+  onResumeClick,
+  isPauseResumeSubmitting,
 }: {
   data: SuccessData;
   onReset: () => void;
+  onCancelSubscription: () => void;
+  /** True while the cancel transaction is being submitted (Issue #791) */
+  isCancelling: boolean;
+  getLabel: (address: string) => string | null;
+  /** True once pause_subscription has been confirmed on-chain (Issue #795) */
+  isPaused: boolean;
+  /** Unix timestamp (seconds) the pause auto-resumes at, or null for an indefinite pause */
+  pausedUntil: number | null;
+  onPauseClick: () => void;
+  onResumeClick: () => void;
+  isPauseResumeSubmitting: boolean;
 }) {
   const days = Math.round(Number(data.interval) / 86400);
+  const [isDownloading, setIsDownloading] = useState(false);
+  const [downloadError, setDownloadError] = useState<string | null>(null);
+
+  const handleDownloadReceipt = useCallback(async () => {
+    setIsDownloading(true);
+    setDownloadError(null);
+    try {
+      const receiptData: ReceiptData = {
+        txHash: data.txHash,
+        merchant: data.merchant,
+        subscriber: data.subscriber,
+        token: data.token,
+        amount: data.amount,
+        interval: data.interval,
+        issuedAt: data.issuedAt,
+      };
+      await downloadReceipt(receiptData);
+    } catch (err) {
+      setDownloadError(
+        err instanceof Error ? err.message : "Failed to generate receipt PDF.",
+      );
+    } finally {
+      setIsDownloading(false);
+    }
+  }, [data]);
+
   return (
     <div
       role="alert"
       className="mb-6 rounded-xl bg-gradient-to-br from-green-900/60 to-green-800/30 border-2 border-green-600/60 p-5 sm:p-6 text-sm space-y-4 shadow-lg"
     >
+      {/* Cancel confirmation modal */}
+      {showCancelConfirm && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="cancel-confirm-title"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4"
+        >
+          <div className="w-full max-w-sm bg-gray-900 border border-red-700/60 rounded-2xl shadow-2xl p-6 space-y-5 text-white">
+            <h3 id="cancel-confirm-title" className="text-lg font-bold text-red-300">
+              Cancel subscription?
+            </h3>
+            <p className="text-sm text-gray-300">
+              This will permanently remove your subscription with{" "}
+              <span className="font-mono text-xs break-all text-gray-100">{data.merchant}</span>.
+              Future payments will no longer be collectible.
+            </p>
+            <div className="flex gap-3 pt-1">
+              <button
+                onClick={() => setShowCancelConfirm(false)}
+                className="flex-1 rounded-lg border border-gray-600 bg-gray-800/50 text-gray-300 hover:bg-gray-700
+                           py-3 text-sm font-semibold transition-colors
+                           focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-500"
+              >
+                Keep it
+              </button>
+              <button
+                onClick={handleConfirmCancel}
+                className="flex-1 rounded-lg bg-red-700 hover:bg-red-600 active:bg-red-800
+                           py-3 text-sm font-semibold text-white transition-colors
+                           focus:outline-none focus-visible:ring-2 focus-visible:ring-red-400"
+              >
+                Yes, cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Header */}
       <div className="flex items-center gap-3">
         <span className="text-2xl flex-shrink-0" aria-hidden="true">
-          ✓
+          {isPaused ? "⏸" : "✓"}
         </span>
         <p className="font-semibold text-green-300 text-base sm:text-lg">
           Subscription created successfully!
         </p>
       </div>
 
+      {/* Paused status banner — Issue #795 */}
+      {isPaused && (
+        <div
+          role="status"
+          className="flex flex-wrap items-center gap-2 rounded-lg bg-yellow-900/30 border border-yellow-600/50 px-3 py-2.5"
+        >
+          <span className="text-xs font-bold uppercase tracking-wide text-yellow-300">
+            Paused
+          </span>
+          <span className="text-xs text-yellow-200/80">
+            {pausedUntil
+              ? `Resumes automatically on ${new Date(pausedUntil * 1000).toLocaleString()}`
+              : "Payments are on hold until you resume."}
+          </span>
+        </div>
+      )}
+
       {/* Tx hash */}
       <div className="bg-gray-800/50 rounded-lg p-3 border border-gray-700/50">
         <p className="text-gray-400 text-xs mb-1.5 font-medium">
           Transaction hash
         </p>
-        <TxHashLink
-          txHash={data.txHash}
-          network={NETWORK_NAME === "Mainnet" ? "mainnet" : "testnet"}
-        />
+        <div className="flex items-center gap-2 flex-wrap">
+          <p className="text-gray-200 break-all font-mono text-xs leading-relaxed flex-1">
+            {data.txHash}
+          </p>
+          <a
+            href={`${explorerBase}/${data.txHash}`}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-xs text-blue-400 hover:text-blue-300 underline shrink-0"
+            aria-label="View transaction on Stellar Expert"
+          >
+            View ↗
+          </a>
+        </div>
       </div>
 
       {/* Summary */}
@@ -381,8 +542,45 @@ function SuccessCard({
           every {days} day{days !== 1 ? "s" : ""}
         </span>
         <span className="text-gray-300 font-medium break-all">Merchant</span>
-        <span className="break-all font-mono text-xs">{data.merchant}</span>
+        <span className="break-all font-mono text-xs">
+          <AddressDisplay address={data.merchant} getLabel={getLabel} truncateLen={8} />
+        </span>
       </div>
+
+      {/* Cancel success state */}
+      {cancelTxHash && (
+        <div
+          role="status"
+          className="rounded-lg bg-orange-900/30 border border-orange-600/50 p-3 space-y-1"
+        >
+          <p className="text-orange-300 font-semibold text-xs">
+            Subscription cancelled on-chain ✓
+          </p>
+          <div className="flex items-center gap-2 flex-wrap">
+            <p className="text-gray-400 break-all font-mono text-xs flex-1">{cancelTxHash}</p>
+            <a
+              href={`${explorerBase}/${cancelTxHash}`}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-xs text-blue-400 hover:text-blue-300 underline shrink-0"
+              aria-label="View cancellation transaction on Stellar Expert"
+            >
+              View ↗
+            </a>
+          </div>
+        </div>
+      )}
+
+      {/* Cancel error state */}
+      {cancelError && (
+        <div
+          role="alert"
+          className="rounded-lg bg-red-900/30 border border-red-600/50 p-3"
+        >
+          <p className="text-red-300 font-semibold text-xs mb-1">Cancel failed</p>
+          <p className="text-gray-300 text-xs break-all">{cancelError}</p>
+        </div>
+      )}
 
       {/* Next steps */}
       <div className="border-t border-green-800/60 pt-4 space-y-2.5">
@@ -396,27 +594,170 @@ function SuccessCard({
             {days !== 1 ? "s" : ""}.
           </li>
           <li>
-            To cancel, call{" "}
-            <code className="bg-gray-800 px-1.5 py-0.5 rounded text-green-300 text-xs">
-              cancel(subscriber, merchant)
-            </code>{" "}
-            on the contract, or revoke the token allowance via your wallet.
-          </li>
-          <li>
             Your wallet remains non-custodial — the contract never holds your
             funds.
           </li>
         </ul>
       </div>
 
-      <button
-        onClick={onReset}
-        className="w-full rounded-lg border-2 border-green-600/70 text-green-300 hover:bg-green-900/40 active:bg-green-900/60
-                   py-3 text-sm font-semibold transition-all duration-150 min-h-[48px] hover:shadow-lg
-                   focus:outline-none focus-visible:ring-2 focus-visible:ring-green-400 focus-visible:ring-offset-2 focus-visible:ring-offset-gray-900"
-      >
-        Create Another Subscription
-      </button>
+      {/* Download receipt error */}
+      {downloadError && (
+        <div role="alert" className="rounded-lg bg-red-900/40 border border-red-600/50 px-3 py-2 text-xs text-red-300">
+          Receipt generation failed: {downloadError}
+        </div>
+      )}
+
+      {/* Cancel subscription — Issue #791 */}
+      <div className="flex flex-col sm:flex-row gap-3">
+        <button
+          type="button"
+          onClick={onCancelSubscription}
+          disabled={isCancelling}
+          aria-label="Cancel subscription"
+          className="flex-1 flex items-center justify-center gap-2 rounded-lg
+                     border-2 border-red-600/70 text-red-300 hover:bg-red-900/40 active:bg-red-900/60
+                     disabled:opacity-50 disabled:cursor-not-allowed
+                     py-3 text-sm font-semibold transition-all duration-150 min-h-[48px] hover:shadow-lg
+                     focus:outline-none focus-visible:ring-2 focus-visible:ring-red-400
+                     focus-visible:ring-offset-2 focus-visible:ring-offset-gray-900"
+        >
+          {isCancelling ? "Cancelling…" : "Cancel Subscription"}
+        </button>
+      </div>
+
+      {/* Action buttons */}
+      <div className="flex flex-col sm:flex-row gap-3">
+        {/* Download Receipt button — Issue #379 */}
+        <button
+          type="button"
+          onClick={handleDownloadReceipt}
+          disabled={isDownloading}
+          aria-label="Download subscription receipt as PDF"
+          className="flex-1 flex items-center justify-center gap-2 rounded-lg
+                     bg-green-700 hover:bg-green-600 active:bg-green-800
+                     disabled:opacity-50 disabled:cursor-not-allowed
+                     py-3 text-sm font-semibold text-white transition-all duration-150
+                     min-h-[48px] hover:shadow-lg
+                     focus:outline-none focus-visible:ring-2 focus-visible:ring-green-400
+                     focus-visible:ring-offset-2 focus-visible:ring-offset-gray-900"
+        >
+          {isDownloading ? (
+            <>
+              <svg
+                className="animate-spin h-4 w-4 text-white"
+                xmlns="http://www.w3.org/2000/svg"
+                fill="none"
+                viewBox="0 0 24 24"
+                aria-hidden="true"
+              >
+                <circle
+                  className="opacity-25"
+                  cx="12"
+                  cy="12"
+                  r="10"
+                  stroke="currentColor"
+                  strokeWidth="4"
+                />
+                <path
+                  className="opacity-75"
+                  fill="currentColor"
+                  d="M4 12a8 8 0 018-8v8H4z"
+                />
+              </svg>
+              Generating PDF…
+            </>
+          ) : (
+            <>
+              <svg
+                xmlns="http://www.w3.org/2000/svg"
+                className="h-4 w-4"
+                viewBox="0 0 20 20"
+                fill="currentColor"
+                aria-hidden="true"
+              >
+                <path
+                  fillRule="evenodd"
+                  d="M3 17a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm3.293-7.707a1 1 0 011.414 0L9 10.586V3a1 1 0 112 0v7.586l1.293-1.293a1 1 0 111.414 1.414l-3 3a1 1 0 01-1.414 0l-3-3a1 1 0 010-1.414z"
+                  clipRule="evenodd"
+                />
+              </svg>
+              Download Receipt
+            </>
+          )}
+        </button>
+
+        <button
+          onClick={onReset}
+          className="flex-1 rounded-lg border-2 border-green-600/70 text-green-300 hover:bg-green-900/40 active:bg-green-900/60
+                     py-3 text-sm font-semibold transition-all duration-150 min-h-[48px] hover:shadow-lg
+                     focus:outline-none focus-visible:ring-2 focus-visible:ring-green-400 focus-visible:ring-offset-2 focus-visible:ring-offset-gray-900"
+        >
+          Create Another Subscription
+        </button>
+      </div>
+
+      {/* Cancel subscription (#765) */}
+      {onCancelSubscription && (
+        <div className="pt-2 border-t border-green-800/40">
+          <button
+            type="button"
+            onClick={onCancelSubscription}
+            disabled={isCancelling}
+            aria-label="Cancel this subscription on-chain"
+            className="w-full rounded-lg border border-red-700/60 text-red-400 hover:bg-red-900/30 active:bg-red-900/50
+                       disabled:opacity-50 disabled:cursor-not-allowed
+                       py-3 text-sm font-semibold transition-all duration-150 min-h-[48px]
+                       focus:outline-none focus-visible:ring-2 focus-visible:ring-red-400 focus-visible:ring-offset-2 focus-visible:ring-offset-gray-900"
+          >
+            {isCancelling ? "Cancelling…" : "Cancel Subscription"}
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── Allowance warning banner ──────────────────────────────────────────────────
+
+/**
+ * Shown when the subscriber's current token allowance is below the requested
+ * payment amount. This is a soft warning — the user can still submit, and the
+ * on-chain contract will emit a `low_allowance` event.
+ */
+function AllowanceWarning({
+  allowance,
+  shortfall,
+}: {
+  allowance: bigint;
+  shortfall: bigint;
+}) {
+  return (
+    <div
+      role="alert"
+      aria-live="polite"
+      className="mb-4 rounded-lg bg-yellow-900/40 border border-yellow-600/60 px-4 py-3 text-sm"
+    >
+      <div className="flex items-start gap-2">
+        <span className="text-yellow-400 text-base flex-shrink-0 mt-0.5" aria-hidden="true">
+          ⚠
+        </span>
+        <div className="space-y-1">
+          <p className="font-semibold text-yellow-300">Low token allowance</p>
+          <p className="text-gray-300 text-xs leading-relaxed">
+            Your current allowance ({allowance.toString()} token units) is{" "}
+            <strong>{shortfall.toString()} units short</strong> of the payment
+            amount. You can still submit, but the merchant won&apos;t be able to
+            collect until you approve more tokens.
+          </p>
+          <p className="text-gray-400 text-xs leading-relaxed">
+            To fix: use your wallet to call{" "}
+            <code className="bg-gray-800 px-1.5 py-0.5 rounded text-yellow-300 font-mono">
+              approve(contract, amount)
+            </code>{" "}
+            on the token contract before the first payment is due.
+          </p>
+        </div>
+      </div>
     </div>
   );
 }
@@ -428,6 +769,7 @@ function ConfirmModal({
   tokenAddress,
   amount,
   interval,
+  allowanceResult,
   onConfirm,
   onCancel,
 }: {
@@ -435,6 +777,7 @@ function ConfirmModal({
   tokenAddress: string;
   amount: string;
   interval: string;
+  allowanceResult: AllowanceResult | null;
   onConfirm: () => void;
   onCancel: () => void;
 }) {
@@ -453,6 +796,14 @@ function ConfirmModal({
         <p className="text-sm text-gray-400">
           Review the details before authorizing the on-chain transaction.
         </p>
+
+        {/* Low-allowance warning inside the confirmation dialog */}
+        {allowanceResult && !allowanceResult.sufficient && (
+          <AllowanceWarning
+            allowance={allowanceResult.allowance}
+            shortfall={allowanceResult.shortfall}
+          />
+        )}
 
         <dl className="bg-gray-800/60 rounded-lg divide-y divide-gray-700 text-sm">
           {[
@@ -489,6 +840,116 @@ function ConfirmModal({
   );
 }
 
+// ─── Cancel confirmation modal (Issue #791) ────────────────────────────────────
+
+function CancelConfirmModal({
+  merchantAddress,
+  onConfirm,
+  onCancel,
+}: {
+  merchantAddress: string;
+  onConfirm: () => void;
+  onCancel: () => void;
+}) {
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="cancel-confirm-title"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4"
+    >
+      <div className="w-full max-w-md bg-gray-900 border border-gray-700 rounded-2xl shadow-2xl p-6 space-y-5 text-white">
+        <h3 id="cancel-confirm-title" className="text-lg font-bold">
+          Cancel this subscription?
+        </h3>
+        <p className="text-sm text-gray-400 leading-relaxed">
+          This calls{" "}
+          <code className="bg-gray-800 px-1.5 py-0.5 rounded text-red-300 text-xs">
+            cancel(subscriber, merchant)
+          </code>{" "}
+          on the contract for{" "}
+          <span className="break-all font-mono text-xs text-gray-200">
+            {merchantAddress}
+          </span>
+          . The subscription is removed permanently — you&apos;ll need to
+          subscribe again to resume payments.
+        </p>
+
+        <div className="flex gap-3 pt-1">
+          <button
+            onClick={onCancel}
+            className="flex-1 rounded-lg border border-gray-600 bg-gray-800/50 text-gray-300 hover:bg-gray-700 active:bg-gray-800 py-3 text-sm font-semibold transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-500"
+          >
+            Keep Subscription
+          </button>
+          <button
+            onClick={onConfirm}
+            className="flex-1 rounded-lg bg-red-600 hover:bg-red-500 active:bg-red-700 py-3 text-sm font-semibold transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-red-400"
+          >
+            Cancel Subscription
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── Cancelled card (Issue #791) ────────────────────────────────────────────────
+// Shown after a successful cancel — replaces SuccessCard with the tx hash and
+// a Stellar Expert explorer link, per the acceptance criteria.
+
+function CancelledCard({
+  txHash,
+  onReset,
+}: {
+  txHash: string;
+  onReset: () => void;
+}) {
+  const explorerUrl = buildExplorerUrl(txHash);
+  return (
+    <div
+      role="alert"
+      className="mb-6 rounded-xl bg-gradient-to-br from-gray-800/60 to-gray-900/40 border-2 border-gray-600/60 p-5 sm:p-6 text-sm space-y-4 shadow-lg"
+    >
+      <div className="flex items-center gap-3">
+        <span className="text-2xl flex-shrink-0" aria-hidden="true">
+          🛑
+        </span>
+        <p className="font-semibold text-gray-200 text-base sm:text-lg">
+          Subscription cancelled
+        </p>
+      </div>
+
+      <div className="bg-gray-800/50 rounded-lg p-3 border border-gray-700/50">
+        <p className="text-gray-400 text-xs mb-1.5 font-medium">
+          Transaction hash
+        </p>
+        <p className="text-gray-200 break-all font-mono text-xs leading-relaxed">
+          {txHash}
+        </p>
+        <a
+          href={explorerUrl}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="inline-flex items-center gap-1 mt-2 text-xs text-blue-400 hover:text-blue-300 underline focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400 rounded"
+        >
+          View on Stellar Expert
+          <span aria-hidden="true">↗</span>
+        </a>
+      </div>
+
+      <button
+        onClick={onReset}
+        className="w-full rounded-lg border-2 border-gray-600/70 text-gray-200 hover:bg-gray-800/60 active:bg-gray-800/80
+                   py-3 text-sm font-semibold transition-all duration-150 min-h-[48px] hover:shadow-lg
+                   focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-400 focus-visible:ring-offset-2 focus-visible:ring-offset-gray-900"
+      >
+        Create Another Subscription
+      </button>
+    </div>
+  );
+}
+
 // ─── Transaction error classifier + card ──────────────────────────────────────
 
 interface TxErrorInfo {
@@ -498,131 +959,33 @@ interface TxErrorInfo {
   raw: string;
 }
 
+/**
+ * Classifies a thrown error into a structured `TxErrorInfo` by delegating to
+ * `normalizeRpcError` from `rpc_error_normalizer`.
+ *
+ * All contract error codes, RPC-layer failures, Freighter rejections, and
+ * network faults are handled in the normalizer. This wrapper maps the
+ * `NormalizedRpcError` shape to the `TxErrorInfo` shape that `ErrorCard`
+ * already renders.
+ */
 function classifyError(err: unknown): TxErrorInfo {
-  const raw = err instanceof Error ? err.message : String(err);
-  const msg = raw.toLowerCase();
-
-  if (
-    msg.includes("user declined") ||
-    msg.includes("rejected") ||
-    msg.includes("signing failed") ||
-    msg.includes("user rejected")
-  ) {
-    return {
-      title: "Signing cancelled",
-      summary: "You declined the transaction in Freighter.",
-      fix: 'Click "Authorize Subscription" again and approve the request in the Freighter pop-up.',
-      raw,
-    };
-  }
-  if (
-    msg.includes("insufficient balance") ||
-    msg.includes("not enough") ||
-    msg.includes("underfunded")
-  ) {
-    return {
-      title: "Insufficient balance",
-      summary:
-        "Your wallet does not have enough tokens or XLM to cover this transaction.",
-      fix: "Top up your account. On testnet use Stellar Friendbot; on mainnet send XLM to your address.",
-      raw,
-    };
-  }
-  if (
-    msg.includes("allowance") ||
-    msg.includes("transfer from") ||
-    msg.includes("spend limit")
-  ) {
-    return {
-      title: "Token allowance too low",
-      summary:
-        "The contract is not authorized to transfer this token amount on your behalf.",
-      fix: "Approve a higher token allowance by calling token.approve(contract_id, amount) before subscribing.",
-      raw,
-    };
-  }
-  if (msg.includes("timeout") || msg.includes("timed out")) {
-    return {
-      title: "Transaction timed out",
-      summary:
-        "The network did not confirm the transaction within the expected time.",
-      fix: "Check your connection and retry. The transaction may still confirm — wait a minute before resubmitting.",
-      raw,
-    };
-  }
-  if (
-    msg.includes("network") ||
-    msg.includes("fetch") ||
-    msg.includes("rpc") ||
-    msg.includes("failed to fetch")
-  ) {
-    return {
-      title: "Network error",
-      summary: "Could not reach the Soroban RPC endpoint.",
-      fix: "Check your internet connection and verify NEXT_PUBLIC_RPC_URL in .env.local. Retry in a moment.",
-      raw,
-    };
-  }
-  if (
-    msg.includes("wrong network") ||
-    msg.includes("passphrase") ||
-    msg.includes("network mismatch")
-  ) {
-    return {
-      title: "Wrong network",
-      summary: "Freighter is set to a different network than the app expects.",
-      fix: `Open Freighter, switch to ${NETWORK_NAME}, and try again.`,
-      raw,
-    };
-  }
-  if (
-    msg.includes("amountmustbepositive") ||
-    msg.includes("error(contract, #1)")
-  ) {
-    return {
-      title: "Invalid amount",
-      summary:
-        "The contract rejected the amount — it must be greater than zero.",
-      fix: "Enter a positive integer amount and resubmit.",
-      raw,
-    };
-  }
-  if (
-    msg.includes("intervaltoo") ||
-    msg.includes("error(contract, #2)") ||
-    msg.includes("error(contract, #3)")
-  ) {
-    return {
-      title: "Invalid interval",
-      summary:
-        "The payment interval is outside the allowed range (1 day – 1 year).",
-      fix: "Enter a value between 86 400 s (1 day) and 31 536 000 s (1 year).",
-      raw,
-    };
-  }
-  if (msg.includes("unauthorized") || msg.includes("error(contract, #6)")) {
-    return {
-      title: "Authorisation failed",
-      summary: "The contract rejected the transaction signature.",
-      fix: "Ensure the connected wallet matches the subscriber address and retry.",
-      raw,
-    };
-  }
-
+  const normalized = normalizeRpcError(err);
   return {
-    title: "Transaction failed",
-    summary: "An unexpected error occurred while submitting the transaction.",
-    fix: "Review the technical details below and retry. If the problem persists, check the README troubleshooting section.",
-    raw,
+    title:   normalized.title,
+    summary: normalized.summary,
+    fix:     normalized.action,
+    raw:     normalized.rawMessage,
   };
 }
 
 function ErrorCard({
   error,
   onDismiss,
+  explorerUrl,
 }: {
   error: TxErrorInfo;
   onDismiss: () => void;
+  explorerUrl?: string | null;
 }) {
   const [showDetails, setShowDetails] = useState(false);
   const showConfig = /network|rpc|contract|passphrase/i.test(`${error.title} ${error.raw}`);
@@ -687,6 +1050,23 @@ function ErrorCard({
       )}
 
       {/* Collapsible technical details */}
+      {explorerUrl && (
+        <div className="mb-3">
+          <a
+            href={explorerUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-flex items-center gap-1.5 text-xs text-blue-400 hover:text-blue-300 underline underline-offset-2 transition-colors"
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" className="h-3.5 w-3.5" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+              <path d="M11 3a1 1 0 100 2h2.586l-6.293 6.293a1 1 0 101.414 1.414L15 6.414V9a1 1 0 102 0V4a1 1 0 00-1-1h-5z" />
+              <path d="M5 5a2 2 0 00-2 2v8a2 2 0 002 2h8a2 2 0 002-2v-3a1 1 0 10-2 0v3H5V7h3a1 1 0 000-2H5z" />
+            </svg>
+            View transaction on Stellar Expert ↗
+          </a>
+        </div>
+      )}
+      {/* Collapsible technical details */}
       <button
         type="button"
         onClick={() => setShowDetails((v) => !v)}
@@ -707,25 +1087,388 @@ function ErrorCard({
   );
 }
 
+// ─── Token info helpers ────────────────────────────────────────────────────────
+
+/** SEP-41 standard: 7 decimal places (10^7 stroops per token unit). */
+const STROOPS_PER_TOKEN = 10_000_000n;
+
+/**
+ * Format a raw stroop bigint value as a human-readable token amount with 7
+ * decimal places (e.g. 1_000_000_000n → "100.0000000").
+ */
+function formatStroops(stroops: bigint): string {
+  const whole = stroops / STROOPS_PER_TOKEN;
+  const frac = stroops % STROOPS_PER_TOKEN;
+  // Pad fractional part to 7 digits
+  const fracStr = frac.toString().padStart(7, "0");
+  return `${whole}.${fracStr}`;
+}
+
+// ─── TokenInfoPanel ────────────────────────────────────────────────────────────
+
+/**
+ * Displays the subscriber's current token balance and approved allowance for
+ * the SorobanPay contract, with warnings when either is insufficient for the
+ * entered amount.
+ *
+ * Rendered below the amount field whenever the wallet is connected and a valid
+ * token address is present. Warnings are informational — they do not block submission.
+ */
+function TokenInfoPanel({
+  tokenAddress,
+  subscriberAddress,
+  amountStr,
+}: {
+  tokenAddress: string;
+  subscriberAddress: string;
+  amountStr: string;
+}) {
+  const { status, balance, allowance, error, refresh } = useTokenInfo(
+    tokenAddress,
+    subscriberAddress,
+    CONTRACT_ID,
+  );
+
+  // Parse the entered amount into stroops for comparison
+  const enteredTokens = amountStr.trim() !== "" ? Number(amountStr) : NaN;
+  const enteredStroops =
+    !isNaN(enteredTokens) && Number.isInteger(enteredTokens) && enteredTokens > 0
+      ? BigInt(enteredTokens) * STROOPS_PER_TOKEN
+      : null;
+
+  const balanceTooLow =
+    enteredStroops !== null && balance !== null && enteredStroops > balance;
+  const allowanceTooLow =
+    enteredStroops !== null && allowance !== null && enteredStroops > allowance;
+
+  // Don't render anything when idle (no valid addresses yet)
+  if (status === "idle") return null;
+
+  return (
+    <div className="mt-3 space-y-2">
+      {/* ── Loading skeleton ── */}
+      {status === "loading" && (
+        <div
+          role="status"
+          aria-label="Fetching token information"
+          className="flex items-center gap-2 text-xs text-gray-400 animate-pulse"
+        >
+          <svg
+            className="h-3.5 w-3.5 animate-spin text-blue-400"
+            xmlns="http://www.w3.org/2000/svg"
+            fill="none"
+            viewBox="0 0 24 24"
+            aria-hidden="true"
+          >
+            <circle
+              className="opacity-25"
+              cx="12"
+              cy="12"
+              r="10"
+              stroke="currentColor"
+              strokeWidth="4"
+            />
+            <path
+              className="opacity-75"
+              fill="currentColor"
+              d="M4 12a8 8 0 018-8v8H4z"
+            />
+          </svg>
+          Fetching balance…
+        </div>
+      )}
+
+      {/* ── Error state ── */}
+      {status === "error" && error && (
+        <div
+          id="token-info-error"
+          role="status"
+          className="flex flex-col gap-2 rounded-lg bg-red-900/30 border border-red-700/50 px-3 py-2.5 text-xs text-red-300"
+        >
+          <p>{error}</p>
+          <button
+            type="button"
+            aria-label="Retry fetching token info"
+            onClick={refresh}
+            className="self-start inline-flex items-center gap-1.5 rounded px-2 py-1 text-xs font-medium
+                       bg-red-800/60 hover:bg-red-700/60 text-red-200 transition-colors
+                       focus:outline-none focus-visible:ring-2 focus-visible:ring-red-400"
+          >
+            <svg
+              xmlns="http://www.w3.org/2000/svg"
+              className="h-3.5 w-3.5"
+              viewBox="0 0 20 20"
+              fill="currentColor"
+              aria-hidden="true"
+            >
+              <path
+                fillRule="evenodd"
+                d="M4 2a1 1 0 011 1v2.101a7.002 7.002 0 0111.601 2.566 1 1 0 11-1.885.666A5.002 5.002 0 005.999 7H9a1 1 0 010 2H4a1 1 0 01-1-1V3a1 1 0 011-1zm.008 9.057a1 1 0 011.276.61A5.002 5.002 0 0014.001 13H11a1 1 0 110-2h5a1 1 0 011 1v5a1 1 0 11-2 0v-2.101a7.002 7.002 0 01-11.601-2.566 1 1 0 01.61-1.276z"
+                clipRule="evenodd"
+              />
+            </svg>
+            Retry
+          </button>
+        </div>
+      )}
+
+      {/* ── Success state: balance + allowance rows ── */}
+      {status === "success" && balance !== null && allowance !== null && (
+        <div className="rounded-lg bg-gray-800/60 border border-gray-700/60 divide-y divide-gray-700/50 text-xs">
+          {/* Header row with refresh button */}
+          <div className="flex items-center justify-between px-3 py-2">
+            <span className="text-gray-400 font-medium uppercase tracking-wide text-[10px]">
+              Token info
+            </span>
+            <button
+              type="button"
+              aria-label="Refresh token balance and allowance"
+              onClick={refresh}
+              className="text-gray-500 hover:text-gray-300 transition-colors rounded
+                         focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400"
+            >
+              <svg
+                xmlns="http://www.w3.org/2000/svg"
+                className="h-3.5 w-3.5"
+                viewBox="0 0 20 20"
+                fill="currentColor"
+                aria-hidden="true"
+              >
+                <path
+                  fillRule="evenodd"
+                  d="M4 2a1 1 0 011 1v2.101a7.002 7.002 0 0111.601 2.566 1 1 0 11-1.885.666A5.002 5.002 0 005.999 7H9a1 1 0 010 2H4a1 1 0 01-1-1V3a1 1 0 011-1zm.008 9.057a1 1 0 011.276.61A5.002 5.002 0 0014.001 13H11a1 1 0 110-2h5a1 1 0 011 1v5a1 1 0 11-2 0v-2.101a7.002 7.002 0 01-11.601-2.566 1 1 0 01.61-1.276z"
+                  clipRule="evenodd"
+                />
+              </svg>
+            </button>
+          </div>
+
+          {/* Balance row */}
+          <div className="flex items-center justify-between px-3 py-2">
+            <span className="text-gray-400">Your balance</span>
+            <span className={`font-mono font-medium ${balanceTooLow ? "text-yellow-400" : "text-gray-200"}`}>
+              {formatStroops(balance)}
+            </span>
+          </div>
+
+          {/* Allowance row */}
+          <div className="flex items-center justify-between px-3 py-2">
+            <span className="text-gray-400">Approved allowance</span>
+            <span className={`font-mono font-medium ${allowanceTooLow ? "text-yellow-400" : "text-gray-200"}`}>
+              {formatStroops(allowance)}
+            </span>
+          </div>
+        </div>
+      )}
+
+      {/* ── Insufficient balance warning ── */}
+      {balanceTooLow && balance !== null && (
+        <div
+          role="status"
+          className="rounded-lg bg-yellow-900/30 border border-yellow-600/50 px-3 py-2.5 text-xs text-yellow-300 space-y-1"
+        >
+          <p className="font-semibold">⚠ Balance too low</p>
+          <p>
+            Your current balance is{" "}
+            <span className="font-mono">{formatStroops(balance)}</span>, which
+            is less than the requested amount. The first payment will fail with{" "}
+            <strong>TransferFailed (error 7)</strong> unless you top up before the merchant
+            collects.
+          </p>
+        </div>
+      )}
+
+      {/* ── Insufficient allowance warning ── */}
+      {allowanceTooLow && allowance !== null && (
+        <div
+          role="status"
+          className="rounded-lg bg-yellow-900/30 border border-yellow-600/50 px-3 py-2.5 text-xs text-yellow-300 space-y-2"
+        >
+          <p className="font-semibold">⚠ Allowance too low</p>
+          <p>
+            The contract is only approved to transfer{" "}
+            <span className="font-mono">{formatStroops(allowance)}</span> tokens,
+            which is less than the requested amount. Payment will fail with{" "}
+            <strong>TransferFailed (error 7)</strong>. Approve a higher allowance
+            before subscribing.
+          </p>
+          <div className="bg-gray-900/60 rounded p-2 space-y-1">
+            <p className="text-gray-400 font-medium">Approve via CLI:</p>
+            <pre className="overflow-x-auto whitespace-pre-wrap break-all text-[10px] text-gray-300">
+              {`stellar contract invoke \\
+  --id ${tokenAddress} --source <your-key> --network testnet \\
+  -- approve \\
+  --from <subscriber-address> \\
+  --spender ${CONTRACT_ID} \\
+  --amount <desired-amount> \\
+  --expiration-ledger 9999999`}
+            </pre>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ─── Component ────────────────────────────────────────────────────────────────
 
-export default function SubscriptionForm() {
-  const { publicKey, freighterInstalled, isCheckingFreighter } = useWallet();
+// ─── Props ────────────────────────────────────────────────────────────────────
 
-  // Guard: must have a valid contract address before rendering the form
-  if (!CONTRACT_ID) return <ContractConfigError />;
+export interface SubscriptionFormInitialValues {
+  /** Pre-filled merchant Stellar address (validated before use). */
+  merchantAddress?: string;
+  /** Pre-filled token contract address (validated before use). */
+  tokenAddress?: string;
+  /** Pre-filled payment amount. */
+  amount?: string;
+  /** Pre-filled interval in seconds. */
+  interval?: string;
+}
 
-  const [merchantAddress, setMerchantAddress] = useState('');
-  const [tokenAddress, setTokenAddress]       = useState('');
-  const [amount, setAmount]                   = useState('');
-  const [interval, setInterval]               = useState(String(DEFAULT_INTERVAL_SECONDS));
+export interface SubscriptionFormProps {
+  /**
+   * Optional initial form values (FE-37 — pre-population from share URL).
+   * Each field is only applied when non-empty; invalid values are ignored.
+   */
+  initialValues?: SubscriptionFormInitialValues;
+}
+
+export default function SubscriptionForm({ initialValues }: SubscriptionFormProps = {}) {
+  const { publicKey, isCheckingFreighter, freighterInstalled } = useWallet();
+  const { showToast } = useToast();
+
+  // All hooks must be declared before any early return (rules-of-hooks)
+  const [merchantAddress, setMerchantAddress] = useState(initialValues?.merchantAddress ?? '');
+  const [tokenAddress, setTokenAddress]       = useState(initialValues?.tokenAddress ?? '');
+  const [amount, setAmount]                   = useState(initialValues?.amount ?? '');
+  const [interval, setInterval]               = useState(initialValues?.interval ?? String(DEFAULT_INTERVAL_SECONDS));
 
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isConfirming, setIsConfirming] = useState(false);
+  const [confirmingTxHash, setConfirmingTxHash] = useState<string | null>(null);
   const [fieldErrors, setFieldErrors]   = useState<FieldErrors>({});
   const [txError, setTxError]           = useState<TxErrorInfo | null>(null);
+  const [txErrorExplorerUrl, setTxErrorExplorerUrl] = useState<string | null>(null);
   const [successData, setSuccessData]   = useState<SuccessData | null>(null);
   const [showConfirm, setShowConfirm]   = useState(false);
+  // Cancel subscription confirmation modal
+  const [showCancelConfirm, setShowCancelConfirm] = useState(false);
+  const [cancelStatus, setCancelStatus] = useState<'idle' | 'pending' | 'done'>('idle');
+  const [cancelTxHash, setCancelTxHash] = useState<string | null>(null);
+
+  // ── Transaction poller ──────────────────────────────────────────────────────
+  const { state: pollerState, startPolling } = useTransactionPoller({
+    onSuccess: (txHash) => {
+      setIsConfirming(false);
+      setConfirmingTxHash(null);
+      setSuccessData({
+        txHash,
+        merchant: merchantAddress.trim(),
+        subscriber: publicKey ?? '',
+        token: tokenAddress.trim(),
+        amount,
+        interval,
+        issuedAt: new Date().toISOString(),
+      });
+    },
+    onFailed: (errorMessage, txHash) => {
+      setIsConfirming(false);
+      setConfirmingTxHash(null);
+      const explorerUrl = buildExplorerUrl(txHash);
+      setTxErrorExplorerUrl(explorerUrl);
+      setTxError(classifyError(new Error(errorMessage)));
+      const mapped = mapError(new Error(errorMessage));
+      showToast({
+        variant: 'error',
+        message: mapped.message,
+        action: mapped.action,
+        docsUrl: mapped.docsUrl,
+      });
+    },
+    onTimeout: (txHash, explorerUrl) => {
+      setIsConfirming(false);
+      setConfirmingTxHash(null);
+      setTxErrorExplorerUrl(explorerUrl);
+      const timeoutMsg = `Transaction status unknown after 60 seconds. Hash: ${txHash}`;
+      setTxError(classifyError(new Error(timeoutMsg)));
+      const mapped = mapError(new Error(timeoutMsg));
+      showToast({
+        variant: 'error',
+        message: mapped.message,
+        action: mapped.action,
+        docsUrl: mapped.docsUrl,
+      });
+    },
+  });
+
+  // ── Fee simulation ────────────────────────────────────────────────────────
+  // Pre-validate the form to decide whether to run simulation.
+  // We compute a lightweight boolean here (without updating state) so the
+  // hook's dependency array stays stable and doesn't fire extra simulations.
+  const feeFormValid =
+    !!publicKey &&
+    !!merchantAddress.trim() &&
+    !!tokenAddress.trim() &&
+    !!amount.trim() &&
+    !!interval.trim() &&
+    isFormValid(
+      validateSubscriptionForm({ merchantAddress, tokenAddress, amount, interval }),
+    );
+
+  const {
+    status: feeStatus,
+    minResourceFee,
+    breakdown: feeBreakdown,
+    error: feeError,
+  } = useSimulateFee({
+    subscriber: publicKey ?? '',
+    merchant: merchantAddress,
+    token: tokenAddress,
+    amount: Number(amount) || 0,
+    interval: Number(interval) || 0,
+    formValid: feeFormValid,
+  });
+
+  // Cancel flow state (#765)
+  const [showCancelConfirm, setShowCancelConfirm]   = useState(false);
+  const [isCancelling, setIsCancelling]             = useState(false);
+  const [cancelSuccess, setCancelSuccess]           = useState<CancelSuccessData | null>(null);
+  const [cancelError, setCancelError]               = useState<TxErrorInfo | null>(null);
+
+  // Allowance pre-flight state (populated when the confirm modal opens)
+  const [allowanceResult, setAllowanceResult]       = useState<AllowanceResult | null>(null);
+  const [isCheckingAllowance, setIsCheckingAllowance] = useState(false);
+
+  // Guard: must have a valid contract address before rendering the form
+  // (placed after hooks so rules-of-hooks is satisfied)
+  if (!CONTRACT_ID) return <ContractConfigError />;
+
+  // FE-47: Defer wallet-state-dependent rendering until after client mount.
+  // On the server, publicKey is always null and freighterInstalled is always
+  // false. Rendering before mount produces the same output on both sides, so
+  // no hydration mismatch occurs. After mount we show the real wallet state.
+  if (!mounted) {
+    return <SkeletonForm />;
+  }
   const intervalNum = Number(interval);
+
+  // ── Cancel subscription state ──────────────────────────────────────────────
+  const [cancelMerchant, setCancelMerchant]       = useState('');
+  const [cancelToken, setCancelToken]             = useState('');
+  const [showCancelConfirm, setShowCancelConfirm] = useState(false);
+  const [isCancelling, setIsCancelling]           = useState(false);
+  const [cancelSuccess, setCancelSuccess]         = useState<{ txHash: string; merchant: string } | null>(null);
+  const [cancelError, setCancelError]             = useState<TxErrorInfo | null>(null);
+
+  const labelCls = 'block text-sm font-semibold text-gray-100 mb-2.5';
+  const hintCls = 'text-xs text-gray-300 leading-relaxed';
+  const requiredMark = (
+    <span aria-hidden="true" className="text-red-400 ml-1">
+      *
+    </span>
+  );
+  const fieldClass = (hasError: boolean) =>
+    `${inputCls} ${hasError ? 'border-red-500 ring-1 ring-red-400/30 focus-visible:ring-red-400' : ''}`;
   const liveIntervalError =
     interval.trim() && Number.isInteger(intervalNum) &&
     (intervalNum < MIN_INTERVAL_SECONDS || intervalNum > MAX_INTERVAL_SECONDS)
@@ -736,13 +1479,47 @@ export default function SubscriptionForm() {
   function resetForm() {
     setSuccessData(null);
     setTxError(null);
+    setTxErrorExplorerUrl(null);
+    setIsConfirming(false);
+    setConfirmingTxHash(null);
     setFieldErrors({});
     setShowConfirm(false);
+    setAllowanceResult(null);
     setMerchantAddress("");
     setTokenAddress("");
     setAmount("");
     setInterval(String(DEFAULT_INTERVAL_SECONDS));
+    setShowPauseConfirm(false);
+    setIsPaused(false);
+    setPausedUntil(null);
     clearPersistedFormData(); // Clear persisted data on success (Issue #115)
+  }
+
+  /** Trigger the ConfirmationModal for cancel subscription */
+  function handleCancelSubscriptionClick() {
+    setShowCancelConfirm(true);
+  }
+
+  /** Called when user confirms cancellation inside CancelConfirmModal (Issue #791) */
+  async function handleConfirmCancel() {
+    setShowCancelConfirm(false);
+    if (!publicKey || !successData) return;
+
+    setCancelStatus('pending');
+    try {
+      const { txHash } = await buildAndSubmitCancel(
+        { subscriber: publicKey, merchant: successData.merchant },
+        CONTRACT_ID,
+        publicKey,
+        NETWORK_PASSPHRASE,
+        RPC_URL,
+      );
+      setCancelTxHash(txHash);
+      setCancelStatus('done');
+    } catch (err) {
+      setTxError(classifyError(err));
+      setCancelStatus('idle');
+    }
   }
 
   function handleSubmit(e: FormEvent) {
@@ -760,6 +1537,23 @@ export default function SubscriptionForm() {
     if (!isFormValid(errors)) return;
     if (!publicKey) return;
 
+    // Run the allowance check in the background while opening the confirm
+    // modal. The check is non-blocking — the modal renders immediately and
+    // the warning appears once the check completes.
+    setAllowanceResult(null);
+    setIsCheckingAllowance(true);
+    checkAllowance({
+      subscriberAddress: publicKey,
+      tokenContractId: tokenAddress.trim(),
+      contractId: CONTRACT_ID,
+      requiredAmount: BigInt(Number(amount)),
+      rpcUrl: RPC_URL,
+      networkPassphrase: NETWORK_PASSPHRASE,
+    })
+      .then((result) => setAllowanceResult(result))
+      .catch(() => setAllowanceResult(null))
+      .finally(() => setIsCheckingAllowance(false));
+
     setShowConfirm(true);
   }
 
@@ -768,8 +1562,12 @@ export default function SubscriptionForm() {
     if (!publicKey) return;
 
     setIsSubmitting(true);
+    setTxError(null);
+    setTxErrorExplorerUrl(null);
+
     try {
-      const result = await buildAndSubmitSubscribe(
+      // Phase 1: build, sign, and submit — returns as soon as the RPC accepts the tx
+      const { txHash, server } = await buildSignAndSubmitSubscribe(
         {
           subscriber: publicKey,
           merchant: merchantAddress.trim(),
@@ -783,21 +1581,133 @@ export default function SubscriptionForm() {
         RPC_URL,
       );
 
-      setSuccessData({
-        txHash: result.txHash,
-        merchant: merchantAddress.trim(),
-        token: tokenAddress.trim(),
-        amount,
-        interval,
-      });
+      // Transition to confirming state — show spinner with explorer link
+      setIsSubmitting(false);
+      setIsConfirming(true);
+      setConfirmingTxHash(txHash);
+
+      // Phase 2: poll for confirmation (handled by useTransactionPoller callbacks above)
+      startPolling(txHash, server);
     } catch (err) {
+      // Submission itself failed (signing rejected, RPC error, etc.)
+      const mapped = mapError(err);
       setTxError(classifyError(err));
-    } finally {
+      showToast({
+        variant: 'error',
+        message: mapped.message,
+        action: mapped.action,
+        docsUrl: mapped.docsUrl,
+      });
       setIsSubmitting(false);
     }
   }
 
+  // ── Cancel handlers ──────────────────────────────────────────────────────
+
+  /**
+   * Triggered when the user clicks "Cancel Subscription".
+   * Validates the merchant address and shows the confirmation modal.
+   */
+  function handleCancelRequest(e: FormEvent) {
+    e.preventDefault();
+    setCancelError(null);
+    if (!cancelMerchant.trim()) {
+      setCancelError(classifyError(new Error('Merchant address is required to cancel a subscription.')));
+      return;
+    }
+    if (!cancelToken.trim()) {
+      setCancelError(classifyError(new Error('Token contract address is required to cancel a subscription.')));
+      return;
+    }
+    if (!isValidGAddress(cancelMerchant.trim())) {
+      setCancelError(classifyError(new Error('Invalid merchant address. Must be a 56-character Stellar G-address.')));
+      return;
+    }
+    if (!/^(C)[A-Z2-7]{55}$/.test(cancelToken.trim())) {
+      setCancelError(classifyError(new Error('Invalid token contract address. Must be a 56-character Stellar C-address.')));
+      return;
+    }
+    setShowCancelConfirm(true);
+  }
+
+  /**
+   * Confirmed by the user in the cancel confirmation modal.
+   * Calls the real on-chain cancel() entry point via buildAndSubmitCancel().
+   * Shows the transaction hash with a Stellar explorer link on success.
+   */
+  async function handleConfirmCancel() {
+    setShowCancelConfirm(false);
+    if (!publicKey) return;
+
+    setIsCancelling(true);
+    setCancelError(null);
+    try {
+      const result = await buildAndSubmitCancel(
+        {
+          subscriber: publicKey,
+          merchant: cancelMerchant.trim(),
+          token: cancelToken.trim(),
+        },
+        CONTRACT_ID,
+        publicKey,
+        NETWORK_PASSPHRASE,
+        RPC_URL,
+      );
+
+      setCancelSuccess({
+        txHash: result.txHash,
+        merchant: cancelMerchant.trim(),
+      });
+      setCancelMerchant('');
+      setCancelToken('');
+    } catch (err) {
+      setCancelError(classifyError(err));
+    } finally {
+      setIsCancelling(false);
+    }
+  }
+
+  /**
+   * handleConfirmCancel — execute the on-chain cancel() call.
+   *
+   * #765: Previously this was a setTimeout(resolve, 300) placeholder.
+   * Now calls buildAndSubmitCancel() from cancel_builder.ts which
+   * builds, signs (via Freighter), and submits the real cancel transaction.
+   */
+  async function handleConfirmCancel() {
+    setShowCancelConfirm(false);
+    if (!publicKey || !successData) return;
+
+    setIsCancelling(true);
+    setCancelError(null);
+    try {
+      const result = await buildAndSubmitCancel(
+        {
+          subscriber: publicKey,
+          merchant: successData.merchant,
+        },
+        CONTRACT_ID,
+        publicKey,
+        NETWORK_PASSPHRASE,
+        RPC_URL,
+      );
+
+      setCancelSuccess({
+        txHash: result.txHash,
+        merchant: successData.merchant,
+        subscriber: publicKey,
+      });
+      // Clear the subscription success state since it has now been cancelled
+      setSuccessData(null);
+    } catch (err) {
+      setCancelError(classifyError(err));
+    } finally {
+      setIsCancelling(false);
+    }
+  }
+
   return (
+    <ErrorBoundary name="SubscriptionForm">
     <div className="w-full max-w-lg mx-auto bg-gray-900 rounded-2xl shadow-xl p-5 sm:p-8 text-white">
       {showConfirm && (
         <ConfirmModal
@@ -805,29 +1715,69 @@ export default function SubscriptionForm() {
           tokenAddress={tokenAddress}
           amount={amount}
           interval={interval}
+          allowanceResult={isCheckingAllowance ? null : allowanceResult}
           onConfirm={confirmAndSubmit}
           onCancel={() => setShowConfirm(false)}
         />
       )}
-      <div className="flex items-center justify-between mb-2 gap-3">
-        <h2 className="text-2xl sm:text-3xl font-bold">Create Subscription</h2>
-        <span
-          aria-label={publicKey ? "Wallet connected" : "Wallet disconnected"}
-          className={`inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-semibold shrink-0 ${
-            publicKey
-              ? "bg-green-900/60 text-green-300 border border-green-600/50"
-              : "bg-gray-700/60 text-gray-400 border border-gray-600/50"
-          }`}
-        >
+      {/* Cancel confirmation modal — Issue #791 */}
+      {showCancelConfirm && successData && (
+        <CancelConfirmModal
+          merchantAddress={successData.merchant}
+          onConfirm={handleConfirmCancel}
+          onCancel={() => setShowCancelConfirm(false)}
+        />
+      )}
+      {/* Address book modal */}
+      <AddressBookModal
+        isOpen={isAddressBookOpen}
+        onClose={() => setIsAddressBookOpen(false)}
+        entries={abEntries}
+        entryList={abEntryList}
+        addEntry={abAddEntry}
+        updateEntry={abUpdateEntry}
+        deleteEntry={abDeleteEntry}
+        importBook={abImportBook}
+        exportBook={abExportBook}
+        prefilledAddress={merchantAddress || undefined}
+      />
+      <div className="flex items-start justify-between mb-1 gap-3">
+        <h2 className="text-xl sm:text-2xl font-bold leading-tight">Create Subscription</h2>
+        <div className="flex items-center gap-2 shrink-0">
+          {/* Address book trigger */}
+          {publicKey && (
+            <button
+              type="button"
+              onClick={() => setIsAddressBookOpen(true)}
+              aria-label="Open address book"
+              title="Address book"
+              className="inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium bg-gray-800 border border-gray-700 text-gray-300 hover:text-white hover:bg-gray-700 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400"
+            >
+              <span aria-hidden="true">📒</span>
+              {abEntryList.length > 0 && (
+                <span className="font-mono">{abEntryList.length}</span>
+              )}
+            </button>
+          )}
           <span
-            className={`h-2 w-2 rounded-full ${publicKey ? "bg-green-400" : "bg-gray-500"}`}
-            aria-hidden="true"
-          />
-          {publicKey ? "Connected" : "Disconnected"}
-        </span>
+            aria-label={publicKey ? "Wallet connected" : "Wallet disconnected"}
+            className={`inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-semibold ${
+              publicKey
+                ? "bg-green-900/60 text-green-300 border border-green-600/50"
+                : "bg-gray-700/60 text-gray-400 border border-gray-600/50"
+            }`}
+          >
+            <span
+              className={`h-2 w-2 rounded-full ${publicKey ? "bg-green-400" : "bg-gray-500"}`}
+              aria-hidden="true"
+            />
+            {publicKey ? "Connected" : "Disconnected"}
+          </span>
+        </div>
       </div>
-      <p className="text-gray-400 text-sm mb-5 leading-relaxed">
-        Authorize a recurring on-chain payment using your Freighter wallet.
+      <p className="text-gray-400 text-sm mt-1 mb-4 leading-relaxed">
+        Authorize a recurring on-chain payment using your Freighter wallet.{" "}
+        <span className="text-gray-500">Fields marked <span className="text-red-400">*</span> are required.</span>
       </p>
 
       {/* Freighter not installed warning (Issue #110) */}
@@ -861,7 +1811,7 @@ export default function SubscriptionForm() {
       )}
 
       {/* Contract ID with copy button */}
-      <div className="flex items-center gap-2 mb-8 bg-gray-800/50 border border-gray-700/60 rounded-lg px-3 py-2">
+      <div className="flex items-center gap-2 mb-5 bg-gray-800/50 border border-gray-700/60 rounded-lg px-3 py-2">
         <span className="text-xs text-gray-500 font-medium shrink-0">
           Contract
         </span>
@@ -874,15 +1824,63 @@ export default function SubscriptionForm() {
         <CopyButton text={CONTRACT_ID} label="Copy" />
       </div>
 
-      {/* Progress indicator — visible only while submitting */}
-      {isSubmitting && <ProgressBar />}
+      {/* Progress indicator — Phase 1: awaiting Freighter signature */}
+      {isSubmitting && (
+        <motion.div
+          key="progress"
+          variants={prefersReducedMotion ? reducedMotionVariants : fadeInVariants}
+          initial="hidden"
+          animate="visible"
+          exit="exit"
+        >
+          <ProgressBar phase="submitting" />
+        </motion.div>
+      )}
 
-      {/* Success card */}
-      {successData && <SuccessCard data={successData} onReset={resetForm} />}
+      {/* Progress indicator — Phase 2: confirming on-chain */}
+      {isConfirming && (
+        <motion.div
+          key="confirming"
+          variants={prefersReducedMotion ? reducedMotionVariants : fadeInVariants}
+          initial="hidden"
+          animate="visible"
+          exit="exit"
+        >
+          <ProgressBar
+            phase="confirming"
+            explorerUrl={confirmingTxHash ? buildExplorerUrl(confirmingTxHash) : null}
+          />
+        </motion.div>
+      )}
 
       {/* Transaction error */}
       {txError && (
-        <ErrorCard error={txError} onDismiss={() => setTxError(null)} />
+        <ErrorCard
+          error={txError}
+          onDismiss={() => { setTxError(null); setTxErrorExplorerUrl(null); }}
+          explorerUrl={txErrorExplorerUrl}
+        />
+      )}
+
+      {/* Cancelled card — shown after a successful cancel (Issue #791) */}
+      {successData && cancelStatus === 'done' && cancelTxHash && (
+        <CancelledCard txHash={cancelTxHash} onReset={resetForm} />
+      )}
+
+      {/* Success card — shown after successful subscription, until cancelled */}
+      {successData && !(cancelStatus === 'done' && cancelTxHash) && (
+        <SuccessCard
+          data={successData}
+          onReset={resetForm}
+          onCancelSubscription={handleCancelSubscriptionClick}
+          isCancelling={cancelStatus === 'pending'}
+          getLabel={abGetLabel}
+          isPaused={isPaused}
+          pausedUntil={pausedUntil}
+          onPauseClick={handlePauseClick}
+          onResumeClick={handleResume}
+          isPauseResumeSubmitting={isPauseResumeSubmitting}
+        />
       )}
 
       {/* Hide the form after success */}
@@ -890,38 +1888,45 @@ export default function SubscriptionForm() {
         <form
           onSubmit={handleSubmit}
           noValidate
-          aria-busy={isSubmitting}
+          aria-busy={isSubmitting || isConfirming}
           aria-labelledby="form-heading"
-          className="space-y-5 sm:space-y-6"
+          className="space-y-4"
         >
           {/* Merchant address */}
           <div>
             <label
               htmlFor="merchantAddress"
-              className="block text-sm font-semibold text-gray-300 mb-2.5"
+              className={labelCls}
             >
-              Merchant address{" "}
-              <span aria-hidden="true" className="text-red-400">
-                *
-              </span>
-              <span className="sr-only"> (required)</span>
+              Merchant address{requiredMark}
+              <span className="sr-only">(required)</span>
+              {" "}<HelpTooltip
+                content="The Stellar G-address of whoever will receive your recurring payments. Must be 56 characters starting with G."
+                articleId="merchant-address"
+              />
             </label>
             <input
               id="merchantAddress"
               type="text"
-              placeholder="GABC…"
+              placeholder="e.g. GXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
               autoComplete="off"
               value={merchantAddress}
               onChange={(e) => setMerchantAddress(e.target.value)}
-              disabled={isSubmitting}
+              disabled={isSubmitting || isConfirming}
               required
               aria-required="true"
-              aria-describedby={
-                fieldErrors.merchantAddress ? "err-merchant" : undefined
-              }
+              aria-describedby={`help-merchant${fieldErrors.merchantAddress ? " err-merchant" : ""}`}
               aria-invalid={!!fieldErrors.merchantAddress}
-              className={inputCls}
+              className={fieldClass(!!fieldErrors.merchantAddress)}
             />
+            <p id="help-merchant" className={hintCls}>
+              The merchant&apos;s Stellar account public key — starts with{" "}
+              <code className="bg-gray-800 px-1 rounded text-gray-200 text-xs">G</code>,
+              56 characters. Example:{" "}
+              <code className="bg-gray-800 px-1 rounded text-gray-200 text-xs font-mono">
+                GABC…WXYZ
+              </code>
+            </p>
             {fieldErrors.merchantAddress && (
               <p
                 id="err-merchant"
@@ -933,34 +1938,34 @@ export default function SubscriptionForm() {
             )}
           </div>
 
-          {/* Token address */}
+          {/* Token contract address — combobox with known-token autocomplete */}
           <div>
             <label
               htmlFor="tokenAddress"
-              className="block text-sm font-semibold text-gray-300 mb-2.5"
+              className={labelCls}
             >
-              Token contract address{" "}
-              <span aria-hidden="true" className="text-red-400">
-                *
-              </span>
+              Token contract address{requiredMark}
+              {" "}<HelpTooltip
+                content="The SEP-41 token contract address (C-address) to use for payments. Must not be the SorobanPay contract itself."
+                articleId="token-contract"
+              />
               <span className="sr-only"> (required)</span>
             </label>
-            <input
+            <TokenCombobox
               id="tokenAddress"
-              type="text"
-              placeholder="CABC…"
-              autoComplete="off"
               value={tokenAddress}
-              onChange={(e) => setTokenAddress(e.target.value)}
-              disabled={isSubmitting}
-              required
-              aria-required="true"
-              aria-describedby={
-                fieldErrors.tokenAddress ? "err-token" : undefined
-              }
-              aria-invalid={!!fieldErrors.tokenAddress}
-              className={inputCls}
+              onChange={setTokenAddress}
+              disabled={isSubmitting || isConfirming}
+              hasError={!!fieldErrors.tokenAddress}
+              tokens={getKnownTokens(NETWORK_NAME)}
+              ariaDescribedBy={`help-token${fieldErrors.tokenAddress ? " err-token" : ""}`}
             />
+            <p id="help-token" className={hintCls}>
+              Search by symbol (e.g. <code className="bg-gray-800 px-1 rounded text-gray-200 text-xs">USDC</code>)
+              or paste a full SEP-41 contract address (starts with{" "}
+              <code className="bg-gray-800 px-1 rounded text-gray-200 text-xs">C</code>,
+              56 characters). Token list is network-aware ({NETWORK_NAME}).
+            </p>
             {fieldErrors.tokenAddress && (
               <p
                 id="err-token"
@@ -976,14 +1981,14 @@ export default function SubscriptionForm() {
           <div>
             <label
               htmlFor="amount"
-              className="block text-sm font-semibold text-gray-300 mb-2.5"
+              className={labelCls}
             >
-              Amount{" "}
-              <span className="text-gray-500 font-normal">(token units)</span>{" "}
-              <span aria-hidden="true" className="text-red-400">
-                *
-              </span>
+              Amount{requiredMark}
               <span className="sr-only"> (required)</span>
+              {" "}<HelpTooltip
+                content="Token units to transfer per interval. Must be positive and at most 10¹⁸. The first payment is collectable immediately after subscribing."
+                articleId="create-subscription"
+              />
             </label>
             <input
               id="amount"
@@ -996,17 +2001,15 @@ export default function SubscriptionForm() {
               autoComplete="off"
               value={amount}
               onChange={(e) => setAmount(e.target.value)}
-              disabled={isSubmitting}
+              disabled={isSubmitting || isConfirming}
+              required
+              aria-required="true"
               aria-describedby={`help-amount${fieldErrors.amount ? " err-amount" : ""}`}
               aria-invalid={!!fieldErrors.amount}
-              className={inputCls}
+              className={fieldClass(!!fieldErrors.amount)}
             />
-            <p
-              id="help-amount"
-              className="mt-2 text-xs text-gray-500 leading-relaxed"
-            >
-              Must be a positive integer (e.g. 100). Represents the number of
-              token units transferred per interval.
+            <p id="help-amount" className={hintCls}>
+              Required. Enter the recurring payment amount in token units.
             </p>
             {fieldErrors.amount && (
               <p
@@ -1017,20 +2020,30 @@ export default function SubscriptionForm() {
                 {fieldErrors.amount}
               </p>
             )}
+            {/* Inline low-allowance hint — shown when we have a result and the
+                confirm modal is closed (avoids duplicate warning) */}
+            {!showConfirm && allowanceResult && !allowanceResult.sufficient && (
+              <div className="mt-2">
+                <AllowanceWarning
+                  allowance={allowanceResult.allowance}
+                  shortfall={allowanceResult.shortfall}
+                />
+              </div>
+            )}
           </div>
 
           {/* Interval */}
           <div>
             <label
               htmlFor="interval"
-              className="block text-sm font-semibold text-gray-300 mb-2.5"
+              className={labelCls}
             >
-              Interval{" "}
-              <span className="text-gray-500 font-normal">(seconds)</span>{" "}
-              <span aria-hidden="true" className="text-red-400">
-                *
-              </span>
+              Interval{requiredMark}
               <span className="sr-only"> (required)</span>
+              {" "}<HelpTooltip
+                content="How often payments recur in seconds. Min 86,400 (1 day), max 31,536,000 (365 days). E.g. 2,592,000 ≈ monthly."
+                articleId="payment-interval"
+              />
             </label>
             <input
               id="interval"
@@ -1043,17 +2056,15 @@ export default function SubscriptionForm() {
               autoComplete="off"
               value={interval}
               onChange={(e) => setInterval(e.target.value)}
-              disabled={isSubmitting}
+              disabled={isSubmitting || isConfirming}
+              required
+              aria-required="true"
               aria-describedby={`help-interval${intervalError ? ' err-interval' : ''}`}
               aria-invalid={!!intervalError}
-              className={inputCls}
+              className={fieldClass(!!intervalError)}
             />
-            <p
-              id="help-interval"
-              className="mt-2 text-xs text-gray-500 leading-relaxed"
-            >
-              Seconds between payments. Min: 86 400 s (1 day), max: 31 536 000 s
-              (1 year). Default: 2 592 000 s (30 days).
+            <p id="help-interval" className={hintCls}>
+              Required. The recurrence cadence for the subscription. Default is 30 days.
             </p>
             {intervalError && (
               <p id="err-interval" role="alert" className="mt-2 text-xs text-red-400 font-medium">
@@ -1061,6 +2072,22 @@ export default function SubscriptionForm() {
               </p>
             )}
           </div>
+
+          {/* Share / QR code (FE-37) — merchant portal share button */}
+          <ShareQRCode
+            merchant={merchantAddress}
+            token={tokenAddress}
+            amount={amount}
+            interval={interval}
+          />
+
+          {/* Fee estimate (shown when all fields are valid, before submission) */}
+          <FeeEstimate
+            status={feeStatus}
+            minResourceFee={minResourceFee}
+            breakdown={feeBreakdown}
+            error={feeError}
+          />
 
           {/* Submit */}
           <div>
@@ -1075,8 +2102,9 @@ export default function SubscriptionForm() {
             )}
             <button
               type="submit"
-              disabled={isSubmitting || !publicKey}
+              disabled={isSubmitting || isConfirming || !publicKey}
               aria-describedby={!publicKey ? "hint-wallet" : undefined}
+              aria-busy={isSubmitting || isConfirming}
               className="w-full flex items-center justify-center gap-2 rounded-lg bg-blue-600
                          hover:bg-blue-500 active:bg-blue-700 disabled:opacity-50
                          disabled:cursor-not-allowed px-4 py-3 text-sm font-semibold
@@ -1084,14 +2112,16 @@ export default function SubscriptionForm() {
                          focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400
                          focus-visible:ring-offset-2 focus-visible:ring-offset-gray-900"
             >
-              {isSubmitting && (
+              {(isSubmitting || isConfirming) && (
                 <svg
                   className="animate-spin h-5 w-5 text-white"
                   xmlns="http://www.w3.org/2000/svg"
                   fill="none"
                   viewBox="0 0 24 24"
-                  aria-hidden="true"
+                  role="img"
+                  aria-label={isConfirming ? "Confirming" : "Submitting"}
                 >
+                  <title>{isConfirming ? "Confirming" : "Submitting"}</title>
                   <circle
                     className="opacity-25"
                     cx="12"
@@ -1107,11 +2137,153 @@ export default function SubscriptionForm() {
                   />
                 </svg>
               )}
-              {isSubmitting ? "Submitting…" : "Authorize Subscription"}
+              {isConfirming ? "Confirming…" : isSubmitting ? "Submitting…" : "Authorize Subscription"}
             </button>
           </div>
         </form>
       )}
+
+      {/* ── Cancel subscription section ─────────────────────────────────────── */}
+      <div className="mt-8 pt-6 border-t border-gray-700/60">
+        <h3 className="text-base font-semibold text-gray-200 mb-1">
+          Cancel a subscription
+        </h3>
+        <p className="text-xs text-gray-400 mb-4 leading-relaxed">
+          Permanently remove an active subscription. The merchant will no longer
+          be able to collect payments. This submits a real on-chain{" "}
+          <code className="bg-gray-800 px-1 rounded text-gray-200 text-xs">cancel()</code>{" "}
+          transaction.
+        </p>
+
+        {/* Cancel success */}
+        {cancelSuccess && (
+          <div
+            role="alert"
+            className="mb-4 rounded-xl bg-gradient-to-br from-green-900/60 to-green-800/30 border-2 border-green-600/60 p-4 text-sm space-y-3"
+          >
+            <div className="flex items-center gap-3">
+              <span className="text-2xl flex-shrink-0" aria-hidden="true">✓</span>
+              <p className="font-semibold text-green-300">Subscription cancelled successfully!</p>
+            </div>
+            <div className="bg-gray-800/50 rounded-lg p-3 border border-gray-700/50">
+              <p className="text-gray-400 text-xs mb-1 font-medium">Transaction hash</p>
+              <div className="flex items-start gap-2">
+                <p className="flex-1 text-gray-200 break-all font-mono text-xs leading-relaxed">
+                  {cancelSuccess.txHash}
+                </p>
+                <CopyButton text={cancelSuccess.txHash} label="Copy" />
+              </div>
+            </div>
+            <a
+              href={`https://stellar.expert/explorer/testnet/tx/${cancelSuccess.txHash}`}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-1 text-xs text-green-300 underline underline-offset-2 hover:text-green-200 transition-colors"
+            >
+              View on Stellar Expert ↗
+            </a>
+            <button
+              onClick={() => { setCancelSuccess(null); setCancelMerchant(''); }}
+              className="w-full rounded-lg border border-green-600/70 text-green-300 hover:bg-green-900/40 py-2.5 text-sm font-semibold transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-green-400"
+            >
+              Cancel another subscription
+            </button>
+          </div>
+        )}
+
+        {/* Cancel error */}
+        {cancelError && (
+          <ErrorCard error={cancelError} onDismiss={() => setCancelError(null)} />
+        )}
+
+        {/* Cancel progress */}
+        {isCancelling && (
+          <div
+            className="mb-4 p-4 bg-red-900/20 border border-red-600/40 rounded-lg"
+            role="status"
+            aria-label="Cancellation in progress"
+          >
+            <div className="flex items-center gap-2">
+              <svg
+                className="animate-spin h-4 w-4 text-red-400"
+                xmlns="http://www.w3.org/2000/svg"
+                fill="none"
+                viewBox="0 0 24 24"
+                aria-hidden="true"
+              >
+                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
+              </svg>
+              <span className="text-sm text-red-300">Submitting cancellation…</span>
+            </div>
+          </div>
+        )}
+
+        {!cancelSuccess && (
+          <form onSubmit={handleCancelRequest} noValidate aria-busy={isCancelling} className="space-y-3">
+            <div>
+              <label htmlFor="cancelMerchant" className="block text-sm font-semibold text-gray-100 mb-2">
+                Merchant address
+                <span aria-hidden="true" className="text-red-400 ml-1">*</span>
+              </label>
+              <input
+                id="cancelMerchant"
+                type="text"
+                placeholder="e.g. GXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+                autoComplete="off"
+                value={cancelMerchant}
+                onChange={(e) => setCancelMerchant(e.target.value)}
+                disabled={isCancelling}
+                required
+                aria-required="true"
+                className={inputCls}
+              />
+              <p className="mt-1.5 text-xs text-gray-400 leading-relaxed">
+                The merchant&apos;s Stellar G-address for the subscription you want to cancel.
+              </p>
+            </div>
+            <div>
+              <label htmlFor="cancelToken" className="block text-sm font-semibold text-gray-100 mb-2">
+                Token contract address
+                <span aria-hidden="true" className="text-red-400 ml-1">*</span>
+              </label>
+              <input
+                id="cancelToken"
+                type="text"
+                placeholder="e.g. CXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+                autoComplete="off"
+                value={cancelToken}
+                onChange={(e) => setCancelToken(e.target.value)}
+                disabled={isCancelling}
+                required
+                aria-required="true"
+                className={inputCls}
+              />
+              <p className="mt-1.5 text-xs text-gray-400 leading-relaxed">
+                The token contract tied to the active subscription being cancelled.
+              </p>
+            </div>
+            {!publicKey && (
+              <p className="text-xs text-yellow-400 font-medium" role="status">
+                Connect your Freighter wallet to cancel a subscription.
+              </p>
+            )}
+            <button
+              type="submit"
+              disabled={isCancelling || !publicKey}
+              className="w-full flex items-center justify-center gap-2 rounded-lg bg-red-700
+                         hover:bg-red-600 active:bg-red-800 disabled:opacity-50
+                         disabled:cursor-not-allowed px-4 py-3 text-sm font-semibold
+                         transition-all duration-150 min-h-[48px]
+                         focus:outline-none focus-visible:ring-2 focus-visible:ring-red-400
+                         focus-visible:ring-offset-2 focus-visible:ring-offset-gray-900"
+            >
+              {isCancelling ? "Cancelling…" : "Cancel Subscription"}
+            </button>
+          </form>
+        )}
+      </div>
     </div>
+    </ErrorBoundary>
   );
 }
