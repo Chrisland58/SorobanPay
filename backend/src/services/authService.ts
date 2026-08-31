@@ -27,6 +27,7 @@ import {
   Networks,
 } from '@stellar/stellar-sdk';
 import { createHmac, randomBytes } from 'crypto';
+import { getRedisClient } from '../lib/redis';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -53,7 +54,7 @@ export interface MerchantTokenPayload {
 // ─── Constants ───────────────────────────────────────────────────────────────
 
 /** Challenge TTL: 5 minutes. After this the merchant must request a new one. */
-const CHALLENGE_TTL_SECONDS = 5 * 60;
+export const CHALLENGE_TTL_SECONDS = 5 * 60;
 
 /** JWT TTL: 24 hours. */
 export const JWT_TTL_SECONDS = 24 * 60 * 60;
@@ -64,23 +65,35 @@ export const JWT_TTL_SECONDS = 24 * 60 * 60;
  */
 const MANAGE_DATA_KEY = 'SorobanPay auth';
 
-// ─── In-memory challenge store ────────────────────────────────────────────────
-// In production this should move to Redis so horizontal scaling works and TTL
-// management is automatic.  For single-process deployments the Map is correct.
+// ─── Redis-backed challenge store (Issue #792) ─────────────────────────────────
+//
+// Was an in-memory Map: correct for a single process, but with 2+ backend
+// instances a challenge issued by instance A could never be verified by
+// instance B, since each process has its own Map. Moving the store to Redis
+// fixes that — any instance can issue or verify a challenge against the same
+// shared store — and gets two things "for free" that the Map had to fake:
+//   - TTL: Redis's own `EX` expiry replaces the manual evictExpired() sweep.
+//   - Atomicity: GETDEL reads and deletes in one round-trip, so two
+//     concurrent verify attempts for the same challenge can't both succeed
+//     (the second one gets nothing back) — a real replay-prevention guarantee
+//     the old "get, check, then delete" sequence didn't have.
 
-const pendingChallenges = new Map<string, ChallengeRecord>();
+function challengeKey(account: string): string {
+  return `sep10:challenge:${account}`;
+}
 
 /**
- * Remove any expired entries from the in-memory challenge store.
- * Called before every lookup so stale challenges can't accumulate.
+ * Resolve the shared Redis client or throw. Unlike the cache helpers in
+ * lib/redis.ts (which silently fall back to Postgres on any Redis issue),
+ * there is no fallback store for auth challenges — failing loudly here is
+ * the correct behaviour for a security-critical path.
  */
-function evictExpired(): void {
-  const now = Math.floor(Date.now() / 1000);
-  for (const [account, record] of pendingChallenges) {
-    if (record.expiresAt <= now) {
-      pendingChallenges.delete(account);
-    }
+function requireRedis() {
+  const client = getRedisClient();
+  if (!client) {
+    throw new Error('Authentication challenge store unavailable (Redis not connected)');
   }
+  return client;
 }
 
 // ─── Challenge generation ─────────────────────────────────────────────────────
@@ -96,11 +109,12 @@ function evictExpired(): void {
  * @param account  Merchant's Stellar public key (G…).
  * @param networkPassphrase  Stellar network passphrase.
  * @returns ChallengeRecord including the unsigned XDR.
+ * @throws Error if the Redis challenge store is unavailable.
  */
-export function generateChallenge(
+export async function generateChallenge(
   account: string,
   networkPassphrase: string,
-): ChallengeRecord {
+): Promise<ChallengeRecord> {
   // Validate address format — Keypair.fromPublicKey throws on invalid input
   Keypair.fromPublicKey(account);
 
@@ -131,9 +145,11 @@ export function generateChallenge(
 
   const record: ChallengeRecord = { account, nonce, transactionXdr, expiresAt };
 
-  evictExpired();
-  // One active challenge per account — a new request supersedes the old one
-  pendingChallenges.set(account, record);
+  const client = requireRedis();
+  // One active challenge per account — SET (no NX) means a new request
+  // simply overwrites any existing challenge, same as the old Map.set().
+  // EX makes Redis expire the key itself — no manual eviction needed.
+  await client.set(challengeKey(account), JSON.stringify(record), 'EX', CHALLENGE_TTL_SECONDS);
 
   return record;
 }
@@ -152,22 +168,26 @@ export class AuthError extends Error {
  *
  * Checks:
  *   1. The XDR decodes to a valid Stellar transaction.
- *   2. A pending challenge exists for the transaction's source account.
- *   3. The challenge has not expired.
- *   4. The ManageData nonce in the transaction matches the stored nonce.
- *   5. At least one signature on the transaction is valid for the source account.
+ *   2. A pending (not expired) challenge exists for the transaction's source
+ *      account — fetched via an atomic Redis GETDEL, so this step also
+ *      consumes the challenge regardless of what the later checks find.
+ *   3. The ManageData nonce in the transaction matches the stored nonce.
+ *   4. At least one signature on the transaction is valid for the source account.
  *
- * On success, the challenge is consumed (deleted) so it cannot be replayed.
+ * The challenge is consumed as soon as it's read (step 2), not only on full
+ * success — it is single-use per verification attempt, which also prevents
+ * it being used as a signature/nonce oracle across repeated tries.
  *
  * @param signedXdr        Base64-encoded signed transaction XDR.
  * @param networkPassphrase Stellar network passphrase.
  * @returns The merchant's Stellar public key.
  * @throws AuthError on any verification failure.
+ * @throws Error if the Redis challenge store is unavailable.
  */
-export function verifyChallenge(
+export async function verifyChallenge(
   signedXdr: string,
   networkPassphrase: string,
-): string {
+): Promise<string> {
   // 1. Decode the transaction
   let tx: Transaction;
   try {
@@ -179,21 +199,22 @@ export function verifyChallenge(
   // 2. Identify the account from the transaction source
   const account = tx.source;
 
-  evictExpired();
-  const record = pendingChallenges.get(account);
+  // Atomic read-and-delete: the challenge is consumed the instant it's read,
+  // so two concurrent requests racing to verify the same challenge can't
+  // both succeed — this is what actually prevents replay, vs. the old
+  // get-then-check-then-delete sequence which had a window between them.
+  // Redis's own TTL means a missing key covers both "never existed" and
+  // "expired" — there's no separate manual expiry check needed anymore.
+  const client = requireRedis();
+  const raw = await client.getdel(challengeKey(account));
 
-  if (!record) {
+  if (!raw) {
     throw new AuthError('No pending challenge for this account');
   }
 
-  // 3. Expiry guard (belt-and-suspenders on top of evictExpired)
-  const now = Math.floor(Date.now() / 1000);
-  if (record.expiresAt <= now) {
-    pendingChallenges.delete(account);
-    throw new AuthError('Challenge expired');
-  }
+  const record: ChallengeRecord = JSON.parse(raw);
 
-  // 4. Verify the ManageData nonce matches
+  // 3. Verify the ManageData nonce matches
   const ops = tx.operations;
   const manageDataOp = ops.find(
     (op): op is Operation.ManageData =>
@@ -209,7 +230,7 @@ export function verifyChallenge(
     throw new AuthError('Nonce mismatch');
   }
 
-  // 5. Verify at least one valid signature from the account
+  // 4. Verify at least one valid signature from the account
   if (!tx.signatures || tx.signatures.length === 0) {
     throw new AuthError('Transaction has no signatures');
   }
@@ -233,8 +254,10 @@ export function verifyChallenge(
     throw new AuthError('No valid signature from account');
   }
 
-  // Consume the challenge — prevents replay
-  pendingChallenges.delete(account);
+  // Note: the challenge was already consumed by the GETDEL above, before any
+  // of these validation checks ran. A failed nonce/signature check does not
+  // leave the challenge available for a retry — it's single-use per attempt,
+  // which is stricter than (and a superset of) "single-use per success".
 
   return account;
 }
@@ -332,6 +355,11 @@ export function verifyMerchantJwt(token: string, secret: string): MerchantTokenP
  * Clear all pending challenges. Only intended for test teardown.
  * @internal
  */
-export function _clearChallengesForTesting(): void {
-  pendingChallenges.clear();
+export async function _clearChallengesForTesting(): Promise<void> {
+  const client = getRedisClient();
+  if (!client) return;
+  const keys = await client.keys('sep10:challenge:*');
+  if (keys.length > 0) {
+    await client.del(...keys);
+  }
 }

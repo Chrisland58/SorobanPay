@@ -375,7 +375,8 @@ export class EventIndexer {
 
       console.log(`Stored event: ${eventType} for merchant ${merchant}`);
     } catch (error) {
-      console.error('Error processing event:', error);
+      console.error('Error parsing event:', error);
+      return null;
     }
   }
 }

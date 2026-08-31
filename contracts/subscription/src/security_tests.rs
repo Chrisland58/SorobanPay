@@ -591,8 +591,8 @@ mod security_tests {
             &s.subscriber,
             &s.subscriber, // self
             &s.token,
-            &MAX_AMOUNT,     // max valid amount
-            &31_536_000_u64, // max valid interval
+            &MAX_AMOUNT,        // max valid amount
+            &31_536_000_u64,    // max valid interval
             &false,
         );
         assert!(

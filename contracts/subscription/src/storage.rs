@@ -7,13 +7,14 @@ pub const CONTRACT_VERSION: &str = "1.0.0";
 pub const CONTRACT_NAME: &str = "SorobanPay-SubscriptionProtocol";
 
 /// Current on-chain schema version.  Increment when `SubscriptionData` changes.
-pub const CURRENT_SCHEMA_VERSION: u32 = 1;
+/// Bumped to 2 for Issue #50: added `last_payment` (Option<u64>) field.
+pub const CURRENT_SCHEMA_VERSION: u32 = 2;
 
 // ==================== Key helpers ====================
 
 /// Derive the compact 32-byte storage key for a subscription.
 ///
-/// Uses SHA-256 over the concatenation of the subscriber, merchant, and token address
+/// Uses SHA-256 over the concatenation of the subscriber and merchant address
 /// bytes, producing a fixed-size `BytesN<32>` that replaces the old
 /// `(Address, Address, Address)` tuple key.
 ///
@@ -27,12 +28,10 @@ pub fn subscription_key(
     env: &Env,
     subscriber: &Address,
     merchant: &Address,
-    token: &Address,
 ) -> BytesN<32> {
     let mut preimage = soroban_sdk::Bytes::new(env);
     preimage.append(&subscriber.to_xdr(env));
     preimage.append(&merchant.to_xdr(env));
-    preimage.append(&token.to_xdr(env));
     env.crypto().sha256(&preimage)
 }
 
@@ -46,6 +45,7 @@ pub fn subscription_key(
 /// `SchemaVersion`, `Admin`, `AdminConfig`, and `ProtocolFeeConfig` use
 /// **instance** storage (tied to the contract instance lifetime).
 #[contracttype]
+#[derive(Clone)]
 pub enum DataKey {
     /// Per-subscription record, keyed by sha256(subscriber_xdr ++ merchant_xdr ++ token_xdr).
     /// Compact 32-byte key instead of the old two-Address tuple (~70 bytes).
@@ -58,6 +58,12 @@ pub enum DataKey {
     /// Storage type: **temporary**.
     MerchantIndex(Address),
 
+    /// Merchant subscriber roster: maps merchant → Vec<Address> of all
+    /// subscriber addresses for that merchant.  Maintained in parallel with
+    /// `MerchantIndex` and enables `get_merchant_subscriptions` to return
+    /// full `SubscriptionData` without reversing compact sha-256 keys.
+    MerchantSubscribers(Address),
+
     /// On-chain schema version; updated by `migrate(admin)`.
     /// Storage type: **instance**.
     SchemaVersion,
@@ -66,31 +72,14 @@ pub enum DataKey {
     /// Storage type: **instance**.
     Admin,
 
-    /// Protocol fee configuration: fee rate in basis points and fee collector address.
-    /// Stored in instance storage. Absent means fee is disabled (0 bps).
-    /// Storage type: **instance**.
-    ProtocolFeeConfig,
-
-    /// Combined admin address + per-contract maximum payment amount.
-    /// Set by `initialize`; updated by `set_max_amount`.
-    /// Storage type: **instance**.
+    /// Optional admin configuration (rate limits, caps).
     AdminConfig,
+
+    /// Per-merchant active subscriber count.
+    MerchantSubscriberCount(Address),
 }
 
 /// Persistent on-chain record for a subscription.
-///
-/// ## Schema versioning
-///
-/// The `ver` field starts at 1 for all new entries written by this version of the
-/// contract. Future migrations can inspect `ver` to decide whether to transform an
-/// entry before using it.
-///
-/// ## Backward compatibility
-///
-/// `grace_period`, `paused_until`, and `overdue_since` are `Option` fields so that
-/// old entries written without these fields (ver 0 / missing) deserialise correctly
-/// as `None`. Use the provided getter methods instead of direct field access to
-/// ensure default values are applied consistently.
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct SubscriptionData {
@@ -114,6 +103,10 @@ pub struct SubscriptionData {
     /// Monotonically incrementing counter of successful `execute_payment` calls.
     /// Used for idempotency checks and off-chain event deduplication.
     pub payment_nonce: u64,
+    /// Unix timestamp at which a paused subscription auto-resumes on the next
+    /// `execute_payment` call. `None` means the pause is indefinite and requires
+    /// an explicit `resume_subscription` call (issue #795).
+    pub paused_until: Option<u64>,
 }
 
 /// Admin-level configuration stored per contract instance.
@@ -128,6 +121,27 @@ pub struct AdminConfig {
     /// Per-contract ceiling on `SubscriptionData.amount`.
     /// Defaults to `MAX_AMOUNT` (10¹⁸) at initialisation.
     pub max_amount: i128,
+}
+
+/// A subscription record paired with its subscriber address.
+///
+/// Returned by `get_merchant_subscriptions` so callers receive both the
+/// subscriber identity and the full subscription state in a single query.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct SubscriptionEntry {
+    /// The subscriber's Stellar account address.
+    pub subscriber: Address,
+    /// The full subscription state for this subscriber-merchant pair.
+    pub data:       SubscriptionData,
+}
+
+/// Optional admin configuration stored in instance storage.
+#[contracttype]
+#[derive(Clone)]
+pub struct AdminConfig {
+    /// Maximum number of active subscribers allowed per merchant (0 = unlimited).
+    pub max_subscribers_per_merchant: u32,
 }
 
 /// Safe upper bound for a single subscription payment amount (1 × 10¹⁸ stroops).
