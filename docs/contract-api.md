@@ -254,6 +254,9 @@ const events = await server.getEvents({
 - `executed` — on successful transfer
 - `payment_transfer_failure` — when subscriber balance < `amount` (subscription not modified)
 
+For a complete guide on when and how to retry after a `TransferFailed` or revoked
+allowance, see [docs/retry-semantics.md](retry-semantics.md).
+
 #### CLI example
 
 ```bash
