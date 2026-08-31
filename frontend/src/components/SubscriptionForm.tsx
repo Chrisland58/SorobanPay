@@ -32,7 +32,7 @@
  *   Success → Connected/idle (click "Create another")
  */
 
-import { useState, useEffect, useCallback, type FormEvent } from "react";
+import { useState, useEffect, useCallback, useRef, type FormEvent } from "react";
 import { useWallet } from "@/hooks/useWallet";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { SkeletonForm } from "@/components/Skeleton";
@@ -782,11 +782,42 @@ function ConfirmModal({
   onCancel: () => void;
 }) {
   const days = Math.round(Number(interval) / 86400);
+
+  // ── Focus management ──────────────────────────────────────────────────────
+  const cancelBtnRef = useRef<HTMLButtonElement>(null);
+  const confirmBtnRef = useRef<HTMLButtonElement>(null);
+  const dialogRef = useRef<HTMLDivElement>(null);
+
+  // Move focus to "Go Back" when the modal opens
+  useEffect(() => {
+    cancelBtnRef.current?.focus();
+  }, []);
+
+  // Close on Escape; trap Tab within the two buttons
+  function handleKeyDown(e: React.KeyboardEvent<HTMLDivElement>) {
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      onCancel();
+      return;
+    }
+    if (e.key === 'Tab') {
+      e.preventDefault();
+      // Toggle focus between the two action buttons
+      if (document.activeElement === cancelBtnRef.current) {
+        confirmBtnRef.current?.focus();
+      } else {
+        cancelBtnRef.current?.focus();
+      }
+    }
+  }
+
   return (
     <div
+      ref={dialogRef}
       role="dialog"
       aria-modal="true"
       aria-labelledby="confirm-title"
+      onKeyDown={handleKeyDown}
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4"
     >
       <div className="w-full max-w-md bg-gray-900 border border-gray-700 rounded-2xl shadow-2xl p-6 space-y-5 text-white">
@@ -823,12 +854,14 @@ function ConfirmModal({
 
         <div className="flex gap-3 pt-1">
           <button
+            ref={cancelBtnRef}
             onClick={onCancel}
             className="flex-1 rounded-lg border border-gray-600 bg-gray-800/50 text-gray-300 hover:bg-gray-700 active:bg-gray-800 py-3 text-sm font-semibold transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-500"
           >
             Go Back
           </button>
           <button
+            ref={confirmBtnRef}
             onClick={onConfirm}
             className="flex-1 rounded-lg bg-blue-600 hover:bg-blue-500 active:bg-blue-700 py-3 text-sm font-semibold transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400"
           >
@@ -851,11 +884,38 @@ function CancelConfirmModal({
   onConfirm: () => void;
   onCancel: () => void;
 }) {
+  // ── Focus management ──────────────────────────────────────────────────────
+  const keepBtnRef = useRef<HTMLButtonElement>(null);
+  const cancelBtnRef = useRef<HTMLButtonElement>(null);
+
+  // Move focus to "Keep Subscription" (safe default) when the modal opens
+  useEffect(() => {
+    keepBtnRef.current?.focus();
+  }, []);
+
+  // Close on Escape; trap Tab within the two buttons
+  function handleKeyDown(e: React.KeyboardEvent<HTMLDivElement>) {
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      onCancel();
+      return;
+    }
+    if (e.key === 'Tab') {
+      e.preventDefault();
+      if (document.activeElement === keepBtnRef.current) {
+        cancelBtnRef.current?.focus();
+      } else {
+        keepBtnRef.current?.focus();
+      }
+    }
+  }
+
   return (
     <div
       role="dialog"
       aria-modal="true"
       aria-labelledby="cancel-confirm-title"
+      onKeyDown={handleKeyDown}
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4"
     >
       <div className="w-full max-w-md bg-gray-900 border border-gray-700 rounded-2xl shadow-2xl p-6 space-y-5 text-white">
@@ -877,12 +937,14 @@ function CancelConfirmModal({
 
         <div className="flex gap-3 pt-1">
           <button
+            ref={keepBtnRef}
             onClick={onCancel}
             className="flex-1 rounded-lg border border-gray-600 bg-gray-800/50 text-gray-300 hover:bg-gray-700 active:bg-gray-800 py-3 text-sm font-semibold transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-500"
           >
             Keep Subscription
           </button>
           <button
+            ref={cancelBtnRef}
             onClick={onConfirm}
             className="flex-1 rounded-lg bg-red-600 hover:bg-red-500 active:bg-red-700 py-3 text-sm font-semibold transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-red-400"
           >
