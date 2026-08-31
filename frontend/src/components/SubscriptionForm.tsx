@@ -2041,10 +2041,59 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
               Interval{requiredMark}
               <span className="sr-only"> (required)</span>
               {" "}<HelpTooltip
-                content="How often payments recur in seconds. Min 86,400 (1 day), max 31,536,000 (365 days). E.g. 2,592,000 ≈ monthly."
+                content={[
+                  "How often payments recur, in seconds.",
+                  "",
+                  "Valid range: 86,400 s (1 day) → 31,536,000 s (365 days).",
+                  "",
+                  "Common presets:",
+                  "• Daily    — 86,400 s",
+                  "• Weekly   — 604,800 s",
+                  "• Monthly  — 2,592,000 s  (30 days)",
+                  "• Quarterly — 7,776,000 s (90 days)",
+                  "• Yearly   — 31,536,000 s",
+                ].join("\n")}
                 articleId="payment-interval"
               />
             </label>
+
+            {/* Quick-select preset buttons */}
+            <div
+              className="flex flex-wrap gap-2 mb-2"
+              role="group"
+              aria-label="Interval presets"
+            >
+              {[
+                { label: "Daily",     seconds: 86400 },
+                { label: "Weekly",    seconds: 604800 },
+                { label: "Monthly",   seconds: 2592000 },
+                { label: "Quarterly", seconds: 7776000 },
+                { label: "Yearly",    seconds: 31536000 },
+              ].map(({ label, seconds }) => {
+                const isActive = interval === String(seconds);
+                return (
+                  <button
+                    key={seconds}
+                    type="button"
+                    aria-pressed={isActive}
+                    aria-label={`Set interval to ${label} (${seconds.toLocaleString()} seconds)`}
+                    disabled={isSubmitting || isConfirming}
+                    onClick={() => setInterval(String(seconds))}
+                    className={`rounded-full border px-3 py-1 text-xs font-medium transition-colors
+                      focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400
+                      focus-visible:ring-offset-1 focus-visible:ring-offset-gray-900
+                      disabled:opacity-50 disabled:cursor-not-allowed
+                      ${isActive
+                        ? "border-blue-500 bg-blue-600/30 text-blue-200"
+                        : "border-gray-600 bg-gray-800/60 text-gray-400 hover:border-gray-500 hover:text-gray-200"
+                      }`}
+                  >
+                    {label}
+                  </button>
+                );
+              })}
+            </div>
+
             <input
               id="interval"
               type="number"
@@ -2064,7 +2113,10 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
               className={fieldClass(!!intervalError)}
             />
             <p id="help-interval" className={hintCls}>
-              Required. The recurrence cadence for the subscription. Default is 30 days.
+              Seconds between payments. Valid range:{" "}
+              <strong className="text-gray-300">86,400</strong> s (1 day) to{" "}
+              <strong className="text-gray-300">31,536,000</strong> s (365 days).
+              Default: 2,592,000 s (30 days). Use the presets above or type any value in seconds.
             </p>
             {intervalError && (
               <p id="err-interval" role="alert" className="mt-2 text-xs text-red-400 font-medium">
