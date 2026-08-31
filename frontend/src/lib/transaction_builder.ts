@@ -514,18 +514,19 @@ export async function buildAndSubmitExecutePayment(
     },
   );
 
-  const contract = new Contract(contractId);
-
+  // Issue #35: type-safe wrapper instead of a hand-rolled contract.call() —
+  // each argument's Soroban type is declared once via the `arg.*` helpers,
+  // and a malformed argument is mapped through normalizeRpcError() the same
+  // way every other transaction-layer failure is.
   const tx = new TransactionBuilder(account, {
     fee: BASE_FEE,
     networkPassphrase,
   })
     .addOperation(
-      contract.call(
-        'execute_payment',
-        new Address(params.subscriber).toScVal(),
-        new Address(params.merchant).toScVal(),
-      ),
+      buildContractCall(contractId, 'execute_payment', [
+        arg.address(params.subscriber),
+        arg.address(params.merchant),
+      ]),
     )
     .setTimeout(30)
     .build();
