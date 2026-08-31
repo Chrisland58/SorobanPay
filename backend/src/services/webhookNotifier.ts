@@ -15,15 +15,42 @@ const MAX_ATTEMPTS = 5;
 const RETRY_DELAYS_MS = [1_000, 5_000, 15_000, 60_000, 300_000]; // exponential back-off
 
 /**
+ * BE-53: Check whether an endpoint's event filter list includes the given
+ * event type.
+ *
+ * The `events` field on WebhookEndpoint is a comma-separated list of event
+ * type strings, e.g. "payment.executed,payment.failed".  An empty string
+ * (or null/undefined) means "deliver all event types".
+ */
+function isEventAllowed(endpointEvents: string | null | undefined, eventType: string): boolean {
+  // No filter configured → deliver everything
+  if (!endpointEvents || endpointEvents.trim() === '') return true;
+
+  const allowed = endpointEvents
+    .split(',')
+    .map((e) => e.trim())
+    .filter(Boolean);
+
+  return allowed.includes(eventType);
+}
+
+/**
  * Deliver a webhook notification to all registered endpoints for the merchant.
+ * BE-53: Endpoints whose `events` filter does NOT include the current event
+ * type are silently skipped.
  * Failed deliveries are retried up to MAX_ATTEMPTS times with back-off.
  */
 export async function notifyWebhooks(payload: WebhookPayload): Promise<void> {
-  const endpoints = await prisma.webhookEndpoint.findMany({
+  const endpoints = await (prisma as any).webhookEndpoint.findMany({
     where: { merchant: payload.merchant, active: true },
   });
 
-  await Promise.all(endpoints.map((ep: { url: string }) => deliverWithRetry(ep.url, payload)));
+  // BE-53: Filter endpoints by their configured event types before dispatching
+  const eligibleEndpoints = endpoints.filter((ep: { events?: string }) =>
+    isEventAllowed(ep.events, payload.event),
+  );
+
+  await Promise.all(eligibleEndpoints.map((ep: { url: string }) => deliverWithRetry(ep.url, payload)));
 }
 
 async function deliverWithRetry(url: string, payload: WebhookPayload): Promise<void> {
@@ -40,7 +67,7 @@ async function deliverWithRetry(url: string, payload: WebhookPayload): Promise<v
         signal: AbortSignal.timeout(10_000),
       });
 
-      await prisma.webhookDelivery.create({
+      await (prisma as any).webhookDelivery.create({
         data: {
           url,
           merchant: payload.merchant,
@@ -59,7 +86,7 @@ async function deliverWithRetry(url: string, payload: WebhookPayload): Promise<v
       const msg = err instanceof Error ? err.message : String(err);
       console.error(`[webhook] attempt ${attempt + 1} → ${url} error: ${msg}`);
 
-      await prisma.webhookDelivery.create({
+      await (prisma as any).webhookDelivery.create({
         data: {
           url,
           merchant: payload.merchant,
@@ -80,3 +107,6 @@ async function deliverWithRetry(url: string, payload: WebhookPayload): Promise<v
 function sleep(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
 }
+
+// Export for unit testing
+export { isEventAllowed };

@@ -53,6 +53,9 @@ model WebhookEndpoint {
   merchant  String
   url       String
   active    Boolean  @default(true)
+  // BE-53: comma-separated list of event types to deliver, e.g. "payment.executed,payment.failed"
+  // Empty string or null means deliver all event types.
+  events    String   @default("")
   createdAt DateTime @default(now())
 
   @@unique([merchant, url])
