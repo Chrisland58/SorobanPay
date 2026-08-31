@@ -32,6 +32,18 @@ jobs:
           echo "--- Test summary ---"
           grep -E "^test result|FAILED|ok$" /tmp/contract-test-output.txt || true
 
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+
+      - name: Security audit
+        # Runs cargo-audit against the advisory database.
+        # Known advisories that cannot be fixed immediately are acknowledged
+        # with justification in contracts/subscription/audit.toml.
+        run: >
+          cargo audit
+          --manifest-path contracts/subscription/Cargo.toml
+          --config contracts/subscription/audit.toml
+
   contract-coverage:
     name: Rust contract coverage
     runs-on: ubuntu-latest
