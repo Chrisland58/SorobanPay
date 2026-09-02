@@ -79,6 +79,9 @@ WASM="${REPO_ROOT}/contracts/target/wasm32-unknown-unknown/release/soroban_subsc
 MANIFEST="${REPO_ROOT}/deploy/deployments.json"
 
 # ── Network configuration ────────────────────────────────────────────────────
+# These values MUST stay in sync with the TypeScript network config:
+#   frontend/src/lib/network_config.ts → NETWORK_CONFIGS
+# If you change a passphrase or default RPC URL, update both files.
 case "$NETWORK" in
   testnet)
     RPC_URL="https://soroban-testnet.stellar.org"
