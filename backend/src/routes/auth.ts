@@ -64,7 +64,7 @@ const router = Router();
  *       400:
  *         description: Missing or invalid account parameter
  */
-router.get('/challenge', (req: Request, res: Response) => {
+router.get('/challenge', async (req: Request, res: Response) => {
   const account = req.query.account as string | undefined;
 
   if (!account || typeof account !== 'string') {
@@ -77,7 +77,7 @@ router.get('/challenge', (req: Request, res: Response) => {
 
   let record;
   try {
-    record = generateChallenge(account.trim(), networkPassphrase);
+    record = await generateChallenge(account.trim(), networkPassphrase);
   } catch (err) {
     // Keypair.fromPublicKey throws on invalid addresses
     if (err instanceof Error && err.message.toLowerCase().includes('invalid')) {
@@ -131,7 +131,7 @@ router.get('/challenge', (req: Request, res: Response) => {
  *       503:
  *         description: JWT_SECRET not configured
  */
-router.post('/token', (req: Request, res: Response) => {
+router.post('/token', async (req: Request, res: Response) => {
   const jwtSecret = process.env.JWT_SECRET;
   if (!jwtSecret) {
     res.status(503).json({ error: 'Authentication not configured (JWT_SECRET missing)' });
@@ -150,7 +150,7 @@ router.post('/token', (req: Request, res: Response) => {
 
   let address: string;
   try {
-    address = verifyChallenge(transaction.trim(), networkPassphrase);
+    address = await verifyChallenge(transaction.trim(), networkPassphrase);
   } catch (err) {
     if (err instanceof AuthError) {
       res.status(401).json({ error: err.message });

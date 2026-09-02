@@ -12,6 +12,11 @@
  * @stellar/stellar-sdk is mocked with a lightweight Node-crypto-backed
  * implementation (tests/helpers/stellarMock.ts) to avoid Jest's ESM
  * incompatibility with @noble/hashes and uint8array-extras.
+ *
+ * Issue #792: generateChallenge/verifyChallenge moved from an in-memory Map
+ * to Redis, so they're now async and ../src/lib/redis is mocked with an
+ * in-memory fake (tests/helpers/redisMock.ts) rather than requiring a real
+ * Redis server for unit tests.
  */
 
 import {
@@ -23,6 +28,7 @@ import {
   BASE_FEE,
   Networks,
 } from './helpers/stellarMock';
+import { MockRedisClient } from './helpers/redisMock';
 
 // ─── Mock @stellar/stellar-sdk ────────────────────────────────────────────────
 // Must be declared before importing authService so the module factory runs first.
@@ -39,7 +45,15 @@ jest.mock('@stellar/stellar-sdk', () => {
   };
 });
 
-// Import auth modules after mock is registered
+// ─── Mock ../src/lib/redis ──────────────────────────────────────────────────
+// authService.ts now stores challenges in Redis (Issue #792) — back it with
+// an in-memory fake so these stay unit tests, not integration tests.
+const mockRedisClient = new MockRedisClient();
+jest.mock('../src/lib/redis', () => ({
+  getRedisClient: () => mockRedisClient,
+}));
+
+// Import auth modules after mocks are registered
 import {
   generateChallenge,
   verifyChallenge,
@@ -66,8 +80,8 @@ const BOB = KEYPAIR_BOB.publicKey();
 
 // ─── Helper: generate challenge + sign with keypair ──────────────────────────
 
-function signChallenge(account: string, keypair: MockKeypair, network = NETWORK): string {
-  const record = generateChallenge(account, network);
+async function signChallenge(account: string, keypair: MockKeypair, network = NETWORK): Promise<string> {
+  const record = await generateChallenge(account, network);
   const tx = new MockTransaction(record.transactionXdr, network);
   tx.sign(keypair);
   return tx.toEnvelope().toXDR('base64');
@@ -75,12 +89,12 @@ function signChallenge(account: string, keypair: MockKeypair, network = NETWORK)
 
 // ─── Setup / teardown ─────────────────────────────────────────────────────────
 
-beforeEach(() => {
-  _clearChallengesForTesting();
+beforeEach(async () => {
+  await _clearChallengesForTesting();
 });
 
-afterEach(() => {
-  _clearChallengesForTesting();
+afterEach(async () => {
+  await _clearChallengesForTesting();
   delete process.env.JWT_SECRET;
 });
 
@@ -89,8 +103,8 @@ afterEach(() => {
 // =============================================================================
 
 describe('generateChallenge', () => {
-  it('returns a base64-decodable transaction XDR with correct source', () => {
-    const record = generateChallenge(ALICE, NETWORK);
+  it('returns a base64-decodable transaction XDR with correct source', async () => {
+    const record = await generateChallenge(ALICE, NETWORK);
 
     expect(record.account).toBe(ALICE);
     expect(record.transactionXdr).toBeTruthy();
@@ -99,8 +113,8 @@ describe('generateChallenge', () => {
     expect(tx.source).toBe(ALICE);
   });
 
-  it('includes a ManageData operation with "SorobanPay auth" key', () => {
-    const record = generateChallenge(ALICE, NETWORK);
+  it('includes a ManageData operation with "SorobanPay auth" key', async () => {
+    const record = await generateChallenge(ALICE, NETWORK);
     const tx = new MockTransaction(record.transactionXdr, NETWORK);
 
     const op = tx.operations.find(
@@ -110,8 +124,8 @@ describe('generateChallenge', () => {
     expect(op!.value).toBeTruthy();
   });
 
-  it('embeds the nonce from the record into the ManageData value', () => {
-    const record = generateChallenge(ALICE, NETWORK);
+  it('embeds the nonce from the record into the ManageData value', async () => {
+    const record = await generateChallenge(ALICE, NETWORK);
     const tx = new MockTransaction(record.transactionXdr, NETWORK);
 
     const op = tx.operations.find((o) => o.type === 'manageData')!;
@@ -119,37 +133,37 @@ describe('generateChallenge', () => {
     expect(embedded).toBe(record.nonce);
   });
 
-  it('generates a unique nonce on each call', () => {
-    const r1 = generateChallenge(ALICE, NETWORK);
-    const r2 = generateChallenge(ALICE, NETWORK);
+  it('generates a unique nonce on each call', async () => {
+    const r1 = await generateChallenge(ALICE, NETWORK);
+    const r2 = await generateChallenge(ALICE, NETWORK);
     expect(r1.nonce).not.toBe(r2.nonce);
   });
 
-  it('sets expiresAt approximately 5 minutes in the future', () => {
+  it('sets expiresAt approximately 5 minutes in the future', async () => {
     const before = Math.floor(Date.now() / 1000);
-    const record = generateChallenge(ALICE, NETWORK);
+    const record = await generateChallenge(ALICE, NETWORK);
     const after = Math.floor(Date.now() / 1000);
 
     expect(record.expiresAt).toBeGreaterThanOrEqual(before + 5 * 60);
     expect(record.expiresAt).toBeLessThanOrEqual(after + 5 * 60 + 1);
   });
 
-  it('supersedes the previous challenge for the same account', () => {
+  it('supersedes the previous challenge for the same account', async () => {
     // Generate first challenge and get its XDR
-    const r1 = generateChallenge(ALICE, NETWORK);
+    const r1 = await generateChallenge(ALICE, NETWORK);
     const tx1 = new MockTransaction(r1.transactionXdr, NETWORK);
     tx1.sign(KEYPAIR_ALICE);
     const oldSigned = tx1.toEnvelope().toXDR('base64');
 
     // Generate second challenge (overwrites r1 in the store)
-    generateChallenge(ALICE, NETWORK);
+    await generateChallenge(ALICE, NETWORK);
 
     // r1's signed XDR should now fail (nonce mismatch)
-    expect(() => verifyChallenge(oldSigned, NETWORK)).toThrow(AuthError);
+    await expect(verifyChallenge(oldSigned, NETWORK)).rejects.toThrow(AuthError);
   });
 
-  it('throws on an invalid Stellar address', () => {
-    expect(() => generateChallenge('not-a-stellar-address', NETWORK)).toThrow();
+  it('throws on an invalid Stellar address', async () => {
+    await expect(generateChallenge('not-a-stellar-address', NETWORK)).rejects.toThrow();
   });
 });
 
@@ -158,25 +172,25 @@ describe('generateChallenge', () => {
 // =============================================================================
 
 describe('verifyChallenge — valid', () => {
-  it('returns the account address when correctly signed', () => {
-    const signedXdr = signChallenge(ALICE, KEYPAIR_ALICE);
-    expect(verifyChallenge(signedXdr, NETWORK)).toBe(ALICE);
+  it('returns the account address when correctly signed', async () => {
+    const signedXdr = await signChallenge(ALICE, KEYPAIR_ALICE);
+    await expect(verifyChallenge(signedXdr, NETWORK)).resolves.toBe(ALICE);
   });
 
-  it('consumes the challenge so it cannot be replayed', () => {
-    const record = generateChallenge(ALICE, NETWORK);
+  it('consumes the challenge so it cannot be replayed', async () => {
+    const record = await generateChallenge(ALICE, NETWORK);
     const tx = new MockTransaction(record.transactionXdr, NETWORK);
     tx.sign(KEYPAIR_ALICE);
     const signedXdr = tx.toEnvelope().toXDR('base64');
 
-    expect(() => verifyChallenge(signedXdr, NETWORK)).not.toThrow();
-    // Second call: challenge is gone
-    expect(() => verifyChallenge(signedXdr, NETWORK)).toThrow(AuthError);
+    await expect(verifyChallenge(signedXdr, NETWORK)).resolves.toBe(ALICE);
+    // Second call: challenge is gone (atomic GETDEL already consumed it)
+    await expect(verifyChallenge(signedXdr, NETWORK)).rejects.toThrow(AuthError);
   });
 
-  it('works for a different account (Bob)', () => {
-    const signedXdr = signChallenge(BOB, KEYPAIR_BOB);
-    expect(verifyChallenge(signedXdr, NETWORK)).toBe(BOB);
+  it('works for a different account (Bob)', async () => {
+    const signedXdr = await signChallenge(BOB, KEYPAIR_BOB);
+    await expect(verifyChallenge(signedXdr, NETWORK)).resolves.toBe(BOB);
   });
 });
 
@@ -185,14 +199,14 @@ describe('verifyChallenge — valid', () => {
 // =============================================================================
 
 describe('verifyChallenge — failures', () => {
-  it('throws AuthError for invalid XDR', () => {
-    expect(() => verifyChallenge('not-valid-xdr!!', NETWORK))
-      .toThrow(AuthError);
-    expect(() => verifyChallenge('not-valid-xdr!!', NETWORK))
-      .toThrow('Invalid transaction XDR');
+  it('throws AuthError for invalid XDR', async () => {
+    // Decoding fails before any challenge-store access, so a second call is
+    // harmless here — nothing was consumed by the first attempt.
+    await expect(verifyChallenge('not-valid-xdr!!', NETWORK)).rejects.toThrow(AuthError);
+    await expect(verifyChallenge('not-valid-xdr!!', NETWORK)).rejects.toThrow('Invalid transaction XDR');
   });
 
-  it('throws AuthError when no pending challenge exists for the account', () => {
+  it('throws AuthError when no pending challenge exists for the account', async () => {
     // Create a valid-looking transaction for ALICE but never called generateChallenge
     const fakeEnv = {
       source: ALICE,
@@ -205,35 +219,36 @@ describe('verifyChallenge — failures', () => {
     fakeTx.sign(KEYPAIR_ALICE);
     const signedXdr = fakeTx.toEnvelope().toXDR('base64');
 
-    expect(() => verifyChallenge(signedXdr, NETWORK))
-      .toThrow('No pending challenge for this account');
+    await expect(verifyChallenge(signedXdr, NETWORK)).rejects.toThrow(
+      'No pending challenge for this account',
+    );
   });
 
-  it('throws AuthError when transaction has no signatures', () => {
-    const record = generateChallenge(ALICE, NETWORK);
-    // Submit the unsigned XDR directly
-    expect(() => verifyChallenge(record.transactionXdr, NETWORK))
-      .toThrow(AuthError);
-    expect(() => verifyChallenge(record.transactionXdr, NETWORK))
-      .toThrow(/no signatures|not signed/i);
+  it('throws AuthError when transaction has no signatures', async () => {
+    const record = await generateChallenge(ALICE, NETWORK);
+    // Submit the unsigned XDR directly. The atomic GETDEL consumes the
+    // challenge on this one attempt regardless of the outcome, so check both
+    // expectations against the same call rather than invoking it twice.
+    const result = verifyChallenge(record.transactionXdr, NETWORK);
+    await expect(result).rejects.toThrow(AuthError);
+    await expect(result).rejects.toThrow(/no signatures|not signed/i);
   });
 
-  it('throws AuthError when signed by the wrong account', () => {
+  it('throws AuthError when signed by the wrong account', async () => {
     // Generate a challenge for ALICE, sign with BOB
-    const record = generateChallenge(ALICE, NETWORK);
+    const record = await generateChallenge(ALICE, NETWORK);
     const tx = new MockTransaction(record.transactionXdr, NETWORK);
     tx.sign(KEYPAIR_BOB); // wrong signer
     const wrongSigned = tx.toEnvelope().toXDR('base64');
 
-    expect(() => verifyChallenge(wrongSigned, NETWORK))
-      .toThrow(AuthError);
-    expect(() => verifyChallenge(wrongSigned, NETWORK))
-      .toThrow(/no valid signature/i);
+    const result = verifyChallenge(wrongSigned, NETWORK);
+    await expect(result).rejects.toThrow(AuthError);
+    await expect(result).rejects.toThrow(/no valid signature/i);
   });
 
-  it('throws AuthError for an expired challenge', () => {
+  it('throws AuthError for an expired challenge', async () => {
     const realDateNow = Date.now;
-    const record = generateChallenge(ALICE, NETWORK);
+    const record = await generateChallenge(ALICE, NETWORK);
     const tx = new MockTransaction(record.transactionXdr, NETWORK);
     tx.sign(KEYPAIR_ALICE);
     const signedXdr = tx.toEnvelope().toXDR('base64');
@@ -241,19 +256,17 @@ describe('verifyChallenge — failures', () => {
     // Jump 6 minutes ahead — past the 5-minute TTL
     Date.now = () => realDateNow() + 6 * 60 * 1000;
     try {
-      // Single call: evictExpired removes it, then "no pending challenge" is thrown.
-      // Both "expired" and "no pending challenge" indicate the challenge is no longer valid.
-      let threw = false;
-      try { verifyChallenge(signedXdr, NETWORK); } catch (e) { threw = true; expect(e).toBeInstanceOf(AuthError); }
-      expect(threw).toBe(true);
+      // Redis's own TTL means the key is simply gone — "expired" and "no
+      // pending challenge" are the same outcome now, both AuthError.
+      await expect(verifyChallenge(signedXdr, NETWORK)).rejects.toBeInstanceOf(AuthError);
     } finally {
       Date.now = realDateNow;
     }
   });
 
-  it('throws AuthError when nonce in transaction does not match stored nonce', () => {
+  it('throws AuthError when nonce in transaction does not match stored nonce', async () => {
     // Generate a real challenge
-    generateChallenge(ALICE, NETWORK);
+    await generateChallenge(ALICE, NETWORK);
     // Build a tampered transaction with a different nonce
     const tamperedEnv = {
       source: ALICE,
@@ -266,10 +279,9 @@ describe('verifyChallenge — failures', () => {
     tamperedTx.sign(KEYPAIR_ALICE);
     const signedXdr = tamperedTx.toEnvelope().toXDR('base64');
 
-    expect(() => verifyChallenge(signedXdr, NETWORK))
-      .toThrow(AuthError);
-    expect(() => verifyChallenge(signedXdr, NETWORK))
-      .toThrow(/nonce mismatch/i);
+    const result = verifyChallenge(signedXdr, NETWORK);
+    await expect(result).rejects.toThrow(AuthError);
+    await expect(result).rejects.toThrow(/nonce mismatch/i);
   });
 });
 
@@ -467,11 +479,11 @@ describe('requireMerchant middleware', () => {
 // =============================================================================
 
 describe('end-to-end: full SEP-10 style auth flow', () => {
-  it('authenticates a merchant through the complete flow', () => {
+  it('authenticates a merchant through the complete flow', async () => {
     process.env.JWT_SECRET = JWT_SECRET;
 
     // Step 1: Generate challenge
-    const record = generateChallenge(ALICE, NETWORK);
+    const record = await generateChallenge(ALICE, NETWORK);
     expect(record.transactionXdr).toBeTruthy();
     expect(record.account).toBe(ALICE);
 
@@ -481,7 +493,7 @@ describe('end-to-end: full SEP-10 style auth flow', () => {
     const signedXdr = tx.toEnvelope().toXDR('base64');
 
     // Step 3: Server verifies signature and issues JWT
-    const address = verifyChallenge(signedXdr, NETWORK);
+    const address = await verifyChallenge(signedXdr, NETWORK);
     expect(address).toBe(ALICE);
 
     const token = issueMerchantJwt(address, JWT_SECRET);
@@ -504,13 +516,13 @@ describe('end-to-end: full SEP-10 style auth flow', () => {
     expect(res.status).not.toHaveBeenCalled();
   });
 
-  it('rejects a second account trying to use the same challenge', () => {
+  it('rejects a second account trying to use the same challenge', async () => {
     // Generate for Alice, Bob tries to use it
-    const record = generateChallenge(ALICE, NETWORK);
+    const record = await generateChallenge(ALICE, NETWORK);
     const tx = new MockTransaction(record.transactionXdr, NETWORK);
     tx.sign(KEYPAIR_BOB); // Bob signs Alice's challenge
     const signedXdr = tx.toEnvelope().toXDR('base64');
 
-    expect(() => verifyChallenge(signedXdr, NETWORK)).toThrow(AuthError);
+    await expect(verifyChallenge(signedXdr, NETWORK)).rejects.toThrow(AuthError);
   });
 });
