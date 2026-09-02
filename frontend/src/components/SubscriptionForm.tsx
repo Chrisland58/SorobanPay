@@ -1462,6 +1462,18 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
   const [cancelSuccess, setCancelSuccess]           = useState<CancelSuccessData | null>(null);
   const [cancelError, setCancelError]               = useState<TxErrorInfo | null>(null);
 
+  const [addressBookTarget, setAddressBookTarget] = useState<'merchant' | 'token' | 'main' | null>(null);
+  const isAddressBookOpen = addressBookTarget !== null;
+
+  const handleAddressSelect = (address: string) => {
+    if (addressBookTarget === 'merchant') {
+      setMerchantAddress(address);
+    } else if (addressBookTarget === 'token') {
+      setTokenAddress(address);
+    }
+    setAddressBookTarget(null);
+  };
+
   // Guard: must have a valid contract address before rendering the form
   // (placed after hooks so rules-of-hooks is satisfied)
   if (!CONTRACT_ID) return <ContractConfigError />;
@@ -1714,7 +1726,8 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
       {/* Address book modal */}
       <AddressBookModal
         isOpen={isAddressBookOpen}
-        onClose={() => setIsAddressBookOpen(false)}
+        onClose={() => setAddressBookTarget(null)}
+        onSelect={addressBookTarget === 'main' ? undefined : handleAddressSelect}
         entries={abEntries}
         entryList={abEntryList}
         addEntry={abAddEntry}
@@ -1731,7 +1744,7 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
           {publicKey && (
             <button
               type="button"
-              onClick={() => setIsAddressBookOpen(true)}
+              onClick={() => setAddressBookTarget('main')}
               aria-label="Open address book"
               title="Address book"
               className="inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium bg-gray-800 border border-gray-700 text-gray-300 hover:text-white hover:bg-gray-700 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400"
@@ -1873,14 +1886,24 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
           <div>
             <label
               htmlFor="merchantAddress"
-              className={labelCls}
+              className={labelCls + " flex items-center justify-between"}
             >
-              Merchant address{requiredMark}
-              <span className="sr-only">(required)</span>
-              {" "}<HelpTooltip
-                content="The Stellar G-address of whoever will receive your recurring payments. Must be 56 characters starting with G."
-                articleId="merchant-address"
-              />
+              <span>
+                Merchant address{requiredMark}
+                <span className="sr-only">(required)</span>
+                {" "}<HelpTooltip
+                  content="The Stellar G-address of whoever will receive your recurring payments. Must be 56 characters starting with G."
+                  articleId="merchant-address"
+                />
+              </span>
+              <button
+                type="button"
+                onClick={() => setAddressBookTarget('merchant')}
+                className="text-xs text-blue-400 hover:text-blue-300 flex items-center gap-1"
+                aria-label="Select merchant address from address book"
+              >
+                <span aria-hidden="true">📒</span> Address Book
+              </button>
             </label>
             <input
               id="merchantAddress"
@@ -1919,14 +1942,24 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
           <div>
             <label
               htmlFor="tokenAddress"
-              className={labelCls}
+              className={labelCls + " flex items-center justify-between"}
             >
-              Token contract address{requiredMark}
-              {" "}<HelpTooltip
-                content="The SEP-41 token contract address (C-address) to use for payments. Must not be the SorobanPay contract itself."
-                articleId="token-contract"
-              />
-              <span className="sr-only"> (required)</span>
+              <span>
+                Token contract address{requiredMark}
+                {" "}<HelpTooltip
+                  content="The SEP-41 token contract address (C-address) to use for payments. Must not be the SorobanPay contract itself."
+                  articleId="token-contract"
+                />
+                <span className="sr-only"> (required)</span>
+              </span>
+              <button
+                type="button"
+                onClick={() => setAddressBookTarget('token')}
+                className="text-xs text-blue-400 hover:text-blue-300 flex items-center gap-1"
+                aria-label="Select token address from address book"
+              >
+                <span aria-hidden="true">📒</span> Address Book
+              </button>
             </label>
             <TokenCombobox
               id="tokenAddress"

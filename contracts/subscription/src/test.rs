@@ -2230,3 +2230,67 @@ fn test_get_subscription_count_requires_no_auth() {
     let count = client.get_subscription_count(&merchant);
     assert_eq!(count, 1);
 }
+
+// ─── Pause & Resume Subscription Tests (Issue #809) ──────────────────────────
+
+#[test]
+fn test_pause_and_resume_verifies_storage_is_paused() {
+    let t = T::new();
+    let amount = 100_000_i128;
+    let interval = 86_400_u64;
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &amount, &interval, &false);
+
+    // Initial state: not paused
+    let d = t.get_sub();
+    assert!(!d.is_paused(t.env.ledger().timestamp()));
+
+    // Pause indefinitely
+    t.client.pause(&t.subscriber, &t.merchant, &None);
+    
+    // Verify is_paused = true in storage
+    let d2 = t.get_sub();
+    assert!(d2.is_paused(t.env.ledger().timestamp()));
+    
+    // Resume
+    t.client.resume(&t.subscriber, &t.merchant);
+    
+    // Verify is_paused = false in storage
+    let d3 = t.get_sub();
+    assert!(!d3.is_paused(t.env.ledger().timestamp()));
+}
+
+#[test]
+fn test_auto_resume_when_paused_until_in_past() {
+    let t = T::new();
+    let amount = 100_000_i128;
+    let interval = 86_400_u64;
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &amount, &interval, &false);
+
+    // Pause until now + 1000
+    let now = t.env.ledger().timestamp();
+    t.client.pause(&t.subscriber, &t.merchant, &Some(now + 1000));
+    
+    // Advance past paused_until AND past interval
+    t.advance(interval + 2000);
+    
+    // Try execute_payment - should auto-resume and succeed
+    t.client.execute_payment(&t.subscriber, &t.merchant);
+    
+    assert_eq!(t.mer_bal(), amount);
+    let d = t.get_sub();
+    assert!(!d.is_paused(t.env.ledger().timestamp()));
+}
+
+#[test]
+fn test_pause_already_paused_subscription() {
+    let t = T::new();
+    let amount = 100_000_i128;
+    let interval = 86_400_u64;
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &amount, &interval, &false);
+
+    t.client.pause(&t.subscriber, &t.merchant, &None);
+    
+    let r = t.client.try_pause(&t.subscriber, &t.merchant, &None);
+    assert!(matches!(r, Err(Ok(ContractError::SubscriptionPaused))));
+}
+
