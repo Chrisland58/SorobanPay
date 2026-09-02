@@ -90,8 +90,14 @@ export async function notifyWebhooks(payload: WebhookPayload): Promise<void> {
 
   const queue = getWebhookQueue();
 
+  const applicableEndpoints = endpoints.filter((ep: { id: number; url: string; secret: string | null; events: string }) => {
+    if (!ep.events) return true; // Default to all if not set
+    const configuredEvents = ep.events.split(',').map((e) => e.trim());
+    return configuredEvents.includes(payload.event);
+  });
+
   await Promise.all(
-    endpoints.map((ep: { id: number; url: string; secret: string | null }) => {
+    applicableEndpoints.map((ep: { id: number; url: string; secret: string | null }) => {
       if (queue) {
         // BE-53: Enqueue via BullMQ for reliable delivery with backoff
         return enqueueWebhookDelivery({ endpointId: ep.id, payload, eventId });
