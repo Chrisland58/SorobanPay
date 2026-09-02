@@ -9,6 +9,10 @@
  *   3. prepareTransaction (simulates and fills resource fees)
  *   4. Sign with Freighter via signTx()
  *   5. Submit and poll for confirmation (up to 60 seconds)
+ *
+ * All errors thrown are {@link ContractLifecycleError} instances with a
+ * stable {@link ContractLifecycleErrorCode} so UI consumers can switch on
+ * typed codes rather than pattern-matching raw strings.
  */
 
 import {
@@ -17,11 +21,14 @@ import {
   BASE_FEE,
   nativeToScVal,
   Address,
-  xdr,
 } from '@stellar/stellar-sdk';
 import { SorobanRpc } from '@stellar/stellar-sdk';
 import { signTx } from './wallet_manager';
 import { isValidCAddress, isValidGAddress } from './validation';
+import {
+  ContractLifecycleError,
+  ContractLifecycleErrorCode,
+} from './errors';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -61,7 +68,7 @@ const MAX_POLL_ATTEMPTS = 60; // 60 seconds total
  * @param networkPassphrase Stellar network passphrase
  * @param rpcUrl            Soroban RPC endpoint URL
  * @returns                 Transaction hash of the confirmed transaction
- * @throws                  On any failure: construction, signing, submission, or timeout
+ * @throws {@link ContractLifecycleError} on any failure in the build/sign/submit/confirm pipeline
  */
 export async function buildAndSubmitSubscribe(
   params: SubscribeParams,
@@ -72,19 +79,37 @@ export async function buildAndSubmitSubscribe(
 ): Promise<SubscribeResult> {
   // 0. Validate addresses before making any network calls
   if (!isValidGAddress(params.subscriber)) {
-    throw new Error(`Invalid subscriber address: ${params.subscriber}`);
+    throw new ContractLifecycleError(
+      ContractLifecycleErrorCode.VALIDATION_ERROR,
+      `Invalid subscriber address: ${params.subscriber}`,
+    );
   }
   if (!isValidGAddress(params.merchant)) {
-    throw new Error(`Invalid merchant address: ${params.merchant}`);
+    throw new ContractLifecycleError(
+      ContractLifecycleErrorCode.VALIDATION_ERROR,
+      `Invalid merchant address: ${params.merchant}`,
+    );
   }
   if (!isValidCAddress(params.token)) {
-    throw new Error(`Invalid token contract address: ${params.token}`);
+    throw new ContractLifecycleError(
+      ContractLifecycleErrorCode.VALIDATION_ERROR,
+      `Invalid token contract address: ${params.token}`,
+    );
   }
 
   const server = new SorobanRpc.Server(rpcUrl, { allowHttp: false });
 
   // 1. Fetch account
-  const account = await server.getAccount(publicKey);
+  let account: Awaited<ReturnType<typeof server.getAccount>>;
+  try {
+    account = await server.getAccount(publicKey);
+  } catch (err: unknown) {
+    throw new ContractLifecycleError(
+      ContractLifecycleErrorCode.PREPARATION_FAILED,
+      `Failed to fetch account: ${err instanceof Error ? err.message : String(err)}`,
+      err,
+    );
+  }
 
   // 2. Build transaction
   const contract = new Contract(contractId);
@@ -112,19 +137,47 @@ export async function buildAndSubmitSubscribe(
     preparedTx = await server.prepareTransaction(tx);
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
-    throw new Error(`Transaction preparation failed: ${msg}`);
+    throw new ContractLifecycleError(
+      ContractLifecycleErrorCode.PREPARATION_FAILED,
+      `Transaction preparation failed: ${msg}`,
+      err,
+    );
   }
 
   // 4. Sign with Freighter
-  const signedXdr = await signTx(preparedTx.toXDR(), networkPassphrase);
+  let signedXdr: string;
+  try {
+    signedXdr = await signTx(preparedTx.toXDR(), networkPassphrase);
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    // Distinguish explicit user cancellation from other signing failures
+    const isUserCancel = /user (declined|rejected|cancelled|dismissed)/i.test(msg);
+    throw new ContractLifecycleError(
+      isUserCancel
+        ? ContractLifecycleErrorCode.USER_CANCELLED
+        : ContractLifecycleErrorCode.SIGNING_FAILED,
+      msg,
+      err,
+    );
+  }
 
   // 5. Submit
   const parsedTx = TransactionBuilder.fromXDR(signedXdr, networkPassphrase);
-  const sendResult = await server.sendTransaction(parsedTx);
+  let sendResult: Awaited<ReturnType<typeof server.sendTransaction>>;
+  try {
+    sendResult = await server.sendTransaction(parsedTx);
+  } catch (err: unknown) {
+    throw new ContractLifecycleError(
+      ContractLifecycleErrorCode.SUBMISSION_FAILED,
+      `Transaction submission failed: ${err instanceof Error ? err.message : String(err)}`,
+      err,
+    );
+  }
 
   if (sendResult.status === 'ERROR') {
-    throw new Error(
-      `Transaction submission failed: ${sendResult.errorResult?.toXDR('base64') ?? 'unknown error'}`
+    throw new ContractLifecycleError(
+      ContractLifecycleErrorCode.SUBMISSION_FAILED,
+      `Transaction submission failed: ${sendResult.errorResult?.toXDR('base64') ?? 'unknown error'}`,
     );
   }
 
@@ -151,16 +204,18 @@ async function pollForConfirmation(
 
     if (result.status === SorobanRpc.Api.GetTransactionStatus.FAILED) {
       const meta = (result as SorobanRpc.Api.GetFailedTransactionResponse).resultMetaXdr;
-      throw new Error(
-        `Transaction failed on-chain: ${meta ?? 'no result meta available'}`
+      throw new ContractLifecycleError(
+        ContractLifecycleErrorCode.CONFIRMATION_FAILED,
+        `Transaction failed on-chain: ${meta ?? 'no result meta available'}`,
       );
     }
 
     // status === NOT_FOUND — still in mempool, continue polling
   }
 
-  throw new Error(
-    `Transaction confirmation timeout after ${MAX_POLL_ATTEMPTS} seconds. Hash: ${hash}`
+  throw new ContractLifecycleError(
+    ContractLifecycleErrorCode.CONFIRMATION_TIMEOUT,
+    `Transaction confirmation timeout after ${MAX_POLL_ATTEMPTS} seconds. Hash: ${hash}`,
   );
 }
 

@@ -59,7 +59,7 @@ import {
   NETWORK_NAME,
   RPC_URL,
 } from "@/constants/network";
-import { mapError } from "@/lib/errors";
+import { mapError, mapLifecycleError } from "@/lib/errors";
 import { useToast } from "@/components/Toast";// ─── Types ────────────────────────────────────────────────────────────────────
 
 interface SuccessData {
@@ -1199,7 +1199,7 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
         issuedAt: new Date().toISOString(),
       });
     } catch (err) {
-      const mapped = mapError(err);
+      const mapped = mapLifecycleError(err);
       setTxError(classifyError(err));
       // Also show a toast notification (UX-113)
       showToast({
