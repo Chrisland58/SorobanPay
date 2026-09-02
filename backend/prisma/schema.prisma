@@ -24,6 +24,33 @@ model Event {
   createdAt       DateTime @default(now())
 }
 
+// BE-51: Cursor-based indexer resumability
+// A single row (id = 1) acts as a singleton state record.
+model IndexerState {
+  id                   Int      @id @default(autoincrement())
+  lastCursor           String?  // Opaque RPC pagination cursor from getEvents()
+  lastProcessedLedger  Int      @default(0)
+  updatedAt            DateTime @updatedAt
+}
+
+// BE-51: Normalised payment record for executed payments
+// Stores txHash for deduplication and cross-reference with audit logs.
+model Payment {
+  id          Int      @id @default(autoincrement())
+  subscriber  String
+  merchant    String
+  token       String
+  amount      String   // stroops as string
+  txHash      String   @unique
+  ledger      BigInt
+  timestamp   DateTime
+  status      String   @default("executed") // executed | failed
+  createdAt   DateTime @default(now())
+
+  @@index([merchant, timestamp])
+  @@index([subscriber, merchant])
+}
+
 model AuditLog {
   id               Int      @id @default(autoincrement())
   eventType        String
@@ -55,11 +82,21 @@ model WebhookEndpoint {
   url       String
   active    Boolean  @default(true)
   secret    String?  // HMAC-SHA256 signing secret; null = unsigned
+  /// Comma-separated event types to deliver, e.g. "payment.executed,payment.failed"
+  /// Valid values: payment.executed | payment.failed | subscription.cancelled
+  events    String   @default("payment.executed,payment.failed")  // BE-53
   createdAt DateTime @default(now())
 
   deliveries WebhookDelivery[]
 
   @@unique([merchant, url])
+}
+
+// BE-51: stores the RPC cursor so the indexer can resume after restart
+model IndexerState {
+  id         Int      @id @default(1)
+  lastCursor String?  // opaque cursor returned by getEvents(); null = start from genesis
+  updatedAt  DateTime @updatedAt
 }
 
 model WebhookDelivery {
@@ -163,4 +200,25 @@ model RetryConfig {
   webhookUrl      String?  // override webhook for max_retries_exceeded
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
+}
+
+// Merged from two duplicate PaymentRetry blocks.
+// Superset of all fields from both definitions.
+model PaymentRetry {
+  id           Int      @id @default(autoincrement())
+  subscriber   String
+  merchant     String
+  token        String
+  amount       String   // Payment amount in token's smallest unit (stored as string)
+  attemptCount Int      @default(0)
+  lastAttempt  DateTime?
+  nextRetryAt  DateTime?
+  status       String   @default("pending") // "pending" | "succeeded" | "failed" | "abandoned"
+  errorMessage String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@index([subscriber, merchant])
+  @@index([nextRetryAt])
+  @@index([status])
 }
