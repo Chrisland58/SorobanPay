@@ -314,7 +314,7 @@ export class EventIndexer {
       });
 
       // Post-store: update state machine
-      await applyEvent(subscriber, merchant, eventType as any, { amount: amount ?? '0' });
+      await applyEvent(subscriber, merchant, eventType as any, { amount: amount ?? '0', token: token ?? '' });
 
       // Post-store: bust Redis cache keys for the affected merchant/subscriber
       await Promise.all([

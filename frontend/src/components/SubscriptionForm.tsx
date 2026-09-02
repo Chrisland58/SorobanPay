@@ -70,7 +70,8 @@ import { mapError } from "@/lib/errors";
 import { useToast } from "@/components/Toast";
 import { useAddressBook } from "@/hooks/useAddressBook";
 import { AddressBookModal } from "@/components/AddressBookModal";
-import { AddressDisplay } from "@/components/AddressDisplay";// ─── Types ────────────────────────────────────────────────────────────────────
+import { AddressDisplay } from "@/components/AddressDisplay";
+import { CopyButton } from "@/components/CopyButton";// ─── Types ────────────────────────────────────────────────────────────────────
 
 interface SuccessData {
   txHash: string;
@@ -94,70 +95,7 @@ const inputCls =
   "focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400 focus-visible:ring-offset-2 focus-visible:ring-offset-gray-900 " +
   "disabled:opacity-50 min-h-[48px] transition-all duration-150";
 
-// ─── Copy button ──────────────────────────────────────────────────────────────
-
-function CopyButton({
-  text,
-  label = "Copy",
-}: {
-  text: string;
-  label?: string;
-}) {
-  const [copied, setCopied] = useState(false);
-
-  const handleCopy = useCallback(() => {
-    navigator.clipboard.writeText(text).then(() => {
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-    });
-  }, [text]);
-
-  return (
-    <button
-      type="button"
-      onClick={handleCopy}
-      aria-label={copied ? "Copied!" : `${label} to clipboard`}
-      title={copied ? "Copied!" : `${label} to clipboard`}
-      className="inline-flex items-center gap-1 rounded px-2 py-1 text-xs font-medium
-                 bg-gray-700 hover:bg-gray-600 active:bg-gray-500 text-gray-300
-                 hover:text-white transition-colors duration-150 shrink-0
-                 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400"
-    >
-      {copied ? (
-        <>
-          <svg
-            xmlns="http://www.w3.org/2000/svg"
-            className="h-3.5 w-3.5 text-green-400"
-            viewBox="0 0 20 20"
-            fill="currentColor"
-            aria-hidden="true"
-          >
-            <path
-              fillRule="evenodd"
-              d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z"
-              clipRule="evenodd"
-            />
-          </svg>
-          <span className="text-green-400">Copied!</span>
-        </>
-      ) : (
-        <>
-          <svg
-            xmlns="http://www.w3.org/2000/svg"
-            className="h-3.5 w-3.5"
-            viewBox="0 0 20 20"
-            fill="currentColor"
-            aria-hidden="true"
-          >
-            <path d="M8 3a1 1 0 011-1h2a1 1 0 110 2H9a1 1 0 01-1-1z" />
-            <path d="M6 3a2 2 0 00-2 2v11a2 2 0 002 2h8a2 2 0 002-2V5a2 2 0 00-2-2 3 3 0 01-3 3H9a3 3 0 01-3-3z" />
-          </svg>
-          {label}
-        </>
-      )}
-    </button>
-  );
-}
+// ─── Copy button removed to components/CopyButton.tsx ──────────────────────────
 
 // ─── Network + contract status badge ──────────────────────────────────────────
 
@@ -441,6 +379,32 @@ function SuccessCard({
     }
   }, [data]);
 
+  const [subStatus, setSubStatus] = useState<string | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    const fetchStatus = async () => {
+      try {
+        const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:8000';
+        const res = await fetch(`${BACKEND_URL}/api/v1/subscriptions/${data.subscriber}/${data.merchant}`);
+        if (res.ok) {
+          const json = await res.json();
+          if (active && json.status) {
+            setSubStatus(json.status);
+          }
+        }
+      } catch (err) {
+        console.error('Failed to fetch status', err);
+      }
+    };
+    fetchStatus();
+    const intervalId = setInterval(fetchStatus, 5000);
+    return () => {
+      active = false;
+      clearInterval(intervalId);
+    };
+  }, [data.subscriber, data.merchant]);
+
   return (
     <div
       role="alert"
@@ -486,13 +450,25 @@ function SuccessCard({
       )}
 
       {/* Header */}
-      <div className="flex items-center gap-3">
-        <span className="text-2xl flex-shrink-0" aria-hidden="true">
-          {isPaused ? "⏸" : "✓"}
-        </span>
-        <p className="font-semibold text-green-300 text-base sm:text-lg">
-          Subscription created successfully!
-        </p>
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex items-center gap-3">
+          <span className="text-2xl flex-shrink-0" aria-hidden="true">
+            {isPaused ? "⏸" : "✓"}
+          </span>
+          <p className="font-semibold text-green-300 text-base sm:text-lg">
+            Subscription created successfully!
+          </p>
+        </div>
+        {subStatus && (
+          <span className={`px-2 py-1 text-xs font-bold uppercase tracking-wider rounded ${
+            subStatus === 'ACTIVE' ? 'bg-green-900/60 text-green-300' :
+            subStatus === 'PAUSED' ? 'bg-yellow-900/60 text-yellow-300' :
+            subStatus === 'OVERDUE' ? 'bg-red-900/60 text-red-300' :
+            'bg-gray-700/60 text-gray-300'
+          }`}>
+            {subStatus}
+          </span>
+        )}
       </div>
 
       {/* Paused status banner — Issue #795 */}
@@ -521,6 +497,7 @@ function SuccessCard({
           <p className="text-gray-200 break-all font-mono text-xs leading-relaxed flex-1">
             {data.txHash}
           </p>
+          <CopyButton text={data.txHash} />
           <a
             href={`${explorerBase}/${data.txHash}`}
             target="_blank"
@@ -558,6 +535,7 @@ function SuccessCard({
           </p>
           <div className="flex items-center gap-2 flex-wrap">
             <p className="text-gray-400 break-all font-mono text-xs flex-1">{cancelTxHash}</p>
+            <CopyButton text={cancelTxHash} />
             <a
               href={`${explorerBase}/${cancelTxHash}`}
               target="_blank"
@@ -744,6 +722,7 @@ function ConfirmModal({
   tokenAddress,
   amount,
   interval,
+  feeBps = 0,
   onConfirm,
   onCancel,
 }: {
@@ -751,10 +730,14 @@ function ConfirmModal({
   tokenAddress: string;
   amount: string;
   interval: string;
+  feeBps?: number;
   onConfirm: () => void;
   onCancel: () => void;
 }) {
   const days = Math.round(Number(interval) / 86400);
+  const amountVal = Number(amount);
+  const feeAmount = feeBps > 0 ? (amountVal * feeBps) / 10000 : 0;
+  const merchantAmount = feeBps > 0 ? amountVal - feeAmount : 0;
   return (
     <div
       role="dialog"
@@ -775,12 +758,21 @@ function ConfirmModal({
             ["Merchant", merchantAddress],
             ["Token", tokenAddress],
             ["Amount", `${amount} tokens`],
+            ...(feeBps > 0
+              ? [
+                  ["Amount to merchant", `${merchantAmount.toLocaleString()} tokens`],
+                  [`Protocol fee (${(feeBps / 100).toFixed(2)}%)`, `-${feeAmount.toLocaleString()} tokens`],
+                ] as const
+              : []),
             ["Interval", `${days} day${days !== 1 ? "s" : ""} (${interval} s)`],
           ].map(([label, value]) => (
             <div key={label} className="flex flex-col gap-0.5 px-4 py-3">
               <dt className="text-xs text-gray-400 font-medium">{label}</dt>
-              <dd className="break-all font-mono text-xs text-gray-100">
-                {value}
+              <dd className="break-all font-mono text-xs text-gray-100 flex items-center justify-between">
+                <span>{value}</span>
+                {(label === "Merchant" || label === "Token") && (
+                  <CopyButton text={value} />
+                )}
               </dd>
             </div>
           ))}
@@ -1366,6 +1358,31 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
   const [pausedUntil, setPausedUntil] = useState<number | null>(null);
   const [isPauseResumeSubmitting, setIsPauseResumeSubmitting] = useState(false);
 
+  const [feeBps, setFeeBps] = useState<number>(0);
+
+  useEffect(() => {
+    const fetchFeeConfig = async () => {
+      try {
+        const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:8000';
+        const res = await fetch(`${BACKEND_URL}/api/v1/config/fee`);
+        if (res.ok) {
+          const json = await res.json();
+          if (json.fee_bps !== undefined) {
+            setFeeBps(json.fee_bps);
+          }
+        }
+      } catch (err) {
+        console.error('Failed to fetch fee config', err);
+      }
+    };
+    fetchFeeConfig();
+  }, []);
+
+  const amountVal = Number(amount);
+  const showFeeBreakdown = feeBps > 0 && !isNaN(amountVal) && amountVal > 0;
+  const feeAmount = showFeeBreakdown ? (amountVal * feeBps) / 10000 : 0;
+  const merchantAmount = showFeeBreakdown ? amountVal - feeAmount : 0;
+
   // ── Transaction poller ──────────────────────────────────────────────────────
   const { state: pollerState, startPolling } = useTransactionPoller({
     onSuccess: (txHash) => {
@@ -1681,6 +1698,7 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
           tokenAddress={tokenAddress}
           amount={amount}
           interval={interval}
+          feeBps={feeBps}
           onConfirm={confirmAndSubmit}
           onCancel={() => setShowConfirm(false)}
         />
@@ -1987,6 +2005,24 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
                 subscriberAddress={publicKey}
                 amountStr={amount}
               />
+            )}
+
+            {/* Fee breakdown */}
+            {showFeeBreakdown && (
+              <div className="mt-3 rounded-lg bg-gray-800/60 border border-gray-700/60 p-3 text-xs text-gray-300 space-y-2">
+                <div className="flex justify-between">
+                  <span>Amount to merchant:</span>
+                  <span className="font-mono">{merchantAmount.toLocaleString()} tokens</span>
+                </div>
+                <div className="flex justify-between">
+                  <span>Protocol fee ({(feeBps / 100).toFixed(2)}%):</span>
+                  <span className="font-mono text-yellow-400">-{feeAmount.toLocaleString()} tokens</span>
+                </div>
+                <div className="flex justify-between pt-2 border-t border-gray-700 font-semibold text-white">
+                  <span>Total amount:</span>
+                  <span className="font-mono">{amountVal.toLocaleString()} tokens</span>
+                </div>
+              </div>
             )}
           </div>
 
