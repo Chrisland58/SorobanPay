@@ -473,7 +473,16 @@ export async function buildSignAndSubmitCancel(
 
   // 6. Submit
   const parsedTx = TransactionBuilder.fromXDR(signedXdr, networkPassphrase);
-  const sendResult = await server.sendTransaction(parsedTx);
+  let sendResult: Awaited<ReturnType<typeof server.sendTransaction>>;
+  try {
+    sendResult = await server.sendTransaction(parsedTx);
+  } catch (err: unknown) {
+    throw new ContractLifecycleError(
+      ContractLifecycleErrorCode.SUBMISSION_FAILED,
+      `Transaction submission failed: ${err instanceof Error ? err.message : String(err)}`,
+      err,
+    );
+  }
 
   if (sendResult.status === 'ERROR') {
     throw normalizeRpcError(
