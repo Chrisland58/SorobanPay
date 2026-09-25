@@ -57,6 +57,7 @@ import {
 } from "@/constants/network";
 import { NotificationBanner } from "@/components/NotificationBanner";
 import { useReducedMotion } from "@/hooks/useReducedMotion";
+import { UI_STRINGS } from "@/constants/strings";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -296,7 +297,7 @@ function ProgressBar() {
     <div
       className="w-full mb-6 p-4 sm:p-5 bg-blue-900/20 border border-blue-600/40 rounded-lg"
       role="status"
-      aria-label="Transaction in progress"
+      aria-label={UI_STRINGS.progress.ariaLabel}
       aria-live="polite"
     >
       <div className="flex justify-between items-center mb-3">
@@ -333,13 +334,13 @@ function ProgressBar() {
             </svg>
           )}
           <span className="text-sm font-medium text-blue-300">
-            Submitting transaction…
+            {UI_STRINGS.progress.submitting}
           </span>
         </div>
         <span
           className={`text-xs text-blue-200 ${prefersReducedMotion ? '' : 'animate-pulse'}`}
         >
-          Processing on blockchain
+          {UI_STRINGS.progress.processing}
         </span>
       </div>
       <div className="h-2 w-full bg-gray-700 rounded-full overflow-hidden shadow-inner">
@@ -351,7 +352,7 @@ function ProgressBar() {
         )}
       </div>
       <p className="mt-2 text-xs text-gray-300 text-center">
-        This may take 10-30 seconds. Keep the window open.
+        {UI_STRINGS.progress.patience}
       </p>
     </div>
   );
@@ -378,7 +379,7 @@ function SuccessCard({
           ✓
         </span>
         <p className="font-semibold text-green-300 text-base sm:text-lg">
-          Subscription created successfully!
+          {UI_STRINGS.success.heading}
         </p>
       </div>
 
@@ -435,7 +436,7 @@ function SuccessCard({
                    py-3 text-sm font-semibold transition-all duration-150 min-h-[48px] hover:shadow-lg
                    focus:outline-none focus-visible:ring-2 focus-visible:ring-green-400 focus-visible:ring-offset-2 focus-visible:ring-offset-gray-900"
       >
-        Create Another Subscription
+        {UI_STRINGS.success.createAnother}
       </button>
     </div>
   );
@@ -468,10 +469,10 @@ function ConfirmModal({
     >
       <div className="w-full max-w-md bg-gray-900 border border-gray-700 rounded-2xl shadow-2xl p-6 space-y-5 text-white">
         <h3 id="confirm-title" className="text-lg font-bold">
-          Confirm subscription
+          {UI_STRINGS.confirm.heading}
         </h3>
         <p className="text-sm text-gray-400">
-          Review the details before authorizing the on-chain transaction.
+          {UI_STRINGS.confirm.description}
         </p>
 
         <dl className="bg-gray-800/60 rounded-lg divide-y divide-gray-700 text-sm">
@@ -495,13 +496,13 @@ function ConfirmModal({
             onClick={onCancel}
             className="flex-1 rounded-lg border border-gray-600 bg-gray-800/50 text-gray-300 hover:bg-gray-700 active:bg-gray-800 py-3 text-sm font-semibold transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-500"
           >
-            Go Back
+            {UI_STRINGS.confirm.goBack}
           </button>
           <button
             onClick={onConfirm}
             className="flex-1 rounded-lg bg-blue-600 hover:bg-blue-500 active:bg-blue-700 py-3 text-sm font-semibold transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400"
           >
-            Confirm & Authorize
+            {UI_STRINGS.confirm.confirm}
           </button>
         </div>
       </div>
@@ -831,7 +832,7 @@ export default function SubscriptionForm() {
         />
       )}
       <div className="flex items-center justify-between mb-2 gap-3">
-        <h2 className="text-2xl sm:text-3xl font-bold">Create Subscription</h2>
+        <h2 className="text-2xl sm:text-3xl font-bold">{UI_STRINGS.form.heading}</h2>
         <span
           aria-label={publicKey ? "Wallet connected" : "Wallet disconnected"}
           className={`inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-semibold shrink-0 ${
@@ -848,7 +849,7 @@ export default function SubscriptionForm() {
         </span>
       </div>
       <p className="text-gray-400 text-sm mb-5 leading-relaxed">
-        Authorize a recurring on-chain payment using your Freighter wallet.
+        {UI_STRINGS.form.description}
       </p>
 
       {/* Freighter not installed warning (Issue #110) */}
@@ -1090,7 +1091,7 @@ export default function SubscriptionForm() {
                 className="mb-3 text-xs text-yellow-400 font-medium"
                 role="status"
               >
-                Connect your Freighter wallet to enable submission.
+                {UI_STRINGS.form.walletHint}
               </p>
             )}
             <button
@@ -1131,7 +1132,7 @@ export default function SubscriptionForm() {
                   </svg>
                 )
               )}
-              {isSubmitting ? "Submitting…" : "Authorize Subscription"}
+              {isSubmitting ? UI_STRINGS.form.submitBusy : UI_STRINGS.form.submitIdle}
             </button>
           </div>
         </form>
