@@ -24,4 +24,26 @@
   :focus:not(:focus-visible) {
     outline: none;
   }
+
+  /*
+   * Issue #1144 – Reduced-motion safety
+   *
+   * When the user has enabled "Reduce motion" at the OS level
+   * (prefers-reduced-motion: reduce), strip all animations and
+   * transitions globally. Individual components should also use the
+   * useReducedMotion() hook to swap animated SVGs for static indicators.
+   *
+   * This rule acts as a safety net for any animation not explicitly
+   * controlled at the component level.
+   */
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+      scroll-behavior: auto !important;
+    }
+  }
 }
