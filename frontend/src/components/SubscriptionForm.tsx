@@ -734,9 +734,6 @@ export default function SubscriptionForm() {
   const { publicKey, freighterInstalled, isCheckingFreighter } = useWallet();
   const prefersReducedMotion = useReducedMotion();
 
-  // Guard: must have a valid contract address before rendering the form
-  if (!CONTRACT_ID) return <ContractConfigError />;
-
   const [merchantAddress, setMerchantAddress] = useState('');
   const [tokenAddress, setTokenAddress]       = useState('');
   const [amount, setAmount]                   = useState('');
@@ -747,6 +744,10 @@ export default function SubscriptionForm() {
   const [txError, setTxError]           = useState<TxErrorInfo | null>(null);
   const [successData, setSuccessData]   = useState<SuccessData | null>(null);
   const [showConfirm, setShowConfirm]   = useState(false);
+
+  // Guard: must have a valid contract address before rendering the form
+  if (!CONTRACT_ID) return <ContractConfigError />;
+
   const intervalNum = Number(interval);
   const liveIntervalError =
     interval.trim() && Number.isInteger(intervalNum) &&
@@ -1018,7 +1019,7 @@ export default function SubscriptionForm() {
               id="help-amount"
               className="mt-2 text-xs text-gray-500 leading-relaxed"
             >
-              Whole token units per payment cycle. Each unit equals the token's
+              Whole token units per payment cycle. Each unit equals the token&apos;s
               smallest indivisible unit (stroops for XLM, 1×10⁻⁷). Examples:{" "}
               <span className="text-gray-400 font-mono">10</span> ≈ 10 USDC,{" "}
               <span className="text-gray-400 font-mono">500</span> ≈ 500 USDC.

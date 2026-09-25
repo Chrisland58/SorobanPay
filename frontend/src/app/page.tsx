@@ -159,7 +159,7 @@ export default function Home() {
             </a>{' '}
             and click <strong className="text-gray-300">Connect Freighter Wallet</strong> above.
             Then set <code className="bg-gray-800 px-1 rounded text-yellow-300 text-xs">NEXT_PUBLIC_CONTRACT_ID</code> in{' '}
-            <code className="bg-gray-800 px-1 rounded text-gray-300 text-xs">frontend/.env.local</code> if you haven't deployed yet.
+            <code className="bg-gray-800 px-1 rounded text-gray-300 text-xs">frontend/.env.local</code> if you haven&apos;t deployed yet.
             See the <a href="https://github.com/Chrisland58/SorobanPay#quick-start-testnet-demo--5-minutes" target="_blank" rel="noopener noreferrer" className="underline text-blue-400 hover:text-blue-300 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400 rounded">Quick Start guide</a>.
           </p>
         </div>
