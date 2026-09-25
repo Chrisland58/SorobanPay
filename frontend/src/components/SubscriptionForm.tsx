@@ -853,32 +853,23 @@ export default function SubscriptionForm() {
 
       {/* Freighter not installed warning (Issue #110) */}
       {!isCheckingFreighter && !freighterInstalled && (
-        <div
-          role="alert"
-          className="mb-5 rounded-lg bg-yellow-900/30 border border-yellow-600/50 p-4"
+        <NotificationBanner
+          severity="warning"
+          title="Freighter wallet not detected"
+          className="mb-5"
         >
-          <div className="flex items-start gap-3">
-            <span className="text-2xl flex-shrink-0" aria-hidden="true">
-              ⚠️
-            </span>
-            <div className="flex-1">
-              <p className="font-semibold text-yellow-300 mb-2">
-                Freighter wallet not detected
-              </p>
-              <p className="text-sm text-gray-300 mb-3">
-                Install the Freighter browser extension to create subscriptions.
-              </p>
-              <a
-                href="https://www.freighter.app"
-                target="_blank"
-                rel="noopener noreferrer"
-                className="inline-block px-4 py-2 bg-yellow-600 hover:bg-yellow-500 text-white text-xs font-semibold rounded-lg transition-colors"
-              >
-                Install Freighter
-              </a>
-            </div>
-          </div>
-        </div>
+          <p className="mb-3">
+            Install the Freighter browser extension to create subscriptions.
+          </p>
+          <a
+            href="https://www.freighter.app"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-block px-4 py-2 bg-yellow-600 hover:bg-yellow-500 text-white text-xs font-semibold rounded-lg transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-yellow-400"
+          >
+            Install Freighter
+          </a>
+        </NotificationBanner>
       )}
 
       {/* Contract ID with copy button */}

@@ -32,6 +32,8 @@ export interface WalletContextValue {
   freighterInstalled: boolean;
   /** True while checking Freighter availability on initial load. */
   isCheckingFreighter: boolean;
+  /** True when the wallet session has become invalid (e.g. extension removed). */
+  sessionInvalid: boolean;
   /** Trigger wallet connection — opens Freighter permission dialog. */
   connect: () => Promise<void>;
   /** Clear publicKey and return to disconnected state. */
@@ -50,6 +52,7 @@ export function WalletProvider({ children }: { children: ReactNode }) {
   const [connectError, setConnectError] = useState<string | null>(null);
   const [freighterInstalled, setFreighterInstalled] = useState(false);
   const [isCheckingFreighter, setIsCheckingFreighter] = useState(true);
+  const [sessionInvalid, setSessionInvalid] = useState(false);
 
   // Check Freighter availability on mount (Issue #110)
   useEffect(() => {
@@ -119,6 +122,7 @@ export function WalletProvider({ children }: { children: ReactNode }) {
         connectError,
         freighterInstalled,
         isCheckingFreighter,
+        sessionInvalid,
         connect,
         disconnect,
       }}
