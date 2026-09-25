@@ -52,10 +52,18 @@ describe('SubscriptionForm – submit button disabled while submitting', () => {
       );
     });
 
+    // The confirm modal appears — click Confirm & Authorize to proceed
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: /confirm & authorize/i })).toBeInTheDocument()
+    );
+
+    act(() => {
+      fireEvent.click(screen.getByRole('button', { name: /confirm & authorize/i }));
+    });
+
     await waitFor(() => {
-      const btn = screen.getByRole('button');
+      const btn = screen.getByRole('button', { name: /submitting/i });
       expect(btn).toBeDisabled();
-      expect(btn).toHaveTextContent(/submitting/i);
     });
   });
 
@@ -69,7 +77,16 @@ describe('SubscriptionForm – submit button disabled while submitting', () => {
       );
     });
 
-    await waitFor(() => expect(screen.getByRole('button')).toBeDisabled());
+    // Wait for confirm modal and click confirm
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: /confirm & authorize/i })).toBeInTheDocument()
+    );
+
+    act(() => {
+      fireEvent.click(screen.getByRole('button', { name: /confirm & authorize/i }));
+    });
+
+    await waitFor(() => expect(screen.getByRole('button', { name: /submitting/i })).toBeDisabled());
 
     await act(async () => {
       resolveSubmit({ txHash: 'abc123' });

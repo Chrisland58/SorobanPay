@@ -8,6 +8,11 @@ const config: Config = {
   transform: {
     '^.+\\.tsx?$': ['ts-jest', { tsconfig: { jsx: 'react-jsx' } }],
   },
+  // Exclude playwright spec files – they must be run via `npx playwright test`
+  testPathIgnorePatterns: [
+    '/node_modules/',
+    '<rootDir>/tests/',
+  ],
 };
 
 export default config;
