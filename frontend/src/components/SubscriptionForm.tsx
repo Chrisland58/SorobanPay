@@ -55,6 +55,8 @@ import {
   NETWORK_NAME,
   RPC_URL,
 } from "@/constants/network";
+import { NotificationBanner } from "@/components/NotificationBanner";
+import { useReducedMotion } from "@/hooks/useReducedMotion";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -169,7 +171,7 @@ function NetworkBadge() {
       : "bg-blue-900/50 border-blue-600/50 text-blue-300";
 
   const statusDot: Record<ReachStatus, string> = {
-    checking: "bg-yellow-400 animate-pulse",
+    checking: "bg-yellow-400 motion-safe:animate-pulse",
     reachable: "bg-green-400",
     unreachable: "bg-red-400",
   };
@@ -288,45 +290,65 @@ function ContractConfigError() {
 // ─── Progress bar ──────────────────────────────────────────────────────────────
 
 function ProgressBar() {
+  const prefersReducedMotion = useReducedMotion();
+
   return (
     <div
       className="w-full mb-6 p-4 sm:p-5 bg-blue-900/20 border border-blue-600/40 rounded-lg"
       role="status"
       aria-label="Transaction in progress"
+      aria-live="polite"
     >
       <div className="flex justify-between items-center mb-3">
         <div className="flex items-center gap-2">
-          <svg
-            className="animate-spin h-5 w-5 text-blue-400"
-            xmlns="http://www.w3.org/2000/svg"
-            fill="none"
-            viewBox="0 0 24 24"
-            aria-hidden="true"
-          >
-            <circle
-              className="opacity-25"
-              cx="12"
-              cy="12"
-              r="10"
-              stroke="currentColor"
-              strokeWidth="4"
-            />
-            <path
-              className="opacity-75"
-              fill="currentColor"
-              d="M4 12a8 8 0 018-8v8H4z"
-            />
-          </svg>
+          {prefersReducedMotion ? (
+            /* Static hourglass replaces spinner when motion is reduced */
+            <span
+              className="h-5 w-5 text-blue-400 text-base leading-none flex items-center justify-center"
+              aria-hidden="true"
+            >
+              ⏳
+            </span>
+          ) : (
+            <svg
+              className="animate-spin h-5 w-5 text-blue-400"
+              xmlns="http://www.w3.org/2000/svg"
+              fill="none"
+              viewBox="0 0 24 24"
+              aria-hidden="true"
+            >
+              <circle
+                className="opacity-25"
+                cx="12"
+                cy="12"
+                r="10"
+                stroke="currentColor"
+                strokeWidth="4"
+              />
+              <path
+                className="opacity-75"
+                fill="currentColor"
+                d="M4 12a8 8 0 018-8v8H4z"
+              />
+            </svg>
+          )}
           <span className="text-sm font-medium text-blue-300">
             Submitting transaction…
           </span>
         </div>
-        <span className="text-xs text-blue-200 animate-pulse">
+        <span
+          className={`text-xs text-blue-200 ${prefersReducedMotion ? '' : 'animate-pulse'}`}
+        >
           Processing on blockchain
         </span>
       </div>
       <div className="h-2 w-full bg-gray-700 rounded-full overflow-hidden shadow-inner">
-        <div className="h-full bg-gradient-to-r from-blue-400 via-blue-500 to-blue-400 rounded-full animate-progress" />
+        {prefersReducedMotion ? (
+          /* Static filled bar replaces animated progress bar */
+          <div className="h-full w-1/2 bg-blue-500 rounded-full" aria-hidden="true" />
+        ) : (
+          <div className="h-full bg-gradient-to-r from-blue-400 via-blue-500 to-blue-400 rounded-full animate-progress" aria-hidden="true" />
+        )}
       </div>
       <p className="mt-2 text-xs text-gray-300 text-center">
         This may take 10-30 seconds. Keep the window open.
@@ -708,7 +730,8 @@ function ErrorCard({
 // ─── Component ────────────────────────────────────────────────────────────────
 
 export default function SubscriptionForm() {
-  const { publicKey } = useWallet();
+  const { publicKey, freighterInstalled, isCheckingFreighter } = useWallet();
+  const prefersReducedMotion = useReducedMotion();
 
   // Guard: must have a valid contract address before rendering the form
   if (!CONTRACT_ID) return <ContractConfigError />;
@@ -1091,27 +1114,31 @@ export default function SubscriptionForm() {
                          focus-visible:ring-offset-2 focus-visible:ring-offset-gray-900"
             >
               {isSubmitting && (
-                <svg
-                  className="animate-spin h-5 w-5 text-white"
-                  xmlns="http://www.w3.org/2000/svg"
-                  fill="none"
-                  viewBox="0 0 24 24"
-                  aria-hidden="true"
-                >
-                  <circle
-                    className="opacity-25"
-                    cx="12"
-                    cy="12"
-                    r="10"
-                    stroke="currentColor"
-                    strokeWidth="4"
-                  />
-                  <path
-                    className="opacity-75"
-                    fill="currentColor"
-                    d="M4 12a8 8 0 018-8v8H4z"
-                  />
-                </svg>
+                prefersReducedMotion ? (
+                  <span className="text-sm" aria-hidden="true">⏳</span>
+                ) : (
+                  <svg
+                    className="animate-spin h-5 w-5 text-white"
+                    xmlns="http://www.w3.org/2000/svg"
+                    fill="none"
+                    viewBox="0 0 24 24"
+                    aria-hidden="true"
+                  >
+                    <circle
+                      className="opacity-25"
+                      cx="12"
+                      cy="12"
+                      r="10"
+                      stroke="currentColor"
+                      strokeWidth="4"
+                    />
+                    <path
+                      className="opacity-75"
+                      fill="currentColor"
+                      d="M4 12a8 8 0 018-8v8H4z"
+                    />
+                  </svg>
+                )
               )}
               {isSubmitting ? "Submitting…" : "Authorize Subscription"}
             </button>
