@@ -8,6 +8,7 @@
     "start": "next start",
     "lint": "next lint",
     "type-check": "tsc --noEmit",
+    "test": "jest",
     "test:e2e": "playwright test",
     "test:e2e:list": "playwright test --list"
   },
