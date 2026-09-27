@@ -2011,3 +2011,290 @@ fn test_get_subscription_count_requires_no_auth() {
     let count = client.get_subscription_count(&merchant);
     assert_eq!(count, 1);
 }
+
+// ─── Issue #1094 — Deterministic batch semantics ──────────────────────────────
+//
+// Specifies size limits and per-item (non-atomic) failure behavior for
+// batch_execute_payment:
+//
+// • Empty batch → EmptyBatch (error 13)
+// • Batch > BATCH_MAX_SIZE (50) → BatchTooLarge (error 14)
+// • Batch of exactly BATCH_MAX_SIZE → accepted (off-by-one boundary)
+// • Batch of size 1 → identical result to a direct execute_payment call
+// • Per-item failure → insufficient-balance item does not block other items
+// • All-success → merchant receives amt × N total
+// • Failed item → next_payment not advanced for the failed subscriber
+
+/// Empty batch returns EmptyBatch (error 13).
+#[test]
+fn test_batch_empty_returns_empty_batch_error() {
+    let t = T::new();
+    let empty: soroban_sdk::Vec<Address> = soroban_sdk::Vec::new(&t.env);
+    let r = t.client().try_batch_execute_payment(&t.merchant, &t.token, &empty);
+    assert!(
+        matches!(r, Err(Ok(ContractError::EmptyBatch))),
+        "empty batch must return EmptyBatch (error 13), got {:?}",
+        r
+    );
+}
+
+/// Batch with BATCH_MAX_SIZE + 1 entries returns BatchTooLarge (error 14).
+#[test]
+fn test_batch_too_large_returns_batch_too_large_error() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+    env.ledger().with_mut(|l| l.timestamp = 1_700_000_000_u64);
+
+    let admin    = Address::generate(&env);
+    let token    = env.register_stellar_asset_contract_v2(admin.clone()).address();
+    let merchant = Address::generate(&env);
+
+    let contract_id = env.register(SubscriptionProtocol, ());
+    let client = SubscriptionProtocolClient::new(&env, &contract_id);
+
+    // Build a vector of BATCH_MAX_SIZE + 1 = 51 addresses.
+    let mut subscribers = soroban_sdk::Vec::new(&env);
+    for _ in 0..=crate::BATCH_MAX_SIZE {
+        subscribers.push_back(Address::generate(&env));
+    }
+
+    let r = client.try_batch_execute_payment(&merchant, &token, &subscribers);
+    assert!(
+        matches!(r, Err(Ok(ContractError::BatchTooLarge))),
+        "batch of 51 must return BatchTooLarge (error 14), got {:?}",
+        r
+    );
+}
+
+/// Batch of exactly BATCH_MAX_SIZE (50) is not rejected with BatchTooLarge.
+///
+/// Off-by-one regression guard: the limit check must be `> BATCH_MAX_SIZE`,
+/// not `>= BATCH_MAX_SIZE`.
+#[test]
+fn test_batch_exactly_max_size_not_rejected() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+    env.ledger().with_mut(|l| l.timestamp = 1_700_000_000_u64);
+
+    let admin    = Address::generate(&env);
+    let token    = env.register_stellar_asset_contract_v2(admin.clone()).address();
+    let merchant = Address::generate(&env);
+
+    let contract_id = env.register(SubscriptionProtocol, ());
+    let client = SubscriptionProtocolClient::new(&env, &contract_id);
+
+    let amt = 100_i128;
+    let ivl = 86_400_u64;
+
+    let mut subscribers = soroban_sdk::Vec::new(&env);
+    for _ in 0..crate::BATCH_MAX_SIZE {
+        let sub = Address::generate(&env);
+        StellarAssetClient::new(&env, &token).mint(&sub, &10_000_i128);
+        token::Client::new(&env, &token).approve(
+            &sub,
+            &contract_id,
+            &5_000_i128,
+            &(env.ledger().sequence() + 100_000_u32),
+        );
+        client.subscribe(&sub, &merchant, &token, &amt, &ivl, &false);
+        subscribers.push_back(sub);
+    }
+
+    // Advance past the payment window.
+    let now = env.ledger().timestamp();
+    env.ledger().with_mut(|l| l.timestamp = now + ivl + 1);
+
+    let r = client.try_batch_execute_payment(&merchant, &token, &subscribers);
+    assert!(
+        !matches!(r, Err(Ok(ContractError::BatchTooLarge))),
+        "batch of exactly BATCH_MAX_SIZE must not return BatchTooLarge"
+    );
+}
+
+/// Batch of size 1 produces the same balance delta and `next_payment` advance
+/// as a direct `execute_payment` call — the two paths must be equivalent.
+#[test]
+fn test_batch_size_one_identical_to_direct_execute_payment() {
+    let t   = T::new();
+    let amt = 1_000_i128;
+    let ivl = 86_400_u64;
+
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &amt, &ivl, &false);
+    t.advance(ivl + 1);
+
+    let sub_bal_before  = t.sub_bal();
+    let mer_bal_before  = t.mer_bal();
+    let next_before     = t.get_sub().next_payment;
+
+    let mut subs = soroban_sdk::Vec::new(&t.env);
+    subs.push_back(t.subscriber.clone());
+
+    let r = t.client().try_batch_execute_payment(&t.merchant, &t.token, &subs);
+    assert!(r.is_ok(), "batch of size 1 must succeed, got {:?}", r);
+
+    assert_eq!(t.sub_bal(), sub_bal_before - amt,
+        "subscriber balance must decrease by amount");
+    assert_eq!(t.mer_bal(), mer_bal_before + amt,
+        "merchant balance must increase by amount");
+    assert!(t.get_sub().next_payment > next_before,
+        "next_payment must advance after a successful batch payment");
+}
+
+/// Per-item failure semantics: a subscriber with zero balance does not prevent
+/// collection from a solvent subscriber in the same batch.
+///
+/// The batch is processed item-by-item; a failure for one entry is silently
+/// skipped and the rest of the batch continues.
+#[test]
+fn test_batch_per_item_failure_does_not_block_solvent_items() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+    env.ledger().with_mut(|l| l.timestamp = 1_700_000_000_u64);
+
+    let admin    = Address::generate(&env);
+    let token    = env.register_stellar_asset_contract_v2(admin.clone()).address();
+    let merchant = Address::generate(&env);
+
+    let contract_id = env.register(SubscriptionProtocol, ());
+    let client = SubscriptionProtocolClient::new(&env, &contract_id);
+
+    let amt = 1_000_i128;
+    let ivl = 86_400_u64;
+
+    // sub_solvent has enough balance and allowance.
+    let sub_solvent = Address::generate(&env);
+    StellarAssetClient::new(&env, &token).mint(&sub_solvent, &10_000_i128);
+    token::Client::new(&env, &token).approve(
+        &sub_solvent, &contract_id, &5_000_i128,
+        &(env.ledger().sequence() + 100_000_u32),
+    );
+    client.subscribe(&sub_solvent, &merchant, &token, &amt, &ivl, &false);
+
+    // sub_broke has no balance at all — only an allowance.
+    let sub_broke = Address::generate(&env);
+    token::Client::new(&env, &token).approve(
+        &sub_broke, &contract_id, &5_000_i128,
+        &(env.ledger().sequence() + 100_000_u32),
+    );
+    client.subscribe(&sub_broke, &merchant, &token, &amt, &ivl, &false);
+
+    // Advance past the payment window.
+    let now = env.ledger().timestamp();
+    env.ledger().with_mut(|l| l.timestamp = now + ivl + 1);
+
+    let solvent_bal_before = token::Client::new(&env, &token).balance(&sub_solvent);
+    let broke_bal_before   = token::Client::new(&env, &token).balance(&sub_broke);
+    let mer_bal_before     = token::Client::new(&env, &token).balance(&merchant);
+
+    let mut subs = soroban_sdk::Vec::new(&env);
+    subs.push_back(sub_solvent.clone());
+    subs.push_back(sub_broke.clone());
+
+    // The overall batch call must return Ok (per-item failures are absorbed).
+    let r = client.try_batch_execute_payment(&merchant, &token, &subs);
+    assert!(r.is_ok(), "batch with one failing item must still return Ok, got {:?}", r);
+
+    // The solvent subscriber must have been charged.
+    assert_eq!(
+        token::Client::new(&env, &token).balance(&sub_solvent),
+        solvent_bal_before - amt,
+        "solvent subscriber must be charged despite broke subscriber in same batch"
+    );
+    // The broke subscriber must not have been charged.
+    assert_eq!(
+        token::Client::new(&env, &token).balance(&sub_broke),
+        broke_bal_before,
+        "broke subscriber must not be debited"
+    );
+    // Merchant receives exactly the solvent subscriber's payment.
+    assert_eq!(
+        token::Client::new(&env, &token).balance(&merchant),
+        mer_bal_before + amt,
+        "merchant must receive only the solvent subscriber's payment"
+    );
+}
+
+/// All-success batch: total funds collected equals the sum of all individual payments.
+///
+/// Accounting invariant: merchant_balance_after − merchant_balance_before = amt × N.
+#[test]
+fn test_batch_all_success_correct_total_transferred() {
+    const N: usize = 5;
+
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+    env.ledger().with_mut(|l| l.timestamp = 1_700_000_000_u64);
+
+    let admin    = Address::generate(&env);
+    let token    = env.register_stellar_asset_contract_v2(admin.clone()).address();
+    let merchant = Address::generate(&env);
+
+    let contract_id = env.register(SubscriptionProtocol, ());
+    let client = SubscriptionProtocolClient::new(&env, &contract_id);
+
+    let amt = 500_i128;
+    let ivl = 86_400_u64;
+
+    let mut subs_vec = soroban_sdk::Vec::new(&env);
+    for _ in 0..N {
+        let sub = Address::generate(&env);
+        StellarAssetClient::new(&env, &token).mint(&sub, &10_000_i128);
+        token::Client::new(&env, &token).approve(
+            &sub, &contract_id, &5_000_i128,
+            &(env.ledger().sequence() + 100_000_u32),
+        );
+        client.subscribe(&sub, &merchant, &token, &amt, &ivl, &false);
+        subs_vec.push_back(sub);
+    }
+
+    let now = env.ledger().timestamp();
+    env.ledger().with_mut(|l| l.timestamp = now + ivl + 1);
+
+    let mer_bal_before = token::Client::new(&env, &token).balance(&merchant);
+
+    let r = client.try_batch_execute_payment(&merchant, &token, &subs_vec);
+    assert!(r.is_ok(), "all-success batch must return Ok, got {:?}", r);
+
+    let mer_bal_after = token::Client::new(&env, &token).balance(&merchant);
+    assert_eq!(
+        mer_bal_after - mer_bal_before, amt * N as i128,
+        "merchant balance delta must equal amt × N for an all-success batch"
+    );
+}
+
+/// A failed batch item (insufficient balance) must not advance `next_payment`
+/// for that subscriber — the subscription remains collectable on a future retry.
+#[test]
+fn test_batch_failed_item_next_payment_not_advanced() {
+    let t   = T::new();
+    let amt = 20_000_000_i128; // exceeds the 10_000_000 minted to subscriber
+    let ivl = 86_400_u64;
+
+    // Approve a large allowance so the failure is balance-driven.
+    token::Client::new(&t.env, &t.token).approve(
+        &t.subscriber, &t.contract_id, &amt,
+        &(t.env.ledger().sequence() + 100_000_u32),
+    );
+
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &amt, &ivl, &false);
+    let next_before = t.get_sub().next_payment;
+
+    t.advance(ivl + 1);
+
+    let mut subs = soroban_sdk::Vec::new(&t.env);
+    subs.push_back(t.subscriber.clone());
+
+    // Batch processes the item; balance is insufficient so it is skipped.
+    let _ = t.client().try_batch_execute_payment(&t.merchant, &t.token, &subs);
+
+    // `next_payment` must NOT have advanced — the subscriber can be retried later.
+    assert_eq!(
+        t.get_sub().next_payment, next_before,
+        "next_payment must not advance when the batch item fails due to insufficient balance"
+    );
+    // No funds must have moved.
+    assert_eq!(t.sub_bal(), 10_000_000_i128,
+        "subscriber balance must be unchanged after a failed batch item");
+    assert_eq!(t.mer_bal(), 0_i128,
+        "merchant balance must be unchanged after a failed batch item");
+}
