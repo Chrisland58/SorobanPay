@@ -11,7 +11,7 @@ use soroban_sdk::{
 
 use crate::{
     error::ContractError,
-    storage::{subscription_key, DataKey, SubscriptionData},
+    storage::{subscription_key, DataKey, SubscriptionData, MAX_AMOUNT},
     SubscriptionProtocol, SubscriptionProtocolClient,
 };
 
@@ -1731,4 +1731,503 @@ fn test_execute_payment_before_due_does_not_mutate_subscription() {
     let after = t.get_sub();
     assert_eq!(before.next_payment, after.next_payment);
     assert_eq!(before.amount, after.amount);
+}
+
+// =============================================================================
+// FEE-CALCULATION GOLDEN VECTORS — Issue #1091
+//
+// These tests define exact integer arithmetic vectors for payment amounts,
+// ensuring the contract handles edge cases in i128 arithmetic correctly.
+//
+// Terminology used in this section:
+//   "amount"   — the subscription payment in token's smallest unit (stroops or
+//                equivalent).  Always a positive i128.
+//   "balance"  — the subscriber's token balance before execution.
+//   "debit"    — balance_before - balance_after (must equal amount on success).
+//   "credit"   — merchant_balance_after - merchant_balance_before (= debit).
+//
+// The vectors below cover:
+//   V-1  Decimal precision / unit rounding — amounts that are not round numbers.
+//   V-2  Rate boundary — the exact minimum (1) and maximum (MAX_AMOUNT) amounts.
+//   V-3  Rounding consistency — repeated payments accumulate without drift.
+//   V-4  Minimum-amount repeated payments — 1 token × N cycles.
+//   V-5  Large-amount single payment — MAX_AMOUNT in one shot.
+//   V-6  Sub-unit amounts (stroops) — values that cannot be expressed as whole
+//        "display" units without a decimal point.
+//   V-7  Zero-surplus transfer — subscriber has exactly the required balance.
+//   V-8  Adversarial amounts — values near i128 boundaries (overflow guards).
+// =============================================================================
+
+// ─── Golden vector helpers ────────────────────────────────────────────────────
+
+/// Execute N consecutive payment cycles and return (total_debit, total_credit).
+fn run_n_cycles(t: &T, n: u32, amount: i128, interval: u64) -> (i128, i128) {
+    let sub_start = t.sub_bal();
+    let mer_start = t.mer_bal();
+
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &amount, &interval, &false);
+
+    for _ in 0..n {
+        t.advance(interval + 1);
+        t.client().execute_payment(&t.subscriber, &t.merchant);
+    }
+
+    let total_debit  = sub_start - t.sub_bal();
+    let total_credit = t.mer_bal() - mer_start;
+    (total_debit, total_credit)
+}
+
+// =============================================================================
+// V-1 — Decimal precision: amounts that are not multiples of common display units
+// =============================================================================
+
+/// 1 stroop (smallest possible unit) transferred exactly.
+#[test]
+fn golden_v1_one_stroop_transferred_exactly() {
+    let t = T::new();
+    let amount = 1_i128;
+    let (debit, credit) = run_n_cycles(&t, 1, amount, 86_400);
+    assert_eq!(debit,  amount, "1-stroop debit must equal 1");
+    assert_eq!(credit, amount, "1-stroop credit must equal 1");
+}
+
+/// 7 stroops — a non-round amount that cannot be represented as whole USDC
+/// (which has 7 decimal places on Stellar).
+#[test]
+fn golden_v1_seven_stroops_transferred_exactly() {
+    let t = T::new();
+    let amount = 7_i128;
+    let (debit, credit) = run_n_cycles(&t, 1, amount, 86_400);
+    assert_eq!(debit,  amount, "7-stroop debit must be exact");
+    assert_eq!(credit, amount, "7-stroop credit must be exact");
+}
+
+/// 1_000_001 stroops — just above a round 1 000 000 boundary.
+/// Verifies no rounding-down occurs on non-round values.
+#[test]
+fn golden_v1_one_above_million_stroops() {
+    let t = T::new();
+    let amount = 1_000_001_i128;
+    let (debit, credit) = run_n_cycles(&t, 1, amount, 86_400);
+    assert_eq!(debit,  amount, "non-round amount: debit must be exact");
+    assert_eq!(credit, amount, "non-round amount: credit must be exact");
+}
+
+/// 9_999_999 stroops — just below 10 000 000 (the minted subscriber balance).
+/// Verifies there is no off-by-one that would reject the transfer.
+#[test]
+fn golden_v1_just_below_balance_limit() {
+    let t = T::new();
+    let amount = 9_999_999_i128; // subscriber has 10_000_000
+    let (debit, credit) = run_n_cycles(&t, 1, amount, 86_400);
+    assert_eq!(debit,  amount, "near-limit amount: debit must equal amount");
+    assert_eq!(credit, amount, "near-limit amount: credit must equal amount");
+}
+
+// =============================================================================
+// V-2 — Rate boundaries: exact minimum and maximum valid amounts
+// =============================================================================
+
+/// Minimum valid amount (1): accepted and transferred exactly.
+#[test]
+fn golden_v2_minimum_amount_accepted_and_transferred() {
+    let t = T::new();
+    let amount = 1_i128;
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &amount, &86_400_u64, &false);
+    t.advance(86_401);
+    let sb = t.sub_bal();
+    let mb = t.mer_bal();
+    t.client().execute_payment(&t.subscriber, &t.merchant);
+    assert_eq!(t.sub_bal(), sb - 1, "minimum amount: subscriber debit must be 1");
+    assert_eq!(t.mer_bal(), mb + 1, "minimum amount: merchant credit must be 1");
+}
+
+/// Amount zero (below minimum): rejected with AmountMustBePositive, no transfer.
+#[test]
+fn golden_v2_zero_amount_rejected_no_transfer() {
+    let t = T::new();
+    let r = t.client().try_subscribe(&t.subscriber, &t.merchant, &t.token, &0_i128, &86_400_u64);
+    assert!(matches!(r, Err(Ok(ContractError::AmountMustBePositive))),
+        "amount=0 must return AmountMustBePositive");
+    assert!(!t.has_sub(), "no subscription created for zero amount");
+    assert_eq!(t.sub_bal(), 10_000_000_i128, "subscriber balance unchanged");
+    assert_eq!(t.mer_bal(), 0_i128, "merchant balance unchanged");
+}
+
+/// Amount negative (below minimum): rejected with AmountMustBePositive, no transfer.
+#[test]
+fn golden_v2_negative_amount_rejected_no_transfer() {
+    let t = T::new();
+    let r = t.client().try_subscribe(&t.subscriber, &t.merchant, &t.token, &(-1_i128), &86_400_u64);
+    assert!(matches!(r, Err(Ok(ContractError::AmountMustBePositive))),
+        "amount=-1 must return AmountMustBePositive");
+    assert!(!t.has_sub(), "no subscription created for negative amount");
+}
+
+/// Amount i128::MIN: rejected with AmountMustBePositive.
+#[test]
+fn golden_v2_i128_min_rejected() {
+    let t = T::new();
+    let r = t.client().try_subscribe(
+        &t.subscriber, &t.merchant, &t.token, &i128::MIN, &86_400_u64,
+    );
+    assert!(matches!(r, Err(Ok(ContractError::AmountMustBePositive))),
+        "i128::MIN must return AmountMustBePositive");
+    assert!(!t.has_sub());
+}
+
+/// Amount MAX_AMOUNT + 1: rejected with AmountTooLarge.
+#[test]
+fn golden_v2_above_max_amount_rejected() {
+    let t = T::new();
+    let r = t.client().try_subscribe(
+        &t.subscriber, &t.merchant, &t.token, &(MAX_AMOUNT + 1), &86_400_u64,
+    );
+    assert!(matches!(r, Err(Ok(ContractError::AmountTooLarge))),
+        "MAX_AMOUNT+1 must return AmountTooLarge");
+    assert!(!t.has_sub());
+}
+
+/// Amount i128::MAX: rejected with AmountTooLarge (far above MAX_AMOUNT = 10^18).
+#[test]
+fn golden_v2_i128_max_rejected_as_too_large() {
+    let t = T::new();
+    let r = t.client().try_subscribe(
+        &t.subscriber, &t.merchant, &t.token, &i128::MAX, &86_400_u64,
+    );
+    assert!(matches!(r, Err(Ok(ContractError::AmountTooLarge))),
+        "i128::MAX must return AmountTooLarge");
+    assert!(!t.has_sub());
+}
+
+// =============================================================================
+// V-3 — Rounding consistency: repeated payments accumulate without drift
+// =============================================================================
+
+/// 3 consecutive payments of 100 tokens each must yield a total debit of 300.
+/// No rounding error should cause the total to differ.
+#[test]
+fn golden_v3_three_cycles_accumulate_without_drift() {
+    let t = T::new();
+    let amount = 100_i128;
+    let (debit, credit) = run_n_cycles(&t, 3, amount, 86_400);
+    assert_eq!(debit,  300_i128, "3 × 100 must debit exactly 300");
+    assert_eq!(credit, 300_i128, "3 × 100 must credit exactly 300");
+}
+
+/// 10 consecutive payments of 1 token each must yield total debit of 10.
+#[test]
+fn golden_v3_ten_minimum_payments_no_drift() {
+    let t = T::new();
+    let amount = 1_i128;
+    let (debit, credit) = run_n_cycles(&t, 10, amount, 86_400);
+    assert_eq!(debit,  10_i128, "10 × 1 must debit exactly 10");
+    assert_eq!(credit, 10_i128, "10 × 1 must credit exactly 10");
+}
+
+/// 5 cycles of 7-stroop payments — total must be exactly 35, no drift.
+#[test]
+fn golden_v3_five_cycles_of_seven_stroops() {
+    let t = T::new();
+    let (debit, credit) = run_n_cycles(&t, 5, 7_i128, 86_400);
+    assert_eq!(debit,  35_i128, "5 × 7 stroops must total 35");
+    assert_eq!(credit, 35_i128, "5 × 7 stroops credit must total 35");
+}
+
+// =============================================================================
+// V-4 — Minimum-amount repeated payments: 1 token per cycle
+// =============================================================================
+
+/// 1 token per day for 7 days: total debit must be exactly 7.
+#[test]
+fn golden_v4_one_token_per_day_seven_days() {
+    let t = T::new();
+    let (debit, credit) = run_n_cycles(&t, 7, 1_i128, 86_400);
+    assert_eq!(debit,  7_i128, "7 daily 1-token payments must total 7");
+    assert_eq!(credit, 7_i128, "7 daily 1-token credits must total 7");
+}
+
+/// Subscription update: first 2 cycles at 1 token, then re-subscribe at 5 tokens,
+/// then 2 more cycles.  Total debit must be 2 + 10 = 12.
+#[test]
+fn golden_v4_resubscribe_changes_amount_correctly() {
+    let t = T::new();
+
+    // Phase 1: 2 cycles at amount=1
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &1_i128, &86_400_u64, &false);
+    for _ in 0..2 {
+        t.advance(86_401);
+        t.client().execute_payment(&t.subscriber, &t.merchant);
+    }
+
+    let sub_mid = t.sub_bal();
+    let mer_mid = t.mer_bal();
+    assert_eq!(10_000_000_i128 - sub_mid, 2_i128,
+        "after 2 × 1-token payments, subscriber debit must be 2");
+    assert_eq!(mer_mid, 2_i128,
+        "after 2 × 1-token payments, merchant balance must be 2");
+
+    // Phase 2: re-subscribe at amount=5
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &5_i128, &86_400_u64, &false);
+    for _ in 0..2 {
+        t.advance(86_401);
+        t.client().execute_payment(&t.subscriber, &t.merchant);
+    }
+
+    let total_debit  = 10_000_000_i128 - t.sub_bal();
+    let total_credit = t.mer_bal();
+    assert_eq!(total_debit,  12_i128, "total debit after resubscribe must be 2 + 10 = 12");
+    assert_eq!(total_credit, 12_i128, "total credit after resubscribe must be 12");
+}
+
+// =============================================================================
+// V-5 — Large-amount single payment: values approaching MAX_AMOUNT
+// =============================================================================
+
+/// Half of MAX_AMOUNT transferred in a single payment.
+#[test]
+fn golden_v5_half_max_amount_single_payment() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+    env.ledger().with_mut(|l| l.timestamp = 1_700_000_000_u64);
+
+    let admin      = Address::generate(&env);
+    let subscriber = Address::generate(&env);
+    let merchant   = Address::generate(&env);
+    let amount     = MAX_AMOUNT / 2;
+
+    let token = env.register_stellar_asset_contract_v2(admin.clone()).address();
+    StellarAssetClient::new(&env, &token).mint(&subscriber, &(MAX_AMOUNT));
+
+    let contract_id = env.register(SubscriptionProtocol, ());
+    let client      = SubscriptionProtocolClient::new(&env, &contract_id);
+
+    token::Client::new(&env, &token).approve(
+        &subscriber,
+        &contract_id,
+        &amount,
+        &(env.ledger().sequence() + 100_000_u32),
+    );
+
+    client.subscribe(&subscriber, &merchant, &token, &amount, &86_400_u64, &false);
+    env.ledger().with_mut(|l| l.timestamp = 1_700_000_000_u64 + 86_401);
+
+    let sub_before = token::Client::new(&env, &token).balance(&subscriber);
+    let mer_before = token::Client::new(&env, &token).balance(&merchant);
+
+    client.execute_payment(&subscriber, &merchant);
+
+    assert_eq!(sub_before - token::Client::new(&env, &token).balance(&subscriber), amount,
+        "half-MAX_AMOUNT: subscriber debit must equal amount");
+    assert_eq!(token::Client::new(&env, &token).balance(&merchant) - mer_before, amount,
+        "half-MAX_AMOUNT: merchant credit must equal amount");
+    assert_eq!(token::Client::new(&env, &token).balance(&contract_id), 0_i128,
+        "contract must hold 0 after large-amount payment");
+}
+
+// =============================================================================
+// V-6 — Sub-unit amounts (stroops): values in the range [1, 9]
+// =============================================================================
+
+/// Each value in [1, 9] transferred exactly — no rounding artefacts.
+#[test]
+fn golden_v6_single_digit_stroops_all_transferred_exactly() {
+    for amount in 1_i128..=9_i128 {
+        let t = T::new();
+        t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &amount, &86_400_u64, &false);
+        t.advance(86_401);
+        let sb = t.sub_bal();
+        let mb = t.mer_bal();
+        t.client().execute_payment(&t.subscriber, &t.merchant);
+        assert_eq!(t.sub_bal(), sb - amount,
+            "single-digit stroop {} debit must be exact", amount);
+        assert_eq!(t.mer_bal(), mb + amount,
+            "single-digit stroop {} credit must be exact", amount);
+    }
+}
+
+/// Powers of 10 from 10^0 to 10^6 each transferred exactly.
+#[test]
+fn golden_v6_powers_of_ten_transferred_exactly() {
+    let powers: [i128; 7] = [1, 10, 100, 1_000, 10_000, 100_000, 1_000_000];
+    for &amount in &powers {
+        let t = T::new();
+        t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &amount, &86_400_u64, &false);
+        t.advance(86_401);
+        let sb = t.sub_bal();
+        let mb = t.mer_bal();
+        t.client().execute_payment(&t.subscriber, &t.merchant);
+        assert_eq!(t.sub_bal(), sb - amount,
+            "power-of-10 amount={} debit must be exact", amount);
+        assert_eq!(t.mer_bal(), mb + amount,
+            "power-of-10 amount={} credit must be exact", amount);
+    }
+}
+
+// =============================================================================
+// V-7 — Zero-surplus transfer: subscriber has exactly the required balance
+// =============================================================================
+
+/// Subscriber is minted exactly `amount` tokens.  After payment their balance
+/// must be zero and the merchant must have received exactly `amount`.
+#[test]
+fn golden_v7_exact_balance_subscriber_zeroed_after_payment() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+    env.ledger().with_mut(|l| l.timestamp = 1_700_000_000_u64);
+
+    let admin      = Address::generate(&env);
+    let subscriber = Address::generate(&env);
+    let merchant   = Address::generate(&env);
+    let amount     = 333_333_i128;
+
+    let token = env.register_stellar_asset_contract_v2(admin.clone()).address();
+    StellarAssetClient::new(&env, &token).mint(&subscriber, &amount); // exactly amount
+
+    let contract_id = env.register(SubscriptionProtocol, ());
+    let client      = SubscriptionProtocolClient::new(&env, &contract_id);
+
+    token::Client::new(&env, &token).approve(
+        &subscriber,
+        &contract_id,
+        &amount,
+        &(env.ledger().sequence() + 100_000_u32),
+    );
+
+    client.subscribe(&subscriber, &merchant, &token, &amount, &86_400_u64, &false);
+    env.ledger().with_mut(|l| l.timestamp = 1_700_000_000_u64 + 86_401);
+
+    client.execute_payment(&subscriber, &merchant);
+
+    assert_eq!(
+        token::Client::new(&env, &token).balance(&subscriber), 0_i128,
+        "subscriber with exact balance must have 0 after payment"
+    );
+    assert_eq!(
+        token::Client::new(&env, &token).balance(&merchant), amount,
+        "merchant must receive the full amount when subscriber has exact balance"
+    );
+    assert_eq!(
+        token::Client::new(&env, &token).balance(&contract_id), 0_i128,
+        "contract must hold 0 (non-custodial)"
+    );
+}
+
+/// Subscriber balance is amount - 1: payment must fail with TransferFailed.
+#[test]
+fn golden_v7_one_below_required_balance_fails() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+    env.ledger().with_mut(|l| l.timestamp = 1_700_000_000_u64);
+
+    let admin      = Address::generate(&env);
+    let subscriber = Address::generate(&env);
+    let merchant   = Address::generate(&env);
+    let amount     = 1_000_i128;
+
+    let token = env.register_stellar_asset_contract_v2(admin.clone()).address();
+    StellarAssetClient::new(&env, &token).mint(&subscriber, &(amount - 1)); // one short
+
+    let contract_id = env.register(SubscriptionProtocol, ());
+    let client      = SubscriptionProtocolClient::new(&env, &contract_id);
+
+    token::Client::new(&env, &token).approve(
+        &subscriber,
+        &contract_id,
+        &amount,
+        &(env.ledger().sequence() + 100_000_u32),
+    );
+
+    client.subscribe(&subscriber, &merchant, &token, &amount, &86_400_u64, &false);
+    env.ledger().with_mut(|l| l.timestamp = 1_700_000_000_u64 + 86_401);
+
+    let result = client.try_execute_payment(&subscriber, &merchant);
+    assert!(
+        matches!(result, Err(Ok(ContractError::TransferFailed))),
+        "balance one below required must return TransferFailed; got {:?}", result
+    );
+    assert_eq!(
+        token::Client::new(&env, &token).balance(&subscriber), amount - 1,
+        "subscriber balance must be unchanged after failed payment"
+    );
+    assert_eq!(
+        token::Client::new(&env, &token).balance(&merchant), 0_i128,
+        "merchant must receive nothing when payment fails"
+    );
+}
+
+// =============================================================================
+// V-8 — Adversarial amounts: i128 boundary arithmetic overflow guards
+// =============================================================================
+
+/// Amount = i128::MAX is rejected before any arithmetic can overflow.
+#[test]
+fn golden_v8_i128_max_rejected_before_overflow() {
+    let t = T::new();
+    let r = t.client().try_subscribe(
+        &t.subscriber, &t.merchant, &t.token, &i128::MAX, &86_400_u64,
+    );
+    assert!(
+        matches!(r, Err(Ok(ContractError::AmountTooLarge))),
+        "i128::MAX must be rejected with AmountTooLarge before any overflow"
+    );
+    assert!(!t.has_sub(), "no subscription must exist after overflow-guarded rejection");
+    assert_eq!(t.sub_bal(), 10_000_000_i128, "subscriber balance must be unchanged");
+    assert_eq!(t.mer_bal(), 0_i128,          "merchant balance must be unchanged");
+}
+
+/// Amount = MAX_AMOUNT (10^18) is the exact ceiling — must be accepted.
+#[test]
+fn golden_v8_max_amount_exact_ceiling_accepted() {
+    let t = T::new();
+    let r = t.client().try_subscribe(
+        &t.subscriber, &t.merchant, &t.token, &MAX_AMOUNT, &86_400_u64,
+    );
+    // subscribe succeeds (subscriber balance may be insufficient for the transfer,
+    // but subscribe() itself must not reject a valid amount).
+    assert!(
+        r.is_ok(),
+        "MAX_AMOUNT must be accepted by subscribe(); got {:?}", r
+    );
+    assert!(t.has_sub(), "subscription must be stored for MAX_AMOUNT");
+}
+
+/// Interval overflow guard: interval = u64::MAX is rejected with IntervalTooLong
+/// before any timestamp arithmetic can overflow.
+#[test]
+fn golden_v8_u64_max_interval_rejected_before_overflow() {
+    let t = T::new();
+    let r = t.client().try_subscribe(
+        &t.subscriber, &t.merchant, &t.token, &1_i128, &u64::MAX,
+    );
+    assert!(
+        matches!(r, Err(Ok(ContractError::IntervalTooLong))),
+        "u64::MAX interval must be rejected with IntervalTooLong; got {:?}", r
+    );
+    assert!(!t.has_sub(), "no subscription must exist for overflowing interval");
+}
+
+/// Interval = MAX_INTERVAL (31_536_000) is the exact ceiling — must be accepted.
+#[test]
+fn golden_v8_max_interval_exact_ceiling_accepted() {
+    let t = T::new();
+    let r = t.client().try_subscribe(
+        &t.subscriber, &t.merchant, &t.token, &1_i128, &31_536_000_u64,
+    );
+    assert!(r.is_ok(), "MAX_INTERVAL must be accepted by subscribe(); got {:?}", r);
+    assert!(t.has_sub(), "subscription must be stored for MAX_INTERVAL");
+}
+
+/// Interval = MAX_INTERVAL + 1 is one above the ceiling — rejected with IntervalTooLong.
+#[test]
+fn golden_v8_one_above_max_interval_rejected() {
+    let t = T::new();
+    let r = t.client().try_subscribe(
+        &t.subscriber, &t.merchant, &t.token, &1_i128, &31_536_001_u64,
+    );
+    assert!(
+        matches!(r, Err(Ok(ContractError::IntervalTooLong))),
+        "MAX_INTERVAL+1 must return IntervalTooLong; got {:?}", r
+    );
+    assert!(!t.has_sub());
 }
