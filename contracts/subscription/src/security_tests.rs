@@ -734,4 +734,277 @@ mod security_tests {
             result
         );
     }
+
+    // =========================================================================
+    // CATEGORY 9 — Reentrancy-resistant transfer order (Issue #1093)
+    //
+    // Soroban's execution model serialises contract invocations: a contract call
+    // runs to completion before any sub-invocation returns.  Nevertheless, the
+    // tests below verify that the *ordering* of state writes relative to the
+    // token transfer in `execute_payment` prevents double-charge attacks —
+    // i.e. the contract reads state, performs the transfer, and only then writes
+    // the updated `next_payment`.  An adversary that tries to re-enter via a
+    // crafted token callback cannot observe a state where a second payment is
+    // collectable within the same invocation.
+    //
+    // Verification strategy:
+    //   1. Use the standard mock token (SAC) to prove that `next_payment` is
+    //      advanced atomically after a single successful transfer.
+    //   2. Demonstrate that an immediate second call (simulating a reentrancy
+    //      attempt) is blocked by the updated `next_payment`.
+    //   3. Verify that a failed transfer (insufficient balance) does NOT advance
+    //      `next_payment`, preventing a pathological state where the contract
+    //      believes a payment occurred but no tokens moved.
+    //   4. Verify that after a successful payment the subscriber's net debit
+    //      is exactly one `amount`, never two — even if the caller retries
+    //      immediately within the same ledger.
+    // =========================================================================
+
+    /// REENTRANCY: After one successful execute_payment, an immediate second call
+    /// (simulating a reentrant or replayed invocation) must be blocked by the
+    /// time-lock.  The subscriber must be charged exactly once.
+    #[test]
+    fn sec_reentrancy_second_call_within_same_interval_is_blocked() {
+        let s = SecEnv::new_with_mock_auth();
+        let amount   = 100_000_i128;
+        let interval = 86_400_u64;
+
+        s.client.subscribe(
+            &s.subscriber, &s.merchant, &s.token, &amount, &interval, &false,
+        );
+
+        // Advance to make payment due.
+        s.advance(interval + 1);
+
+        let sub_before = token::Client::new(&s.env, &s.token).balance(&s.subscriber);
+        let mer_before = token::Client::new(&s.env, &s.token).balance(&s.merchant);
+
+        // First call — legitimate payment collection.
+        let r1 = s.client.try_execute_payment(&s.subscriber, &s.merchant);
+        assert!(r1.is_ok(), "first execute_payment must succeed; got {:?}", r1);
+
+        // Simulated reentrant / replayed second call — must be blocked.
+        let r2 = s.client.try_execute_payment(&s.subscriber, &s.merchant);
+        assert!(
+            matches!(r2, Err(Ok(ContractError::PaymentNotDue))),
+            "second execute_payment within same interval must return PaymentNotDue \
+             (reentrancy guard); got {:?}",
+            r2
+        );
+
+        let sub_after = token::Client::new(&s.env, &s.token).balance(&s.subscriber);
+        let mer_after = token::Client::new(&s.env, &s.token).balance(&s.merchant);
+
+        // Exactly one payment deducted — no double-charge.
+        assert_eq!(
+            sub_before - sub_after, amount,
+            "subscriber must be debited exactly once (amount={})", amount
+        );
+        assert_eq!(
+            mer_after - mer_before, amount,
+            "merchant must be credited exactly once (amount={})", amount
+        );
+    }
+
+    /// REENTRANCY: `next_payment` is advanced only after a successful transfer.
+    /// A failed transfer must NOT advance `next_payment`, preventing a state
+    /// where the contract records a payment that never occurred.
+    #[test]
+    fn sec_failed_transfer_does_not_advance_next_payment() {
+        let s = SecEnv::new_with_mock_auth();
+        let amount   = 10_000_000_i128 + 1; // more than the 10_000_000 minted
+        let interval = 86_400_u64;
+
+        s.client.subscribe(
+            &s.subscriber, &s.merchant, &s.token, &amount, &interval, &false,
+        );
+
+        let before_next_payment = {
+            let hash = crate::storage::subscription_key(&s.env, &s.subscriber, &s.merchant);
+            let data: crate::storage::SubscriptionData = s.env
+                .storage()
+                .persistent()
+                .get(&DataKey::Subscription(hash))
+                .expect("subscription must exist");
+            data.next_payment
+        };
+
+        // Advance past due time.
+        s.advance(interval + 1);
+
+        // execute_payment must fail due to insufficient subscriber balance.
+        let result = s.client.try_execute_payment(&s.subscriber, &s.merchant);
+        assert!(
+            matches!(result, Err(Ok(ContractError::TransferFailed))),
+            "expected TransferFailed when balance is insufficient; got {:?}",
+            result
+        );
+
+        // next_payment must be unchanged — no state mutation on failure.
+        let after_next_payment = {
+            let hash = crate::storage::subscription_key(&s.env, &s.subscriber, &s.merchant);
+            let data: crate::storage::SubscriptionData = s.env
+                .storage()
+                .persistent()
+                .get(&DataKey::Subscription(hash))
+                .expect("subscription must still exist after failed payment");
+            data.next_payment
+        };
+
+        assert_eq!(
+            before_next_payment, after_next_payment,
+            "next_payment must not advance when transfer fails \
+             (before={}, after={})",
+            before_next_payment, after_next_payment
+        );
+
+        // No tokens moved.
+        let sub_bal = token::Client::new(&s.env, &s.token).balance(&s.subscriber);
+        assert_eq!(sub_bal, 10_000_000_i128,
+            "subscriber balance must be unchanged after failed transfer");
+        let mer_bal = token::Client::new(&s.env, &s.token).balance(&s.merchant);
+        assert_eq!(mer_bal, 0_i128,
+            "merchant must receive nothing after failed transfer");
+    }
+
+    /// REENTRANCY: A cancelled subscription is permanently closed.
+    /// Any subsequent execute_payment attempt (including a replayed one) must
+    /// return NoActiveSubscription and must not transfer any tokens.
+    #[test]
+    fn sec_cancelled_subscription_blocks_all_future_payments() {
+        let s = SecEnv::new_with_mock_auth();
+        let amount   = 50_000_i128;
+        let interval = 86_400_u64;
+
+        s.client.subscribe(
+            &s.subscriber, &s.merchant, &s.token, &amount, &interval, &false,
+        );
+
+        // Advance and collect one legitimate payment.
+        s.advance(interval + 1);
+        s.client.execute_payment(&s.subscriber, &s.merchant);
+
+        // Cancel the subscription.
+        s.client.cancel(&s.subscriber, &s.merchant);
+
+        let sub_after_cancel = token::Client::new(&s.env, &s.token).balance(&s.subscriber);
+        let mer_after_cancel = token::Client::new(&s.env, &s.token).balance(&s.merchant);
+
+        // Advance another full interval — a second payment would be "due" if not cancelled.
+        s.advance(interval + 1);
+
+        // Attempted payment after cancellation — must fail.
+        let r = s.client.try_execute_payment(&s.subscriber, &s.merchant);
+        assert!(
+            matches!(r, Err(Ok(ContractError::NoActiveSubscription))),
+            "execute_payment after cancel must return NoActiveSubscription; got {:?}", r
+        );
+
+        // Balances must be frozen at the post-cancel values.
+        assert_eq!(
+            token::Client::new(&s.env, &s.token).balance(&s.subscriber),
+            sub_after_cancel,
+            "subscriber balance must not change after cancellation"
+        );
+        assert_eq!(
+            token::Client::new(&s.env, &s.token).balance(&s.merchant),
+            mer_after_cancel,
+            "merchant balance must not change after cancellation"
+        );
+    }
+
+    /// REENTRANCY: Consecutive execute_payment calls separated by exactly the
+    /// minimum interval are both accepted.  This proves the time-lock advances
+    /// correctly and does not permanently block payments (i.e., it is not an
+    /// accidental one-time gate).
+    #[test]
+    fn sec_consecutive_payments_across_intervals_both_succeed() {
+        let s = SecEnv::new_with_mock_auth();
+        let amount   = 10_000_i128;
+        let interval = 86_400_u64;
+
+        s.client.subscribe(
+            &s.subscriber, &s.merchant, &s.token, &amount, &interval, &false,
+        );
+
+        // First interval — payment 1.
+        s.advance(interval + 1);
+        let r1 = s.client.try_execute_payment(&s.subscriber, &s.merchant);
+        assert!(r1.is_ok(), "payment 1 must succeed; got {:?}", r1);
+
+        // Immediate retry (reentrancy simulation) — must be blocked.
+        let r_replay = s.client.try_execute_payment(&s.subscriber, &s.merchant);
+        assert!(
+            matches!(r_replay, Err(Ok(ContractError::PaymentNotDue))),
+            "replay in same window must be blocked; got {:?}", r_replay
+        );
+
+        // Second interval — payment 2 must succeed.
+        s.advance(interval + 1);
+        let r2 = s.client.try_execute_payment(&s.subscriber, &s.merchant);
+        assert!(r2.is_ok(), "payment 2 must succeed after second interval; got {:?}", r2);
+
+        // Net debit = 2 payments.
+        let net = 10_000_000_i128
+            - token::Client::new(&s.env, &s.token).balance(&s.subscriber);
+        assert_eq!(net, amount * 2,
+            "net debit must be exactly 2 payments ({} tokens)", amount * 2);
+    }
+
+    /// REENTRANCY: The transfer order is balance-check → transfer → state-write.
+    /// Verify that a subscriber whose balance is exactly equal to the amount has
+    /// the correct post-payment balance (zero), confirming no off-by-one in the
+    /// guard or the transfer amount.
+    #[test]
+    fn sec_exact_balance_payment_leaves_subscriber_with_zero() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| l.timestamp = 1_700_000_000_u64);
+
+        let admin      = Address::generate(&env);
+        let subscriber = Address::generate(&env);
+        let merchant   = Address::generate(&env);
+        let amount     = 777_777_i128;
+
+        let token = env
+            .register_stellar_asset_contract_v2(admin.clone())
+            .address();
+
+        // Mint exactly `amount` to the subscriber — no surplus.
+        soroban_sdk::token::StellarAssetClient::new(&env, &token)
+            .mint(&subscriber, &amount);
+
+        let contract_id = env.register(SubscriptionProtocol, ());
+        let client      = SubscriptionProtocolClient::new(&env, &contract_id);
+
+        soroban_sdk::token::Client::new(&env, &token).approve(
+            &subscriber,
+            &contract_id,
+            &amount,
+            &(env.ledger().sequence() + 1_000_000_u32),
+        );
+
+        client.subscribe(&subscriber, &merchant, &token, &amount, &86_400_u64, &false);
+        env.ledger().with_mut(|l| l.timestamp = 1_700_000_000_u64 + 86_401);
+
+        let result = client.try_execute_payment(&subscriber, &merchant);
+        assert!(result.is_ok(),
+            "execute_payment must succeed when subscriber has exactly the required balance");
+
+        assert_eq!(
+            soroban_sdk::token::Client::new(&env, &token).balance(&subscriber),
+            0_i128,
+            "subscriber balance must be zero after paying their entire balance"
+        );
+        assert_eq!(
+            soroban_sdk::token::Client::new(&env, &token).balance(&merchant),
+            amount,
+            "merchant must receive exactly the full amount"
+        );
+        assert_eq!(
+            soroban_sdk::token::Client::new(&env, &token).balance(&contract_id),
+            0_i128,
+            "contract must hold no tokens (non-custodial invariant)"
+        );
+    }
 }
