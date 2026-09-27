@@ -9,9 +9,14 @@
  *   CACHE_TTL_SUBSCRIPTIONS         (default: 60 s)
  *   CACHE_TTL_ANALYTICS             (default: 300 s)
  *   CACHE_TTL_SUBSCRIPTION_DETAIL   (default: 30 s)
+ *
+ * Distributed locks (#1067):
+ *   acquireLock / renewLock / releaseLock implement ownership-token-based
+ *   distributed locking so expired locks cannot be released by another worker.
  */
 
 import Redis from 'ioredis';
+import { randomUUID } from 'crypto';
 
 // ─── TTL configuration ────────────────────────────────────────────────────
 export const CACHE_TTL = {
@@ -243,5 +248,154 @@ export async function disconnectRedis(): Promise<void> {
     }
     redisClient = null;
     redisAvailable = false;
+  }
+}
+
+// ─── Distributed lock ownership tokens (#1067) ────────────────────────────
+
+/**
+ * Options for acquiring a distributed lock.
+ */
+export interface LockOptions {
+  /** Lock TTL in milliseconds. */
+  ttlMs: number;
+  /** Number of retry attempts after the first failure (default: 0 = no retry). */
+  retryCount?: number;
+  /** Delay between retry attempts in milliseconds (default: 100). */
+  retryDelayMs?: number;
+}
+
+/**
+ * A handle returned when a lock is successfully acquired.
+ * Must be passed back to renewLock / releaseLock so the ownership token
+ * can be verified atomically in Redis.
+ */
+export interface LockHandle {
+  /** The full Redis key used to store the lock (prefix: lock:{key}). */
+  key: string;
+  /** UUID ownership token stored as the lock value. */
+  token: string;
+  /** Unix epoch milliseconds when the lock expires. */
+  expiresAt: number;
+}
+
+/** Lua: atomically renew the lock TTL only if the token matches. */
+const RENEW_SCRIPT = `
+if redis.call('GET', KEYS[1]) == ARGV[1] then
+  return redis.call('PEXPIRE', KEYS[1], ARGV[2])
+else
+  return 0
+end
+`;
+
+/** Lua: atomically delete the lock only if the token matches. */
+const RELEASE_SCRIPT = `
+if redis.call('GET', KEYS[1]) == ARGV[1] then
+  return redis.call('DEL', KEYS[1])
+else
+  return 0
+end
+`;
+
+/** Sleep helper for retry back-off. */
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Acquire a distributed lock with an ownership token.
+ *
+ * Uses Redis SET NX PX so the lock is atomic: only one worker can hold it
+ * at a time.  Returns a LockHandle containing the ownership token, or null
+ * if the lock could not be acquired within the allowed retry budget.
+ *
+ * When Redis is unavailable the function returns null (graceful fallback).
+ */
+export async function acquireLock(
+  key: string,
+  options: LockOptions,
+): Promise<LockHandle | null> {
+  const client = getRedisClient();
+  if (!client) return null;
+
+  const redisKey = `lock:${key}`;
+  const { ttlMs, retryCount = 0, retryDelayMs = 100 } = options;
+  const token = randomUUID();
+  const maxAttempts = 1 + retryCount;
+
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    try {
+      // SET key value NX PX ttl  — returns 'OK' on success, null on failure
+      const result = await client.set(redisKey, token, 'NX', 'PX', ttlMs);
+      if (result === 'OK') {
+        return { key: redisKey, token, expiresAt: Date.now() + ttlMs };
+      }
+    } catch (err) {
+      console.warn('[redis] acquireLock error:', (err as Error).message);
+      return null;
+    }
+
+    if (attempt < maxAttempts - 1) {
+      await sleep(retryDelayMs);
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Renew a lock's TTL using the ownership token.
+ *
+ * Returns true if the TTL was extended, false if the lock has expired or
+ * is now held by a different worker (token mismatch).
+ *
+ * When Redis is unavailable returns false (graceful fallback).
+ */
+export async function renewLock(
+  handle: LockHandle,
+  ttlMs: number,
+): Promise<boolean> {
+  const client = getRedisClient();
+  if (!client) return false;
+
+  try {
+    const result = await client.eval(
+      RENEW_SCRIPT,
+      1,
+      handle.key,
+      handle.token,
+      String(ttlMs),
+    ) as number;
+    return result === 1;
+  } catch (err) {
+    console.warn('[redis] renewLock error:', (err as Error).message);
+    return false;
+  }
+}
+
+/**
+ * Release a lock using the ownership token.
+ *
+ * Returns true if the lock was deleted, false if it has already expired or
+ * is held by a different worker.  An expired lock owned by another worker
+ * can never be released by this handle.
+ *
+ * When Redis is unavailable returns false (graceful fallback).
+ */
+export async function releaseLock(handle: LockHandle): Promise<boolean> {
+  const client = getRedisClient();
+  if (!client) return false;
+
+  try {
+    const result = await client.eval(
+      RELEASE_SCRIPT,
+      1,
+      handle.key,
+      handle.token,
+    ) as number;
+    return result === 1;
+  } catch (err) {
+    console.warn('[redis] releaseLock error:', (err as Error).message);
+    return false;
   }
 }
