@@ -62,13 +62,13 @@ describe("AddressBookModal focus restoration", () => {
     const opener = screen.getByRole("button", { name: "Open address book" });
     opener.focus();
     fireEvent.click(opener);
+    const focusOpener = jest.spyOn(opener, "focus");
 
     const removeOpener = screen.getByRole("button", { name: "Remove opener" });
-    removeOpener.focus();
     fireEvent.click(removeOpener);
     fireEvent.click(screen.getByRole("button", { name: "Close address book" }));
 
-    expect(removeOpener).toHaveFocus();
+    expect(focusOpener).not.toHaveBeenCalled();
     expect(opener).not.toBeInTheDocument();
   });
 });
