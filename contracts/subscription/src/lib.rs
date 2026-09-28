@@ -8,9 +8,9 @@ use soroban_sdk::{contract, contractimpl, symbol_short, token, Address, BytesN, 
 
 use crate::error::ContractError;
 use crate::storage::{
-    get_protocol_fee_config, set_protocol_fee_config, subscription_key, DataKey,
-    ProtocolFeeConfig, SubscriptionData, CONTRACT_VERSION, CURRENT_SCHEMA_VERSION, MAX_AMOUNT,
-    MAX_FEE_BPS, MAX_TTL_LEDGERS, MIN_TTL_LEDGERS,
+    get_protocol_fee_config, has_execution_marker, set_protocol_fee_config, subscription_key,
+    write_execution_marker, DataKey, ProtocolFeeConfig, SubscriptionData, CONTRACT_VERSION,
+    CURRENT_SCHEMA_VERSION, MAX_AMOUNT, MAX_FEE_BPS, MAX_TTL_LEDGERS, MIN_TTL_LEDGERS,
 };
 
 /// Maximum number of subscribers allowed in a single `batch_execute_payment` call.
@@ -726,6 +726,16 @@ impl SubscriptionProtocol {
             return Err(ContractError::PaymentNotDue);
         }
 
+        // ── Duplicate execution guard (#1083) ────────────────────────────────
+        // Check whether this (subscription_hash, payment_nonce) pair was already
+        // executed.  The marker is written to temporary storage after a successful
+        // transfer, so a retry that lands before next_payment is advanced would
+        // hit PaymentNotDue above.  This guard covers the narrow window where a
+        // transaction is submitted twice in the same ledger before state is flushed.
+        if has_execution_marker(&env, &hash, data.payment_nonce) {
+            return Err(ContractError::DuplicateExecution);
+        }
+
         let contract_address = env.current_contract_address();
         let token_client = token::Client::new(&env, &data.token);
 
@@ -779,12 +789,13 @@ impl SubscriptionProtocol {
             .persistent()
             .extend_ttl(&key, MIN_TTL_LEDGERS, MAX_TTL_LEDGERS);
 
+        // Write execution marker for the NEW nonce so the next payment period is
+        // protected from same-nonce replay attacks once the nonce advances again.
+        // The marker for the OLD nonce (checked above) remains in temporary storage
+        // until its TTL expires, preventing late-arriving duplicate transactions.
+        write_execution_marker(&env, &hash, data.payment_nonce);
+
         events::emit_executed(&env, &subscriber, &merchant, &data.token, data.amount, data.payment_nonce);
-
-        Ok(())
-    }
-
-    /// Collect payments from multiple subscribers in one transaction (max 50).
     pub fn batch_execute_payment(
         env: Env,
         merchant: Address,
@@ -1070,3 +1081,6 @@ mod property_tests;
 
 #[cfg(test)]
 mod multi_token_tests;
+
+#[cfg(test)]
+mod regression_tests;

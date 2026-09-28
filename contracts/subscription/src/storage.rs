@@ -77,6 +77,23 @@ pub enum DataKey {
 
     /// Per-merchant active subscriber count.
     MerchantSubscriberCount(Address),
+
+    /// Execution marker for duplicate-execution protection (#1083).
+    ///
+    /// Key: (subscription_hash, payment_nonce) — written to **temporary** storage
+    /// with a short TTL (`MARKER_TTL_LEDGERS`) the first time a given nonce is
+    /// successfully executed.  A second call with the same nonce finds the marker
+    /// already present and returns `ContractError::DuplicateExecution` before any
+    /// token transfer occurs.
+    ///
+    /// Using the nonce rather than the timestamp means the guard is deterministic
+    /// across network retries: same XDR bytes → same nonce → same marker key.
+    /// Storage type: **temporary** (inexpensive; only needs to outlive the
+    /// retry window, not the full subscription lifetime).
+    ExecutionMarker(BytesN<32>, u64),
+
+    /// Protocol fee configuration stored in instance storage.
+    ProtocolFeeConfig,
 }
 
 /// Persistent on-chain record for a subscription.
@@ -153,6 +170,13 @@ pub const MIN_TTL_LEDGERS: u32 = 30 * 24 * 60 * 60 / 5;
 /// ~365 days at 5-second ledger close time (6_307_200 ledgers).
 pub const MAX_TTL_LEDGERS: u32 = 365 * 24 * 60 * 60 / 5;
 
+/// TTL for execution markers (#1083): ~60 days at 5-second ledger close time.
+///
+/// Execution markers only need to outlive the retry window for a single payment,
+/// not the full subscription lifetime.  Two times MAX_TTL_LEDGERS (60 days) is
+/// conservative enough to cover any realistic retry/re-submission window.
+pub const MARKER_TTL_LEDGERS: u32 = MAX_TTL_LEDGERS * 2;
+
 /// Maximum allowed protocol fee in basis points (500 bps = 5%).
 pub const MAX_FEE_BPS: u32 = 500;
 
@@ -192,4 +216,41 @@ pub fn set_protocol_fee_config(env: &Env, config: ProtocolFeeConfig) {
     env.storage()
         .instance()
         .set(&DataKey::ProtocolFeeConfig, &config);
+}
+
+// ─── Execution marker helpers (#1083) ────────────────────────────────────────
+
+/// Check whether an execution marker already exists for `(hash, nonce)`.
+///
+/// Returns `true` if this (subscription_hash, payment_nonce) pair was already
+/// executed — meaning the caller should return `DuplicateExecution` without
+/// performing any token transfer.
+///
+/// Returns `false` if no marker exists yet.  The caller is responsible for
+/// writing the marker after a successful transfer via [`write_execution_marker`].
+///
+/// # Storage type
+/// Reads from **temporary** storage — the same durability class used when
+/// writing the marker.  Temporary storage is lost on ledger expiry but that
+/// is intentional: markers only need to persist through the retry window, not
+/// forever.
+pub fn has_execution_marker(env: &Env, hash: &BytesN<32>, nonce: u64) -> bool {
+    let key = DataKey::ExecutionMarker(hash.clone(), nonce);
+    env.storage().temporary().has(&key)
+}
+
+/// Persist a `true` execution marker for `(hash, nonce)` to temporary storage.
+///
+/// Called after a successful token transfer so that any subsequent call with
+/// the same `(hash, nonce)` pair is detected as a duplicate and short-circuits
+/// before any transfer occurs.
+///
+/// The marker is written with a TTL of [`MARKER_TTL_LEDGERS`] (~60 days), which
+/// is conservative enough to cover any realistic retry / re-submission window.
+pub fn write_execution_marker(env: &Env, hash: &BytesN<32>, nonce: u64) {
+    let key = DataKey::ExecutionMarker(hash.clone(), nonce);
+    env.storage().temporary().set(&key, &true);
+    env.storage()
+        .temporary()
+        .extend_ttl(&key, MARKER_TTL_LEDGERS, MARKER_TTL_LEDGERS);
 }

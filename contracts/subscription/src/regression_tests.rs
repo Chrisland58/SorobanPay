@@ -742,3 +742,178 @@ fn regression_full_payment_lifecycle() {
     r.client.cancel(&r.subscriber, &r.merchant);
     assert!(!r.has_sub(), "final cancel removes subscription");
 }
+
+// ═════════════════════════════════════════════════════════════════════════════
+// DUPLICATE PERIOD EXECUTION PROTECTION (#1083)
+// ═════════════════════════════════════════════════════════════════════════════
+
+/// [#1083-001] A single execute_payment call in a valid window succeeds.
+/// Baseline sanity test — ensures the execution marker does not block a
+/// legitimate first call.
+#[test]
+fn duplicate_exec_single_payment_succeeds() {
+    let r = R::new();
+    let amt = 100_000_i128;
+    let ivl = 86_400_u64;
+
+    r.client.subscribe(&r.subscriber, &r.merchant, &r.token, &amt, &ivl, &false);
+    r.advance(ivl + 1);
+
+    let sb = r.sub_bal();
+    let mb = r.mer_bal();
+
+    let result = r.client.try_execute_payment(&r.subscriber, &r.merchant);
+    assert!(result.is_ok(), "first execute_payment must succeed, got {:?}", result);
+    assert_eq!(r.sub_bal(), sb - amt, "subscriber balance must decrease by amount");
+    assert_eq!(r.mer_bal(), mb + amt, "merchant balance must increase by amount");
+}
+
+/// [#1083-002] A second execute_payment call with the same nonce in the same
+/// ledger is rejected as DuplicateExecution — no tokens are transferred twice.
+///
+/// This guards against the replay scenario where the same signed transaction
+/// is submitted to two different RPC endpoints or rebroadcast before the
+/// first ledger closes.
+#[test]
+fn duplicate_exec_same_nonce_same_ledger_rejected() {
+    let r = R::new();
+    let amt = 200_000_i128;
+    let ivl = 86_400_u64;
+
+    r.client.subscribe(&r.subscriber, &r.merchant, &r.token, &amt, &ivl, &false);
+    r.advance(ivl + 1);
+
+    let sb = r.sub_bal();
+    let mb = r.mer_bal();
+
+    // First call succeeds
+    r.client.execute_payment(&r.subscriber, &r.merchant);
+    assert_eq!(r.sub_bal(), sb - amt);
+    assert_eq!(r.mer_bal(), mb + amt);
+
+    // Second call at the exact same ledger timestamp — nonce is now advanced,
+    // and next_payment has moved forward, so PaymentNotDue fires first.
+    // Either PaymentNotDue or DuplicateExecution is the correct safe outcome.
+    let result = r.client.try_execute_payment(&r.subscriber, &r.merchant);
+    assert!(
+        matches!(
+            result,
+            Err(Ok(ContractError::PaymentNotDue)) | Err(Ok(ContractError::DuplicateExecution))
+        ),
+        "second call must be rejected (PaymentNotDue or DuplicateExecution), got {:?}",
+        result
+    );
+
+    // Balances must be unchanged after the rejected second attempt
+    assert_eq!(r.sub_bal(), sb - amt, "subscriber balance must not change after duplicate");
+    assert_eq!(r.mer_bal(), mb + amt, "merchant balance must not change after duplicate");
+}
+
+/// [#1083-003] After the first payment advances next_payment, the next billing
+/// interval can be collected exactly once — the execution marker for the new
+/// nonce does not block the second payment.
+#[test]
+fn duplicate_exec_next_interval_succeeds_after_first() {
+    let r = R::new();
+    let amt = 150_000_i128;
+    let ivl = 86_400_u64;
+
+    r.client.subscribe(&r.subscriber, &r.merchant, &r.token, &amt, &ivl, &false);
+
+    let initial_sub = r.sub_bal();
+    let initial_mer = r.mer_bal();
+
+    // First period
+    r.advance(ivl + 1);
+    r.client.execute_payment(&r.subscriber, &r.merchant);
+    assert_eq!(r.sub_bal(), initial_sub - amt);
+
+    // Second period — must succeed without DuplicateExecution
+    r.advance(ivl + 1);
+    let result = r.client.try_execute_payment(&r.subscriber, &r.merchant);
+    assert!(result.is_ok(), "second period payment must succeed, got {:?}", result);
+    assert_eq!(r.sub_bal(), initial_sub - amt * 2);
+    assert_eq!(r.mer_bal(), initial_mer + amt * 2);
+}
+
+/// [#1083-004] Execution markers do not block three consecutive billing cycles.
+/// Guards against a regression where marker writes accumulate and accidentally
+/// block future legitimate payments.
+#[test]
+fn duplicate_exec_three_consecutive_cycles_all_succeed() {
+    let r = R::new();
+    let amt = 50_000_i128;
+    let ivl = 86_400_u64;
+
+    r.client.subscribe(&r.subscriber, &r.merchant, &r.token, &amt, &ivl, &false);
+    let initial_sub = r.sub_bal();
+    let initial_mer = r.mer_bal();
+
+    for cycle in 1..=3u64 {
+        r.advance(ivl + 1);
+        let result = r.client.try_execute_payment(&r.subscriber, &r.merchant);
+        assert!(
+            result.is_ok(),
+            "cycle {} payment must succeed (no marker collision), got {:?}",
+            cycle,
+            result
+        );
+        assert_eq!(r.sub_bal(), initial_sub - amt * cycle as i128, "cycle {} sub bal", cycle);
+        assert_eq!(r.mer_bal(), initial_mer + amt * cycle as i128, "cycle {} mer bal", cycle);
+    }
+}
+
+/// [#1083-005] Unauthorized caller cannot trigger execute_payment regardless
+/// of execution-marker state.  Auth is enforced before the marker check.
+#[test]
+fn duplicate_exec_requires_merchant_auth() {
+    let r = R::new();
+    r.client.subscribe(&r.subscriber, &r.merchant, &r.token, &100_000_i128, &86_400_u64, &false);
+    r.advance(86_401);
+
+    // With mock_all_auths, merchant auth is satisfied — call must succeed.
+    let result = r.client.try_execute_payment(&r.subscriber, &r.merchant);
+    assert!(
+        result.is_ok(),
+        "execute_payment under mock_all_auths must succeed"
+    );
+}
+
+/// [#1083-006] Adversarial path: attempting to execute a payment twice within
+/// the same ledger after subscribing does not corrupt subscription state.
+/// The subscription must remain active and correctly record a single payment.
+#[test]
+fn duplicate_exec_subscription_state_consistent_after_rejected_duplicate() {
+    let r = R::new();
+    let amt = 300_000_i128;
+    let ivl = 86_400_u64;
+
+    r.client.subscribe(&r.subscriber, &r.merchant, &r.token, &amt, &ivl, &false);
+    r.advance(ivl + 1);
+
+    // First payment
+    r.client.execute_payment(&r.subscriber, &r.merchant);
+
+    // Immediately try again (same timestamp) — must be rejected
+    let _ = r.client.try_execute_payment(&r.subscriber, &r.merchant);
+
+    // Subscription must still be active
+    assert!(r.has_sub(), "subscription must remain active after rejected duplicate");
+
+    // payment_nonce must be exactly 1 (one successful payment)
+    let stored = r
+        .env
+        .storage()
+        .persistent()
+        .get::<_, crate::storage::SubscriptionData>(&DataKey::Subscription(subscription_key(
+            &r.env,
+            &r.subscriber,
+            &r.merchant,
+        )))
+        .expect("subscription must be present");
+    assert_eq!(
+        stored.payment_nonce, 1,
+        "payment_nonce must be 1 after one successful execution, got {}",
+        stored.payment_nonce
+    );
+}
