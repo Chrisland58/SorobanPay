@@ -424,6 +424,7 @@ impl SubscriptionProtocol {
             amount,
             interval,
             next_payment,
+            is_paused: false,
         };
 
         // 5. Persist subscription.
