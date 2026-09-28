@@ -13,6 +13,7 @@ import OnboardingGuide from '@/components/OnboardingGuide';
 import ShortcutsHelpModal from '@/components/ShortcutsHelpModal';
 import { useWallet } from '@/hooks/useWallet';
 import { useKeyboardShortcuts, SECTION_IDS } from '@/hooks/useKeyboardShortcuts';
+import { useClipboard } from '@/hooks/useClipboard';
 
 // ─── Live-region for screen-reader announcements ──────────────────────────────
 let _announce: ((msg: string) => void) | null = null;
@@ -79,7 +80,7 @@ export default function AppPage() {
     disconnect,
   } = useWallet();
 
-  const [copied, setCopied] = useState(false);
+  const { copy, status: copyStatus } = useClipboard();
   const { isHelpOpen, openHelp, closeHelp } = useKeyboardShortcuts();
 
   const shortKey = publicKey
@@ -88,9 +89,7 @@ export default function AppPage() {
 
   async function copyKey() {
     if (!publicKey) return;
-    await navigator.clipboard.writeText(publicKey);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
+    await copy(publicKey);
   }
 
   return (
@@ -165,6 +164,7 @@ export default function AppPage() {
                 <span className="h-2 w-2 rounded-full bg-green-400 flex-shrink-0" aria-hidden="true" />
                 <span className="text-sm text-gray-300 flex-shrink-0">Connected:</span>
                 <button
+                  type="button"
                   onClick={copyKey}
                   title={publicKey}
                   aria-label={`Copy full public key: ${publicKey}`}
@@ -174,9 +174,10 @@ export default function AppPage() {
                 </button>
                 <span
                   aria-live="polite"
-                  className={`text-xs transition-opacity duration-300 flex-shrink-0 ${copied ? 'text-green-400 opacity-100' : 'opacity-0'}`}
+                  role={copyStatus === 'error' ? 'alert' : 'status'}
+                  className={`text-xs flex-shrink-0 ${copyStatus === 'copied' ? 'text-green-400' : copyStatus === 'error' ? 'text-red-400' : 'sr-only'}`}
                 >
-                  Copied!
+                  {copyStatus === 'copied' ? 'Wallet address copied.' : copyStatus === 'error' ? 'Could not copy wallet address. Try again.' : ''}
                 </span>
               </div>
               <button
