@@ -77,6 +77,17 @@ describe('SubscriptionWizard responsive behavior', () => {
     expect(screen.getByRole('alert')).toHaveTextContent(/valid stellar g-address/i);
   });
 
+  it('rejects the connected wallet address as its own merchant', async () => {
+    const user = userEvent.setup();
+    render(<SubscriptionWizard />);
+
+    await user.type(screen.getByLabelText(/merchant address/i), `G${'S'.repeat(55)}`);
+    await user.keyboard('{Enter}');
+
+    expect(screen.getByRole('alert')).toHaveTextContent(/cannot be the same as your subscriber address/i);
+    expect(screen.getByRole('heading', { name: /choose a merchant/i })).toBeInTheDocument();
+  });
+
   it('shows signing progress, reports submission errors, and recovers on retry', async () => {
     const user = userEvent.setup();
     let rejectSubmission!: (reason: Error) => void;
