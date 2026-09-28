@@ -139,26 +139,6 @@ model Subscription {
   @@unique([subscriber, merchant], name: "subscriber_merchant")
 }
 
-// Payment retry tracking (automated retry system)
-model PaymentRetry {
-  id            Int       @id @default(autoincrement())
-  subscriber    String
-  merchant      String
-  amount        String    @default("0")
-  token         String    @default("")
-  attemptNumber Int
-  status        String    @default("pending") // pending | succeeded | failed | cancelled
-  scheduledAt   DateTime
-  attemptedAt   DateTime?
-  error         String?
-  jobId         String?
-  createdAt     DateTime  @default(now())
-  updatedAt     DateTime  @updatedAt
-
-  @@index([subscriber, merchant])
-  @@index([status, scheduledAt])
-}
-
 // BE-68: Email notification preferences
 model NotificationPreference {
   id           Int      @id @default(autoincrement())
@@ -171,19 +151,21 @@ model NotificationPreference {
   updatedAt    DateTime @updatedAt
 }
 
-// BE (payment-retry): Tracks individual retry attempts for failed payments.
+// Payment retry tracking (automated retry system)
+// Tracks individual retry attempts for failed payments.
 // status: "pending" | "processing" | "succeeded" | "failed" | "cancelled"
 model PaymentRetry {
   id            Int       @id @default(autoincrement())
   subscriber    String
   merchant      String
-  amount        String    // token amount at time of failure (informational)
+  amount        String    // token amount in smallest unit (stored as string)
   token         String    @default("")
-  attemptNumber Int       // 1-based: 1st retry, 2nd retry, 3rd retry
-  status        String    @default("pending")
+  attemptNumber Int       // 1-based: 1st retry, 2nd retry, etc.
+  status        String    @default("pending") // pending | processing | succeeded | failed | cancelled
   scheduledAt   DateTime  // when this attempt should be executed
   executedAt    DateTime? // when execution was actually attempted
   error         String?   // last error message if status="failed"
+  jobId         String?   // BullMQ job ID for retry queue
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
 
@@ -202,23 +184,29 @@ model RetryConfig {
   updatedAt       DateTime @updatedAt
 }
 
-// Merged from two duplicate PaymentRetry blocks.
-// Superset of all fields from both definitions.
-model PaymentRetry {
-  id           Int      @id @default(autoincrement())
-  subscriber   String
-  merchant     String
-  token        String
-  amount       String   // Payment amount in token's smallest unit (stored as string)
-  attemptCount Int      @default(0)
-  lastAttempt  DateTime?
-  nextRetryAt  DateTime?
-  status       String   @default("pending") // "pending" | "succeeded" | "failed" | "abandoned"
-  errorMessage String?
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+// FE-1060: Payment idempotency tracking
+// Persists idempotency keys and returns original results for safe retries
+// while rejecting conflicting payload reuse.
+model PaymentIdempotency {
+  id               Int      @id @default(autoincrement())
+  /// Unique idempotency key from caller (e.g. UUID, or merchant-provided)
+  idempotencyKey   String   @unique @db.VarChar(255)
+  /// Payment participants (for tenant isolation and lookup)
+  subscriber       String   @db.VarChar(255)
+  merchant         String   @db.VarChar(255)
+  /// Payment details (for conflict detection)
+  token            String   @db.VarChar(255)
+  amount           String   @db.VarChar(255)
+  /// Result of the payment (if succeeded)
+  txHash           String?  @unique @db.VarChar(255)
+  /// Idempotency state: "pending" | "succeeded" | "failed"
+  status           String   @default("pending") @db.VarChar(50)
+  /// Error message if status="failed" (for observability)
+  error            String?  @db.Text
+  /// Audit trail
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
 
   @@index([subscriber, merchant])
-  @@index([nextRetryAt])
-  @@index([status])
+  @@index([subscriber, merchant, token, amount])
 }
