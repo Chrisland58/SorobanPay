@@ -4,6 +4,9 @@ mod error;
 mod events;
 mod storage;
 
+#[cfg(test)]
+mod test_upgrade;
+
 use soroban_sdk::{contract, contractimpl, token, Address, Env, Symbol};
 
 use crate::error::ContractError;
@@ -424,6 +427,7 @@ impl SubscriptionProtocol {
             amount,
             interval,
             next_payment,
+            is_paused: false,
         };
 
         // 5. Persist subscription.

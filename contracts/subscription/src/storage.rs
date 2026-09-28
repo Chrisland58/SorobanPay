@@ -1,4 +1,4 @@
-use soroban_sdk::{contracttype, Address};
+use soroban_sdk::{contracttype, Address, Env};
 
 // ==================== Version Metadata ====================
 /// Contract semantic version: MAJOR.MINOR.PATCH
@@ -12,6 +12,66 @@ pub const VERSION_PATCH: u32 = 0;
 
 /// Human-readable contract identifier for integration verification
 pub const CONTRACT_NAME: &str = "SorobanPay-SubscriptionProtocol";
+
+// ==================== Storage Version ====================
+
+/// Monotonically increasing integer that identifies the on-chain storage schema.
+pub const STORAGE_VERSION: u32 = 1;
+
+/// Singleton key for the schema version in instance storage.
+#[contracttype]
+pub enum MetaKey {
+    StorageVersion,
+}
+
+// ==================== Migration ====================
+
+/// Outcome returned by [`ensure_storage_version`].
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum MigrationOutcome {
+    AlreadyCurrent,
+    Migrated { from: u32 },
+}
+
+/// Ensure on-chain instance storage is at `STORAGE_VERSION`.
+/// Idempotent: safe to call multiple times per transaction.
+pub fn ensure_storage_version(env: &Env) -> Result<MigrationOutcome, StorageVersionError> {
+    let current: u32 = env
+        .storage()
+        .instance()
+        .get(&MetaKey::StorageVersion)
+        .unwrap_or(0u32);
+
+    if current == STORAGE_VERSION {
+        return Ok(MigrationOutcome::AlreadyCurrent);
+    }
+    if current > STORAGE_VERSION {
+        return Err(StorageVersionError::DowngradeRejected { found: current });
+    }
+
+    let from_version = current;
+    let mut v = current;
+    while v < STORAGE_VERSION {
+        v += 1;
+        match v {
+            1 => { /* v0→v1: baseline schema, no field transforms needed */ }
+            _ => return Err(StorageVersionError::UnknownVersion { version: v }),
+        }
+    }
+
+    env.storage()
+        .instance()
+        .set(&MetaKey::StorageVersion, &STORAGE_VERSION);
+
+    Ok(MigrationOutcome::Migrated { from: from_version })
+}
+
+/// Errors from the storage migration subsystem.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum StorageVersionError {
+    DowngradeRejected { found: u32 },
+    UnknownVersion    { version: u32 },
+}
 
 // ==================== Storage & Data Structures ====================
 
