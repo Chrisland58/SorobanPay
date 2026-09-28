@@ -77,6 +77,10 @@ pub enum DataKey {
 
     /// Per-merchant active subscriber count.
     MerchantSubscriberCount(Address),
+
+    /// Protocol fee configuration.
+    /// Storage type: **instance**.
+    ProtocolFeeConfig,
 }
 
 /// Persistent on-chain record for a subscription.
@@ -155,6 +159,40 @@ pub const MAX_TTL_LEDGERS: u32 = 365 * 24 * 60 * 60 / 5;
 
 /// Maximum allowed protocol fee in basis points (500 bps = 5%).
 pub const MAX_FEE_BPS: u32 = 500;
+
+// ─── Storage & Batch Limit Constants (Issue #1089) ────────────────────────────
+
+/// Maximum number of active subscribers allowed per merchant.
+///
+/// Bounding the per-merchant roster protects against unbounded growth in the
+/// `MerchantIndex` and `MerchantSubscribers` persistent storage vectors.
+/// Merchants that reach this cap must wait for cancellations before accepting
+/// new subscribers.
+///
+/// Value: 10_000 subscribers per merchant.
+pub const MAX_SUBSCRIBERS_PER_MERCHANT: u32 = 10_000;
+
+/// Maximum number of subscribers allowed in a single `batch_execute_payment` call.
+///
+/// Enforced before any writes to prevent partial-state corruption when a batch
+/// is too large to complete within the Soroban instruction budget.
+///
+/// Value: 50 subscribers per batch.  This mirrors `BATCH_MAX_SIZE` in `lib.rs`
+/// and is the authoritative value read by storage-limit tests.
+pub const BATCH_SIZE_LIMIT: u32 = 50;
+
+/// Maximum byte length of any metadata string stored on-chain (e.g. custom
+/// subscription labels or merchant display names, if added in future fields).
+///
+/// Limits ledger write cost per entry.  Value: 256 bytes.
+pub const MAX_METADATA_LEN: u32 = 256;
+
+/// Minimum number of stroops that must remain in the subscriber's balance
+/// after a payment for the transfer to be considered safe.  Currently 0 —
+/// subscribers may drain their balance to exactly zero.
+///
+/// Stored as a constant so future policy changes are a single-line edit.
+pub const MIN_POST_PAYMENT_BALANCE: i128 = 0;
 
 // ─── ProtocolFeeConfig ────────────────────────────────────────────────────────
 
