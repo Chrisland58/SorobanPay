@@ -13,6 +13,7 @@ import OnboardingGuide from '@/components/OnboardingGuide';
 import ShortcutsHelpModal from '@/components/ShortcutsHelpModal';
 import { useWallet } from '@/hooks/useWallet';
 import { useKeyboardShortcuts, SECTION_IDS } from '@/hooks/useKeyboardShortcuts';
+import BottomNavBar from '@/components/BottomNavBar';
 
 // ─── Live-region for screen-reader announcements ──────────────────────────────
 let _announce: ((msg: string) => void) | null = null;
@@ -99,7 +100,7 @@ export default function AppPage() {
       <ShortcutsTriggerButton onClick={openHelp} />
       <ShortcutsHelpModal isOpen={isHelpOpen} onClose={closeHelp} />
 
-      <main className="min-h-screen flex flex-col items-center px-4 py-12">
+      <main className="min-h-screen flex flex-col items-center px-4 py-12 pb-24 md:pb-12">
         {/* Onboarding guide */}
         <OnboardingGuide isConnected={!!publicKey} />
 
@@ -276,6 +277,7 @@ export default function AppPage() {
           </section>
         )}
       </main>
+      <BottomNavBar />
     </>
   );
 }
