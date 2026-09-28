@@ -53,6 +53,7 @@ export interface TokenComboboxProps {
   id: string;
   value: string;
   onChange: (value: string) => void;
+  onBlur?: () => void;
   disabled?: boolean;
   hasError?: boolean;
   tokens: KnownToken[];
@@ -85,6 +86,7 @@ export function TokenCombobox({
   id,
   value,
   onChange,
+  onBlur,
   disabled = false,
   hasError = false,
   tokens,
@@ -332,6 +334,7 @@ export function TokenCombobox({
         placeholder="Search token (USDC, EURC…) or paste contract address"
         onChange={handleInputChange}
         onFocus={openDropdown}
+        onBlur={onBlur}
         onKeyDown={handleKeyDown}
         className={`${inputCls} ${errorCls} pr-10`}
       />

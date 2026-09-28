@@ -53,6 +53,7 @@ export interface AddressBookModalProps
   > {
   isOpen: boolean;
   onClose: () => void;
+  onSelect?: (address: string) => void;
   /** Optional: pre-select an address for quick "add this address" flow */
   prefilledAddress?: string;
 }
@@ -241,10 +242,12 @@ function EntryRow({
   entry,
   onUpdate,
   onDelete,
+  onSelect,
 }: {
   entry: AddressBookEntry;
   onUpdate: (address: string, label: string) => void;
   onDelete: (address: string) => void;
+  onSelect?: (address: string) => void;
 }) {
   const [isEditing, setIsEditing] = useState(false);
   const [editValue, setEditValue] = useState(entry.label);
@@ -266,28 +269,46 @@ function EntryRow({
     <li className="flex items-start gap-3 rounded-lg border border-gray-700/60 bg-gray-800/40 px-3 py-3 group">
       <div className="flex-1 min-w-0 space-y-0.5">
         {isEditing ? (
-          <input
-            ref={inputRef}
-            type="text"
-            value={editValue}
-            onChange={(e) => setEditValue(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') commitEdit();
-              if (e.key === 'Escape') setIsEditing(false);
-            }}
-            className={inputCls + ' py-1 text-sm'}
-            aria-label={`Edit label for ${entry.address}`}
-          />
+          <>
+            <input
+              ref={inputRef}
+              type="text"
+              value={editValue}
+              onChange={(e) => setEditValue(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') commitEdit();
+                if (e.key === 'Escape') setIsEditing(false);
+              }}
+              className={inputCls + ' py-1 text-sm'}
+              aria-label={`Edit label for ${entry.address}`}
+            />
+            <p
+              className="font-mono text-xs text-gray-500 truncate mt-1"
+              title={entry.address}
+              aria-label={`Address: ${entry.address}`}
+            >
+              {truncateAddress(entry.address, 10)}
+            </p>
+          </>
         ) : (
-          <p className="font-medium text-gray-100 text-sm truncate">{entry.label}</p>
+          <button
+            type="button"
+            onClick={() => onSelect?.(entry.address)}
+            disabled={!onSelect}
+            className={`w-full text-left rounded-md -ml-2 p-2 transition-colors ${
+              onSelect ? 'hover:bg-gray-700/60 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400' : ''
+            }`}
+          >
+            <p className="font-medium text-gray-100 text-sm truncate">{entry.label}</p>
+            <p
+              className="font-mono text-xs text-gray-500 truncate"
+              title={entry.address}
+              aria-label={`Address: ${entry.address}`}
+            >
+              {truncateAddress(entry.address, 10)}
+            </p>
+          </button>
         )}
-        <p
-          className="font-mono text-xs text-gray-500 truncate"
-          title={entry.address}
-          aria-label={`Address: ${entry.address}`}
-        >
-          {truncateAddress(entry.address, 10)}
-        </p>
       </div>
 
       <div className="flex items-center gap-1.5 shrink-0">
@@ -374,6 +395,7 @@ export function AddressBookModal({
   deleteEntry,
   importBook,
   exportBook,
+  onSelect,
   prefilledAddress,
 }: AddressBookModalProps) {
   const dialogRef = useRef<HTMLDivElement>(null);
@@ -605,6 +627,7 @@ export function AddressBookModal({
                     entry={entry}
                     onUpdate={updateEntry}
                     onDelete={deleteEntry}
+                    onSelect={onSelect}
                   />
                 ))
               )}

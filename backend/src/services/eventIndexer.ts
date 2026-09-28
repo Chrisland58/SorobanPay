@@ -314,7 +314,7 @@ export class EventIndexer {
       });
 
       // Post-store: update state machine
-      await applyEvent(subscriber, merchant, eventType as any, { amount: amount ?? '0' });
+      await applyEvent(subscriber, merchant, eventType as any, { amount: amount ?? '0', token: token ?? '' });
 
       // Post-store: bust Redis cache keys for the affected merchant/subscriber
       await Promise.all([
@@ -375,7 +375,8 @@ export class EventIndexer {
 
       console.log(`Stored event: ${eventType} for merchant ${merchant}`);
     } catch (error) {
-      console.error('Error processing event:', error);
+      console.error('Error parsing event:', error);
+      return null;
     }
   }
 }
