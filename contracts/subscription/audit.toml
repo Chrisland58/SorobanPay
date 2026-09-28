@@ -1,0 +1,50 @@
+# cargo audit configuration for contracts/subscription
+#
+# Run:  cargo audit --manifest-path contracts/subscription/Cargo.toml
+# CI:   This file is respected automatically when cargo-audit runs in the
+#       contracts/subscription/ directory.
+#
+# Advisory ignore policy
+# ──────────────────────
+# Entries in [[advisories]] suppress individual RustSec advisories.
+# Each entry MUST include a `reason` field explaining:
+#   1. Why the advisory does not affect SorobanPay in practice, OR
+#   2. The tracking issue / timeline for upgrading to a patched version.
+#
+# Template:
+#   [[advisories]]
+#   id = "RUSTSEC-YYYY-NNNN"
+#   reason = "…"
+
+# ---------------------------------------------------------------------------
+# soroban-sdk 20.0.0 — pinned by Soroban host interface compatibility
+# ---------------------------------------------------------------------------
+# The contract is compiled against soroban-sdk 20.0.0.  Upgrading to a newer
+# major version requires validating against a matching Soroban host version on
+# testnet/mainnet and re-running the full upgrade-regression suite (TEST-103).
+# Any advisory raised against soroban-sdk ≤ 20.x that has no patch release in
+# the 20.x line will be tracked here with a justification.
+#
+# Add individual advisory IDs below as they are reported.  Remove the entry
+# once the dependency is upgraded to a patched version and all tests pass.
+#
+# Example (uncomment and fill in when a real advisory appears):
+#
+# [[advisories]]
+# id = "RUSTSEC-2024-XXXX"
+# reason = """
+# Advisory affects the host-function stub used only in test builds
+# (feature = \"testutils\").  Production WASM artifacts do not include the
+# affected code path.  Tracked in issue #1036; will be resolved when
+# soroban-sdk is bumped to 20.x.y+ in a follow-up PR.
+# """
+
+[advisories]
+# No advisories are currently suppressed.
+# When cargo audit reports a new finding, add an [[advisories]] block above
+# with the advisory ID and a justification before merging.
+
+[output]
+# Emit warnings for unmaintained crates but do not fail CI on them.
+# Only `vulnerability` and `unsound` findings fail the audit step.
+deny = ["vulnerability", "unsound"]
