@@ -742,3 +742,653 @@ fn regression_full_payment_lifecycle() {
     r.client.cancel(&r.subscriber, &r.merchant);
     assert!(!r.has_sub(), "final cancel removes subscription");
 }
+
+// ═════════════════════════════════════════════════════════════════════════════
+// FAILED-TRANSFER RECOVERY — Issue #1092
+//
+// Specifies retryable versus terminal failures and aligns state, events, and
+// balances after a failed execute_payment. Guards:
+//   - Subscription stays ACTIVE after TransferFailed (retryable)
+//   - `overdue_since` is set on first failure and not reset on repeated failure
+//   - `next_payment` is NOT advanced after a failed payment
+//   - A successful retry after a failed attempt clears `overdue_since`
+//   - Balance accounting: no tokens move on failure
+//   - Payment nonce does NOT increment on failure
+//   - Insufficient allowance also leaves state unchanged (terminal for that cycle)
+//   - Adversarial: rapid retry loop does not double-debit
+// ═════════════════════════════════════════════════════════════════════════════
+
+/// Helper to read overdue_since from storage for the default (subscriber, merchant) pair.
+fn get_overdue_since(r: &R) -> Option<u64> {
+    r.env
+        .storage()
+        .persistent()
+        .get::<_, crate::storage::SubscriptionData>(&DataKey::Subscription(
+            subscription_key(&r.env, &r.subscriber, &r.merchant),
+        ))
+        .unwrap()
+        .overdue_since
+}
+
+/// Helper to read payment_nonce from storage.
+fn get_payment_nonce(r: &R) -> u64 {
+    r.env
+        .storage()
+        .persistent()
+        .get::<_, crate::storage::SubscriptionData>(&DataKey::Subscription(
+            subscription_key(&r.env, &r.subscriber, &r.merchant),
+        ))
+        .unwrap()
+        .payment_nonce
+}
+
+/// [RECOVERY-001] Subscription must remain ACTIVE (retryable) after TransferFailed.
+///
+/// When execute_payment returns TransferFailed (insufficient balance), the
+/// subscription record must NOT be removed. The merchant can retry on the
+/// next call once the subscriber replenishes funds.
+#[test]
+fn recovery_subscription_stays_active_after_transfer_failed() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let subscriber = Address::generate(&env);
+    let merchant = Address::generate(&env);
+    let payment_amount: i128 = 500_000;
+
+    let token = env.register_stellar_asset_contract_v2(admin.clone()).address();
+    // Mint exactly 1 payment worth — so the second attempt has no balance
+    StellarAssetClient::new(&env, &token).mint(&subscriber, &payment_amount);
+
+    let contract_id = env.register(SubscriptionProtocol, ());
+    let client = SubscriptionProtocolClient::new(&env, &contract_id);
+
+    token::Client::new(&env, &token).approve(
+        &subscriber,
+        &contract_id,
+        &(payment_amount * 10),
+        &(env.ledger().sequence() + 200_000_u32),
+    );
+
+    client.subscribe(&subscriber, &merchant, &token, &payment_amount, &86_400_u64, &false);
+
+    // First payment — succeeds (consumes all balance)
+    env.ledger().with_mut(|l| l.timestamp += 86_401);
+    client.execute_payment(&subscriber, &merchant);
+
+    // Second payment attempt — no balance, must fail with TransferFailed
+    env.ledger().with_mut(|l| l.timestamp += 86_401);
+    let result = client.try_execute_payment(&subscriber, &merchant);
+    assert!(
+        matches!(result, Err(Ok(ContractError::TransferFailed))),
+        "expected TransferFailed, got {:?}",
+        result
+    );
+
+    // Subscription must still be present in storage
+    let sub_exists = env
+        .storage()
+        .persistent()
+        .has(&DataKey::Subscription(subscription_key(&env, &subscriber, &merchant)));
+    assert!(sub_exists, "subscription must remain active after TransferFailed");
+}
+
+/// [RECOVERY-002] `overdue_since` is stamped on the first failed payment.
+///
+/// When TransferFailed occurs, the contract must record the ledger timestamp
+/// of the first failure into `overdue_since` so that grace-period logic
+/// (expire_subscription) and off-chain indexers can determine how long the
+/// subscription has been delinquent.
+#[test]
+fn recovery_overdue_since_set_on_first_failure() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|l| l.timestamp = 1_700_000_000_u64);
+
+    let admin = Address::generate(&env);
+    let subscriber = Address::generate(&env);
+    let merchant = Address::generate(&env);
+    let payment_amount: i128 = 100_000;
+
+    let token = env.register_stellar_asset_contract_v2(admin.clone()).address();
+    // Mint exactly 1 payment; second cycle will be zero balance
+    StellarAssetClient::new(&env, &token).mint(&subscriber, &payment_amount);
+
+    let contract_id = env.register(SubscriptionProtocol, ());
+    let client = SubscriptionProtocolClient::new(&env, &contract_id);
+
+    token::Client::new(&env, &token).approve(
+        &subscriber, &contract_id,
+        &(payment_amount * 10),
+        &(env.ledger().sequence() + 200_000_u32),
+    );
+
+    client.subscribe(&subscriber, &merchant, &token, &payment_amount, &86_400_u64, &false);
+
+    // First payment succeeds (drains balance)
+    env.ledger().with_mut(|l| l.timestamp += 86_401);
+    client.execute_payment(&subscriber, &merchant);
+
+    // Second payment: no balance — must set overdue_since
+    let before_fail_ts = env.ledger().timestamp();
+    env.ledger().with_mut(|l| l.timestamp += 86_401);
+    let fail_ts = env.ledger().timestamp();
+    let _ = client.try_execute_payment(&subscriber, &merchant);
+
+    let stored = env
+        .storage()
+        .persistent()
+        .get::<_, crate::storage::SubscriptionData>(&DataKey::Subscription(
+            subscription_key(&env, &subscriber, &merchant),
+        ))
+        .unwrap();
+
+    assert!(
+        stored.overdue_since.is_some(),
+        "overdue_since must be set after first failure"
+    );
+    let overdue_ts = stored.overdue_since.unwrap();
+    assert!(
+        overdue_ts >= before_fail_ts && overdue_ts <= fail_ts + 1,
+        "overdue_since must be close to the failure timestamp, got {}",
+        overdue_ts
+    );
+}
+
+/// [RECOVERY-003] `overdue_since` is NOT reset by a subsequent failed payment.
+///
+/// When multiple consecutive failures occur, `overdue_since` must retain the
+/// timestamp of the FIRST failure. This preserves accurate grace-period tracking:
+/// the clock starts when the subscription first went delinquent, not when the
+/// most recent retry was attempted.
+#[test]
+fn recovery_overdue_since_not_reset_on_repeated_failure() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|l| l.timestamp = 1_700_000_000_u64);
+
+    let admin = Address::generate(&env);
+    let subscriber = Address::generate(&env);
+    let merchant = Address::generate(&env);
+    let payment_amount: i128 = 100_000;
+
+    let token = env.register_stellar_asset_contract_v2(admin.clone()).address();
+    StellarAssetClient::new(&env, &token).mint(&subscriber, &payment_amount);
+
+    let contract_id = env.register(SubscriptionProtocol, ());
+    let client = SubscriptionProtocolClient::new(&env, &contract_id);
+
+    token::Client::new(&env, &token).approve(
+        &subscriber, &contract_id,
+        &(payment_amount * 10),
+        &(env.ledger().sequence() + 200_000_u32),
+    );
+
+    client.subscribe(&subscriber, &merchant, &token, &payment_amount, &86_400_u64, &false);
+
+    // First payment drains balance
+    env.ledger().with_mut(|l| l.timestamp += 86_401);
+    client.execute_payment(&subscriber, &merchant);
+
+    // First failure — sets overdue_since
+    env.ledger().with_mut(|l| l.timestamp += 86_401);
+    let _ = client.try_execute_payment(&subscriber, &merchant);
+    let first_overdue_ts = env
+        .storage()
+        .persistent()
+        .get::<_, crate::storage::SubscriptionData>(&DataKey::Subscription(
+            subscription_key(&env, &subscriber, &merchant),
+        ))
+        .unwrap()
+        .overdue_since
+        .unwrap();
+
+    // Second failure — overdue_since must not change
+    env.ledger().with_mut(|l| l.timestamp += 86_401);
+    let _ = client.try_execute_payment(&subscriber, &merchant);
+    let second_overdue_ts = env
+        .storage()
+        .persistent()
+        .get::<_, crate::storage::SubscriptionData>(&DataKey::Subscription(
+            subscription_key(&env, &subscriber, &merchant),
+        ))
+        .unwrap()
+        .overdue_since
+        .unwrap();
+
+    assert_eq!(
+        first_overdue_ts, second_overdue_ts,
+        "overdue_since must not be reset by subsequent failures: first={}, second={}",
+        first_overdue_ts, second_overdue_ts
+    );
+}
+
+/// [RECOVERY-004] `next_payment` is NOT advanced after a failed payment.
+///
+/// A failed execute_payment must leave `next_payment` unchanged. If it were
+/// advanced, a subsequent successful payment would be rejected as PaymentNotDue
+/// even though the subscriber now has funds — making the failure non-retryable.
+#[test]
+fn recovery_next_payment_not_advanced_after_failure() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|l| l.timestamp = 1_700_000_000_u64);
+
+    let admin = Address::generate(&env);
+    let subscriber = Address::generate(&env);
+    let merchant = Address::generate(&env);
+    let payment_amount: i128 = 100_000;
+
+    let token = env.register_stellar_asset_contract_v2(admin.clone()).address();
+    StellarAssetClient::new(&env, &token).mint(&subscriber, &payment_amount);
+
+    let contract_id = env.register(SubscriptionProtocol, ());
+    let client = SubscriptionProtocolClient::new(&env, &contract_id);
+
+    token::Client::new(&env, &token).approve(
+        &subscriber, &contract_id,
+        &(payment_amount * 10),
+        &(env.ledger().sequence() + 200_000_u32),
+    );
+
+    client.subscribe(&subscriber, &merchant, &token, &payment_amount, &86_400_u64, &false);
+
+    // First payment drains balance; record next_payment before
+    env.ledger().with_mut(|l| l.timestamp += 86_401);
+    client.execute_payment(&subscriber, &merchant);
+
+    // Record next_payment after first success
+    let next_payment_after_success = env
+        .storage()
+        .persistent()
+        .get::<_, crate::storage::SubscriptionData>(&DataKey::Subscription(
+            subscription_key(&env, &subscriber, &merchant),
+        ))
+        .unwrap()
+        .next_payment;
+
+    // Advance past due; fail
+    env.ledger().with_mut(|l| l.timestamp += 86_401);
+    let _ = client.try_execute_payment(&subscriber, &merchant);
+
+    let next_payment_after_failure = env
+        .storage()
+        .persistent()
+        .get::<_, crate::storage::SubscriptionData>(&DataKey::Subscription(
+            subscription_key(&env, &subscriber, &merchant),
+        ))
+        .unwrap()
+        .next_payment;
+
+    assert_eq!(
+        next_payment_after_success, next_payment_after_failure,
+        "next_payment must not advance after TransferFailed"
+    );
+}
+
+/// [RECOVERY-005] No tokens are transferred on a failed payment.
+///
+/// When execute_payment returns TransferFailed, the balances of subscriber and
+/// merchant must remain exactly as they were before the attempt.
+#[test]
+fn recovery_no_token_transfer_on_failure() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|l| l.timestamp = 1_700_000_000_u64);
+
+    let admin = Address::generate(&env);
+    let subscriber = Address::generate(&env);
+    let merchant = Address::generate(&env);
+    let payment_amount: i128 = 100_000;
+
+    let token = env.register_stellar_asset_contract_v2(admin.clone()).address();
+    StellarAssetClient::new(&env, &token).mint(&subscriber, &payment_amount);
+
+    let contract_id = env.register(SubscriptionProtocol, ());
+    let client = SubscriptionProtocolClient::new(&env, &contract_id);
+
+    token::Client::new(&env, &token).approve(
+        &subscriber, &contract_id,
+        &(payment_amount * 10),
+        &(env.ledger().sequence() + 200_000_u32),
+    );
+
+    let tok = token::Client::new(&env, &token);
+
+    client.subscribe(&subscriber, &merchant, &token, &payment_amount, &86_400_u64, &false);
+
+    // First payment drains balance
+    env.ledger().with_mut(|l| l.timestamp += 86_401);
+    client.execute_payment(&subscriber, &merchant);
+
+    // Capture balances after first success (subscriber: 0, merchant: payment_amount)
+    let sub_bal_before = tok.balance(&subscriber);
+    let mer_bal_before = tok.balance(&merchant);
+
+    // Second attempt — no balance, must fail
+    env.ledger().with_mut(|l| l.timestamp += 86_401);
+    let _ = client.try_execute_payment(&subscriber, &merchant);
+
+    // Balances must be unchanged
+    assert_eq!(tok.balance(&subscriber), sub_bal_before,
+        "subscriber balance must not change on TransferFailed");
+    assert_eq!(tok.balance(&merchant), mer_bal_before,
+        "merchant balance must not change on TransferFailed");
+}
+
+/// [RECOVERY-006] Payment nonce does NOT increment on a failed payment.
+///
+/// `payment_nonce` is a monotonic counter of successful executions used for
+/// deduplication by off-chain indexers. Incrementing it on failure would
+/// break the deduplication invariant and confuse event consumers.
+#[test]
+fn recovery_payment_nonce_unchanged_after_failure() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|l| l.timestamp = 1_700_000_000_u64);
+
+    let admin = Address::generate(&env);
+    let subscriber = Address::generate(&env);
+    let merchant = Address::generate(&env);
+    let payment_amount: i128 = 100_000;
+
+    let token = env.register_stellar_asset_contract_v2(admin.clone()).address();
+    StellarAssetClient::new(&env, &token).mint(&subscriber, &payment_amount);
+
+    let contract_id = env.register(SubscriptionProtocol, ());
+    let client = SubscriptionProtocolClient::new(&env, &contract_id);
+
+    token::Client::new(&env, &token).approve(
+        &subscriber, &contract_id,
+        &(payment_amount * 10),
+        &(env.ledger().sequence() + 200_000_u32),
+    );
+
+    client.subscribe(&subscriber, &merchant, &token, &payment_amount, &86_400_u64, &false);
+
+    // First success: nonce should advance to 1
+    env.ledger().with_mut(|l| l.timestamp += 86_401);
+    client.execute_payment(&subscriber, &merchant);
+    let nonce_after_success = env
+        .storage()
+        .persistent()
+        .get::<_, crate::storage::SubscriptionData>(&DataKey::Subscription(
+            subscription_key(&env, &subscriber, &merchant),
+        ))
+        .unwrap()
+        .payment_nonce;
+
+    // Failure attempt: nonce must stay the same
+    env.ledger().with_mut(|l| l.timestamp += 86_401);
+    let _ = client.try_execute_payment(&subscriber, &merchant);
+    let nonce_after_failure = env
+        .storage()
+        .persistent()
+        .get::<_, crate::storage::SubscriptionData>(&DataKey::Subscription(
+            subscription_key(&env, &subscriber, &merchant),
+        ))
+        .unwrap()
+        .payment_nonce;
+
+    assert_eq!(
+        nonce_after_success, nonce_after_failure,
+        "payment_nonce must not change after a failed payment"
+    );
+}
+
+/// [RECOVERY-007] A successful retry after failure clears `overdue_since`.
+///
+/// Once the subscriber has replenished funds and execute_payment succeeds, the
+/// `overdue_since` field must be cleared (set to None). This signals to
+/// indexers that the subscription is no longer delinquent.
+#[test]
+fn recovery_successful_retry_clears_overdue_since() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|l| l.timestamp = 1_700_000_000_u64);
+
+    let admin = Address::generate(&env);
+    let subscriber = Address::generate(&env);
+    let merchant = Address::generate(&env);
+    let payment_amount: i128 = 100_000;
+
+    let token = env.register_stellar_asset_contract_v2(admin.clone()).address();
+    // Mint for 2 successful payments total (1 initial + 1 retry-after-failure)
+    StellarAssetClient::new(&env, &token).mint(&subscriber, &(payment_amount * 2));
+
+    let contract_id = env.register(SubscriptionProtocol, ());
+    let client = SubscriptionProtocolClient::new(&env, &contract_id);
+
+    token::Client::new(&env, &token).approve(
+        &subscriber, &contract_id,
+        &(payment_amount * 10),
+        &(env.ledger().sequence() + 200_000_u32),
+    );
+
+    client.subscribe(&subscriber, &merchant, &token, &payment_amount, &86_400_u64, &false);
+
+    // First payment succeeds
+    env.ledger().with_mut(|l| l.timestamp += 86_401);
+    client.execute_payment(&subscriber, &merchant);
+
+    // Second attempt: no balance → failure
+    env.ledger().with_mut(|l| l.timestamp += 86_401);
+    let _ = client.try_execute_payment(&subscriber, &merchant);
+
+    // Verify overdue_since is now set
+    let overdue = env
+        .storage()
+        .persistent()
+        .get::<_, crate::storage::SubscriptionData>(&DataKey::Subscription(
+            subscription_key(&env, &subscriber, &merchant),
+        ))
+        .unwrap()
+        .overdue_since;
+    assert!(overdue.is_some(), "overdue_since must be set after failure");
+
+    // Subscriber tops up balance
+    StellarAssetClient::new(&env, &token).mint(&subscriber, &payment_amount);
+
+    // Retry succeeds — payment is still due (next_payment was not advanced)
+    let retry_result = client.try_execute_payment(&subscriber, &merchant);
+    assert!(retry_result.is_ok(), "retry after top-up must succeed, got {:?}", retry_result);
+
+    // overdue_since must be cleared
+    let stored = env
+        .storage()
+        .persistent()
+        .get::<_, crate::storage::SubscriptionData>(&DataKey::Subscription(
+            subscription_key(&env, &subscriber, &merchant),
+        ))
+        .unwrap();
+    assert!(
+        stored.overdue_since.is_none(),
+        "overdue_since must be cleared after a successful retry"
+    );
+}
+
+/// [RECOVERY-008] Insufficient allowance is a non-retryable-within-cycle failure.
+///
+/// When allowance < amount, execute_payment must return InsufficientAllowance
+/// (not panic), subscription state must be unchanged, and no tokens must move.
+/// The subscriber must re-approve before the merchant can retry.
+#[test]
+fn recovery_insufficient_allowance_leaves_state_unchanged() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|l| l.timestamp = 1_700_000_000_u64);
+
+    let admin = Address::generate(&env);
+    let subscriber = Address::generate(&env);
+    let merchant = Address::generate(&env);
+    let payment_amount: i128 = 100_000;
+
+    let token = env.register_stellar_asset_contract_v2(admin.clone()).address();
+    StellarAssetClient::new(&env, &token).mint(&subscriber, &(payment_amount * 10));
+
+    let contract_id = env.register(SubscriptionProtocol, ());
+    let client = SubscriptionProtocolClient::new(&env, &contract_id);
+
+    // Grant zero allowance (subscriber revoked it)
+    token::Client::new(&env, &token).approve(
+        &subscriber, &contract_id,
+        &0_i128,
+        &(env.ledger().sequence() + 200_000_u32),
+    );
+
+    // subscribe in non-strict mode so it succeeds despite zero allowance
+    client.subscribe(&subscriber, &merchant, &token, &payment_amount, &86_400_u64, &false);
+
+    let tok = token::Client::new(&env, &token);
+    let sub_bal_before = tok.balance(&subscriber);
+    let mer_bal_before = tok.balance(&merchant);
+    let next_payment_before = env
+        .storage()
+        .persistent()
+        .get::<_, crate::storage::SubscriptionData>(&DataKey::Subscription(
+            subscription_key(&env, &subscriber, &merchant),
+        ))
+        .unwrap()
+        .next_payment;
+
+    env.ledger().with_mut(|l| l.timestamp += 86_401);
+    let result = client.try_execute_payment(&subscriber, &merchant);
+    assert!(
+        matches!(result, Err(Ok(ContractError::InsufficientAllowance))),
+        "zero allowance must return InsufficientAllowance, got {:?}",
+        result
+    );
+
+    // Balances unchanged
+    assert_eq!(tok.balance(&subscriber), sub_bal_before,
+        "subscriber balance must be unchanged");
+    assert_eq!(tok.balance(&merchant), mer_bal_before,
+        "merchant balance must be unchanged");
+
+    // next_payment unchanged
+    let next_payment_after = env
+        .storage()
+        .persistent()
+        .get::<_, crate::storage::SubscriptionData>(&DataKey::Subscription(
+            subscription_key(&env, &subscriber, &merchant),
+        ))
+        .unwrap()
+        .next_payment;
+    assert_eq!(
+        next_payment_before, next_payment_after,
+        "next_payment must not advance on InsufficientAllowance"
+    );
+}
+
+/// [RECOVERY-009] Adversarial rapid retry loop does not double-debit.
+///
+/// After a successful payment, rapid successive calls must not debit the
+/// subscriber again. Each call after success must return PaymentNotDue.
+/// This is a combined accounting + replay adversarial test.
+#[test]
+fn recovery_adversarial_rapid_retry_no_double_debit() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|l| l.timestamp = 1_700_000_000_u64);
+
+    let admin = Address::generate(&env);
+    let subscriber = Address::generate(&env);
+    let merchant = Address::generate(&env);
+    let payment_amount: i128 = 100_000;
+
+    let token = env.register_stellar_asset_contract_v2(admin.clone()).address();
+    StellarAssetClient::new(&env, &token).mint(&subscriber, &(payment_amount * 5));
+
+    let contract_id = env.register(SubscriptionProtocol, ());
+    let client = SubscriptionProtocolClient::new(&env, &contract_id);
+
+    token::Client::new(&env, &token).approve(
+        &subscriber, &contract_id,
+        &(payment_amount * 5),
+        &(env.ledger().sequence() + 200_000_u32),
+    );
+
+    client.subscribe(&subscriber, &merchant, &token, &payment_amount, &86_400_u64, &false);
+
+    let tok = token::Client::new(&env, &token);
+    let initial_sub_bal = tok.balance(&subscriber);
+
+    // Advance past due and execute once successfully
+    env.ledger().with_mut(|l| l.timestamp += 86_401);
+    client.execute_payment(&subscriber, &merchant);
+    assert_eq!(tok.balance(&subscriber), initial_sub_bal - payment_amount);
+
+    // Rapid-fire retry loop — merchant retries 10 times immediately
+    for i in 0..10 {
+        let result = client.try_execute_payment(&subscriber, &merchant);
+        assert!(
+            matches!(result, Err(Ok(ContractError::PaymentNotDue))),
+            "retry {}: rapid retry must return PaymentNotDue, got {:?}",
+            i, result
+        );
+    }
+
+    // Exactly one payment was deducted
+    assert_eq!(
+        tok.balance(&subscriber),
+        initial_sub_bal - payment_amount,
+        "only one payment must have been deducted despite 10 rapid retries"
+    );
+}
+
+/// [RECOVERY-010] Boundary: failure on exact boundary amount (1 stroop short).
+///
+/// When the subscriber holds exactly `amount - 1` tokens, the transfer fails.
+/// The failure path must be consistent with all other TransferFailed behaviour.
+#[test]
+fn recovery_failure_on_one_stroop_short() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|l| l.timestamp = 1_700_000_000_u64);
+
+    let admin = Address::generate(&env);
+    let subscriber = Address::generate(&env);
+    let merchant = Address::generate(&env);
+    let payment_amount: i128 = 1_000_000;
+
+    let token = env.register_stellar_asset_contract_v2(admin.clone()).address();
+    // Mint exactly 1 stroop short of the payment amount
+    StellarAssetClient::new(&env, &token).mint(&subscriber, &(payment_amount - 1));
+
+    let contract_id = env.register(SubscriptionProtocol, ());
+    let client = SubscriptionProtocolClient::new(&env, &contract_id);
+
+    token::Client::new(&env, &token).approve(
+        &subscriber, &contract_id,
+        &payment_amount,
+        &(env.ledger().sequence() + 200_000_u32),
+    );
+
+    client.subscribe(&subscriber, &merchant, &token, &payment_amount, &86_400_u64, &false);
+
+    env.ledger().with_mut(|l| l.timestamp += 86_401);
+    let result = client.try_execute_payment(&subscriber, &merchant);
+    assert!(
+        matches!(result, Err(Ok(ContractError::TransferFailed))),
+        "1-stroop-short balance must return TransferFailed, got {:?}",
+        result
+    );
+
+    // Subscription still active
+    let sub_exists = env
+        .storage()
+        .persistent()
+        .has(&DataKey::Subscription(subscription_key(&env, &subscriber, &merchant)));
+    assert!(sub_exists, "subscription must remain active after 1-stroop-short failure");
+
+    // overdue_since must be set
+    let stored = env
+        .storage()
+        .persistent()
+        .get::<_, crate::storage::SubscriptionData>(&DataKey::Subscription(
+            subscription_key(&env, &subscriber, &merchant),
+        ))
+        .unwrap();
+    assert!(stored.overdue_since.is_some(), "overdue_since must be set");
+}

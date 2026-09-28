@@ -1070,3 +1070,6 @@ mod property_tests;
 
 #[cfg(test)]
 mod multi_token_tests;
+
+#[cfg(test)]
+mod regression_tests;
