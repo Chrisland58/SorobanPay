@@ -742,3 +742,302 @@ fn regression_full_payment_lifecycle() {
     r.client.cancel(&r.subscriber, &r.merchant);
     assert!(!r.has_sub(), "final cancel removes subscription");
 }
+
+// ═════════════════════════════════════════════════════════════════════════════
+// RECURRING PAYMENT TIMESTAMP BOUNDARIES (#1082)
+// ═════════════════════════════════════════════════════════════════════════════
+//
+// Defines and tests the exact semantics of the execute_payment time-lock at
+// every boundary:
+//   - before due:   now < next_payment  → PaymentNotDue
+//   - at due:       now == next_payment → success (inclusive boundary)
+//   - after due:    now > next_payment  → success
+//   - same-ledger double call           → second rejected
+//   - second period only collectible after new next_payment
+//   - late collection does not allow double charge
+//   - payment_nonce increments on success, stable on failure
+
+/// [#1082-001] execute_payment at next_payment - 1 returns PaymentNotDue.
+/// Validates the strict `now < next_payment` early-exit path.
+#[test]
+fn timestamp_boundary_one_second_before_due() {
+    let r = R::new();
+    let amt = 100_000_i128;
+    let ivl = 86_400_u64;
+
+    r.client.subscribe(&r.subscriber, &r.merchant, &r.token, &amt, &ivl, &false);
+    let next_payment = r.get_next_payment();
+
+    // Advance to exactly 1 second before due
+    let now = r.env.ledger().timestamp();
+    let advance = next_payment.saturating_sub(now).saturating_sub(1);
+    r.advance(advance);
+
+    let result = r.client.try_execute_payment(&r.subscriber, &r.merchant);
+    assert!(
+        matches!(result, Err(Ok(ContractError::PaymentNotDue))),
+        "1 second before due must return PaymentNotDue, got {:?}",
+        result
+    );
+    // Balances must be untouched
+    assert_eq!(r.sub_bal(), 10_000_000_000_i128, "no balance change before due");
+}
+
+/// [#1082-002] execute_payment at exactly next_payment (inclusive boundary) succeeds.
+/// The `>=` comparison means now == next_payment is on-time, not early.
+#[test]
+fn timestamp_boundary_exactly_at_due() {
+    let r = R::new();
+    let amt = 100_000_i128;
+    let ivl = 86_400_u64;
+
+    r.client.subscribe(&r.subscriber, &r.merchant, &r.token, &amt, &ivl, &false);
+    let next_payment = r.get_next_payment();
+
+    // Advance to exactly next_payment
+    let now = r.env.ledger().timestamp();
+    r.advance(next_payment.saturating_sub(now));
+
+    let sb = r.sub_bal();
+    let mb = r.mer_bal();
+
+    let result = r.client.try_execute_payment(&r.subscriber, &r.merchant);
+    assert!(
+        result.is_ok(),
+        "execute_payment at exactly next_payment must succeed, got {:?}",
+        result
+    );
+    assert_eq!(r.sub_bal(), sb - amt, "subscriber must pay exactly amt at due boundary");
+    assert_eq!(r.mer_bal(), mb + amt, "merchant must receive exactly amt at due boundary");
+}
+
+/// [#1082-003] execute_payment at next_payment + 1 (one second past due) succeeds.
+/// Late collection is always permitted; the payment window is open-ended.
+#[test]
+fn timestamp_boundary_one_second_after_due() {
+    let r = R::new();
+    let amt = 75_000_i128;
+    let ivl = 86_400_u64;
+
+    r.client.subscribe(&r.subscriber, &r.merchant, &r.token, &amt, &ivl, &false);
+    let next_payment = r.get_next_payment();
+
+    // Advance to next_payment + 1
+    let now = r.env.ledger().timestamp();
+    r.advance(next_payment.saturating_sub(now) + 1);
+
+    let sb = r.sub_bal();
+    let mb = r.mer_bal();
+
+    let result = r.client.try_execute_payment(&r.subscriber, &r.merchant);
+    assert!(
+        result.is_ok(),
+        "execute_payment 1 second after due must succeed, got {:?}",
+        result
+    );
+    assert_eq!(r.sub_bal(), sb - amt);
+    assert_eq!(r.mer_bal(), mb + amt);
+}
+
+/// [#1082-004] Two execute_payment calls at the exact same timestamp —
+/// the second must be rejected (PaymentNotDue, since next_payment advances
+/// after the first successful call).
+#[test]
+fn timestamp_boundary_no_duplicate_in_same_ledger() {
+    let r = R::new();
+    let amt = 120_000_i128;
+    let ivl = 86_400_u64;
+
+    r.client.subscribe(&r.subscriber, &r.merchant, &r.token, &amt, &ivl, &false);
+    r.advance(ivl + 1);
+
+    let sb = r.sub_bal();
+    let mb = r.mer_bal();
+
+    // First call
+    r.client.execute_payment(&r.subscriber, &r.merchant);
+    assert_eq!(r.sub_bal(), sb - amt);
+    assert_eq!(r.mer_bal(), mb + amt);
+
+    // Second call at the same timestamp (next_payment now > now)
+    let result = r.client.try_execute_payment(&r.subscriber, &r.merchant);
+    assert!(
+        matches!(result, Err(Ok(ContractError::PaymentNotDue))),
+        "same-ledger second call must return PaymentNotDue, got {:?}",
+        result
+    );
+    // Balances unchanged
+    assert_eq!(r.sub_bal(), sb - amt, "no second deduction on duplicate same-ledger call");
+    assert_eq!(r.mer_bal(), mb + amt);
+}
+
+/// [#1082-005] After first collection, second period only collectible once the
+/// new next_payment is reached.  Attempting one second before the new period
+/// must still return PaymentNotDue.
+#[test]
+fn timestamp_boundary_second_period_requires_new_next_payment() {
+    let r = R::new();
+    let amt = 80_000_i128;
+    let ivl = 86_400_u64;
+
+    r.client.subscribe(&r.subscriber, &r.merchant, &r.token, &amt, &ivl, &false);
+    r.advance(ivl + 1);
+
+    // Collect first period
+    r.client.execute_payment(&r.subscriber, &r.merchant);
+    let second_due = r.get_next_payment();
+
+    // Advance to second_due - 1 (one second early)
+    let now = r.env.ledger().timestamp();
+    if second_due > now + 1 {
+        r.advance(second_due.saturating_sub(now).saturating_sub(1));
+        let result = r.client.try_execute_payment(&r.subscriber, &r.merchant);
+        assert!(
+            matches!(result, Err(Ok(ContractError::PaymentNotDue))),
+            "1 second before second period must return PaymentNotDue, got {:?}",
+            result
+        );
+    }
+
+    // Now advance to second_due — must succeed
+    let now2 = r.env.ledger().timestamp();
+    r.advance(second_due.saturating_sub(now2));
+    let result = r.client.try_execute_payment(&r.subscriber, &r.merchant);
+    assert!(
+        result.is_ok(),
+        "at second period due date must succeed, got {:?}",
+        result
+    );
+}
+
+/// [#1082-006] A merchant who collects 2 intervals late still only performs one
+/// charge per billing window — there is no catch-up mechanism to collect missed
+/// periods in a single call.
+#[test]
+fn timestamp_boundary_late_collection_does_not_double_charge() {
+    let r = R::new();
+    let amt = 200_000_i128;
+    let ivl = 86_400_u64;
+
+    r.client.subscribe(&r.subscriber, &r.merchant, &r.token, &amt, &ivl, &false);
+
+    // Advance 2 full intervals past due — 2 missed periods
+    r.advance(ivl * 2 + 1);
+
+    let sb = r.sub_bal();
+    let mb = r.mer_bal();
+
+    // Single collect — must charge exactly once, not twice
+    r.client.execute_payment(&r.subscriber, &r.merchant);
+    assert_eq!(r.sub_bal(), sb - amt, "late collection charges exactly once");
+    assert_eq!(r.mer_bal(), mb + amt, "merchant receives exactly one payment amount");
+
+    // Immediate retry — must be rejected
+    let result = r.client.try_execute_payment(&r.subscriber, &r.merchant);
+    assert!(
+        matches!(result, Err(Ok(ContractError::PaymentNotDue))),
+        "second call after late collection must return PaymentNotDue, got {:?}",
+        result
+    );
+}
+
+/// [#1082-007] payment_nonce increments by exactly 1 on each successful payment
+/// and remains unchanged on a failed attempt.
+#[test]
+fn timestamp_boundary_nonce_increments_on_success_stable_on_failure() {
+    let r = R::new();
+    let amt = 10_000_000_000_i128; // full balance — second payment will fail
+    let ivl = 86_400_u64;
+
+    r.client.subscribe(&r.subscriber, &r.merchant, &r.token, &amt, &ivl, &false);
+
+    // Nonce starts at 0
+    let nonce_before = r
+        .env
+        .storage()
+        .persistent()
+        .get::<_, crate::storage::SubscriptionData>(&DataKey::Subscription(subscription_key(
+            &r.env,
+            &r.subscriber,
+            &r.merchant,
+        )))
+        .unwrap()
+        .payment_nonce;
+    assert_eq!(nonce_before, 0, "initial nonce must be 0");
+
+    // First successful payment
+    r.advance(ivl + 1);
+    r.client.execute_payment(&r.subscriber, &r.merchant);
+
+    let nonce_after_first = r
+        .env
+        .storage()
+        .persistent()
+        .get::<_, crate::storage::SubscriptionData>(&DataKey::Subscription(subscription_key(
+            &r.env,
+            &r.subscriber,
+            &r.merchant,
+        )))
+        .unwrap()
+        .payment_nonce;
+    assert_eq!(nonce_after_first, 1, "nonce must be 1 after first successful payment");
+
+    // Second payment attempt — subscriber has zero balance, must fail
+    r.advance(ivl + 1);
+    let result = r.client.try_execute_payment(&r.subscriber, &r.merchant);
+    assert!(
+        matches!(result, Err(Ok(ContractError::TransferFailed))),
+        "zero-balance payment must return TransferFailed, got {:?}",
+        result
+    );
+
+    // Nonce must be unchanged after failed attempt
+    let nonce_after_fail = r
+        .env
+        .storage()
+        .persistent()
+        .get::<_, crate::storage::SubscriptionData>(&DataKey::Subscription(subscription_key(
+            &r.env,
+            &r.subscriber,
+            &r.merchant,
+        )))
+        .unwrap()
+        .payment_nonce;
+    assert_eq!(
+        nonce_after_fail, 1,
+        "nonce must be unchanged (1) after failed payment, got {}",
+        nonce_after_fail
+    );
+}
+
+/// [#1082-008] next_payment after a successful collection is exactly now + interval,
+/// not prev_next_payment + interval.  This reflects the contract's sliding-window
+/// design: the new due date is anchored to the actual collection time.
+#[test]
+fn timestamp_boundary_next_payment_set_to_now_plus_interval_after_late_collect() {
+    let r = R::new();
+    let amt = 50_000_i128;
+    let ivl = 86_400_u64;
+
+    r.client.subscribe(&r.subscriber, &r.merchant, &r.token, &amt, &ivl, &false);
+
+    // Advance well past due — simulate a 2-day late collection
+    let ts_before_collect = {
+        r.env.ledger().with_mut(|l| l.timestamp += ivl + 3_600 * 48);
+        r.env.ledger().timestamp()
+    };
+
+    r.client.execute_payment(&r.subscriber, &r.merchant);
+
+    let next = r.get_next_payment();
+    // Contract uses `now + interval` so next_payment must be close to
+    // ts_before_collect + interval (within a few ledger ticks).
+    assert!(
+        next >= ts_before_collect + ivl,
+        "next_payment must be >= collection_time + interval"
+    );
+    assert!(
+        next <= ts_before_collect + ivl + 5,
+        "next_payment must not be far beyond collection_time + interval"
+    );
+}
