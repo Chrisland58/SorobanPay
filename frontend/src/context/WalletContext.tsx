@@ -32,7 +32,7 @@ export interface WalletContextValue {
   freighterInstalled: boolean;
   /** True while checking Freighter availability on initial load. */
   isCheckingFreighter: boolean;
-  /** True when the wallet session has become invalid (e.g. extension removed). */
+  /** True when the active wallet session is no longer valid because Freighter is unavailable. */
   sessionInvalid: boolean;
   /** Trigger wallet connection — opens Freighter permission dialog. */
   connect: () => Promise<void>;
@@ -53,6 +53,18 @@ export function WalletProvider({ children }: { children: ReactNode }) {
   const [freighterInstalled, setFreighterInstalled] = useState(false);
   const [isCheckingFreighter, setIsCheckingFreighter] = useState(true);
   const [sessionInvalid, setSessionInvalid] = useState(false);
+
+  useEffect(() => {
+    if (publicKey && !freighterInstalled) {
+      setSessionInvalid(true);
+      setConnectError(
+        "Freighter is no longer available. Disconnect and reconnect to restore your session.",
+      );
+    } else if (publicKey && freighterInstalled) {
+      setSessionInvalid(false);
+      setConnectError(null);
+    }
+  }, [publicKey, freighterInstalled]);
 
   // Check Freighter availability on mount (Issue #110)
   useEffect(() => {
