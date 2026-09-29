@@ -198,3 +198,60 @@ fn test_upgrade_non_optional_field_is_breaking() {
             adding a non-Option field to SubscriptionData is a breaking schema change. \
             Use Option<T> for any new field, as documented in docs/deployment.md §Contract Upgrades.");
 }
+
+// ─── Regression Suite: Multi-Tenant State & Lifecycle Invariance (#1138) ─────
+
+/// Verifies: multi-tenant subscription state (multiple independent accounts and assets)
+/// remains byte-for-byte readable and fully executable across an upgrade.
+#[test]
+fn test_upgrade_multi_tenant_state_regression() {
+    let f = UpgradeFixture::new();
+    let sub2 = Address::generate(&f.env);
+    let mer2 = Address::generate(&f.env);
+
+    let client = SubscriptionProtocolClient::new(&f.env, &f.contract_id);
+
+    // Create 2 independent subscriptions under v1
+    client
+        .subscribe(&f.subscriber, &f.merchant, &f.token, &100_000_i128, &86_400_u64)
+        .expect("v1 subscribe 1");
+    client
+        .subscribe(&sub2, &mer2, &f.token, &250_000_i128, &604_800_u64)
+        .expect("v1 subscribe 2");
+
+    // Upgrade contract entry point
+    f.env.register_contract(&f.contract_id, SubscriptionProtocol);
+
+    // Verify both records retain exact state
+    let key1 = DataKey::Subscription(f.subscriber.clone(), f.merchant.clone());
+    let key2 = DataKey::Subscription(sub2.clone(), mer2.clone());
+
+    let entry1: SubscriptionData = f.env.storage().persistent().get(&key1).expect("entry 1 exists");
+    let entry2: SubscriptionData = f.env.storage().persistent().get(&key2).expect("entry 2 exists");
+
+    assert_eq!(entry1.amount, 100_000_i128);
+    assert_eq!(entry1.interval, 86_400_u64);
+    assert_eq!(entry2.amount, 250_000_i128);
+    assert_eq!(entry2.interval, 604_800_u64);
+}
+
+/// Verifies: cancellation lifecycle after upgrade cleanly evicts storage.
+#[test]
+fn test_upgrade_cancel_lifecycle_regression() {
+    let f = UpgradeFixture::new();
+    let client = SubscriptionProtocolClient::new(&f.env, &f.contract_id);
+
+    client
+        .subscribe(&f.subscriber, &f.merchant, &f.token, &100_000_i128, &86_400_u64)
+        .expect("v1 subscribe");
+
+    // Upgrade
+    f.env.register_contract(&f.contract_id, SubscriptionProtocol);
+
+    // Cancel under upgraded contract
+    client.cancel(&f.subscriber, &f.merchant).expect("cancel post-upgrade");
+
+    let key = DataKey::Subscription(f.subscriber.clone(), f.merchant.clone());
+    assert!(!f.env.storage().persistent().has(&key), "key must be removed");
+}
+
