@@ -683,9 +683,397 @@ All endpoints return a consistent error schema:
 
 ---
 
+---
+
+## GraphQL API
+
+SorobanPay exposes a read-only GraphQL endpoint alongside the REST API. It is backed by the same PostgreSQL database and enforces the same per-merchant tenant isolation as the REST routes.
+
+**Endpoint:** `https://api.sorobanpay.example.com/graphql`
+
+**Authentication:** Same JWT bearer token obtained via [Recipe 1](#recipe-1--authenticate-as-a-merchant-sep-10-challenge-response). Pass it in the `Authorization: Bearer <token>` HTTP header — identical to REST.
+
+**Schema introspection:** `GET https://api.sorobanpay.example.com/graphql?introspect=1` (disabled in production; use the schema file at `backend/src/generated/schema.graphql`).
+
+---
+
+### GQL-1 — Fetch active subscriptions
+
+```graphql
+query ActiveSubscriptions($first: Int = 50, $after: String) {
+  subscriptions(
+    filter: { status: ACTIVE }
+    first: $first
+    after: $after
+    orderBy: { field: CREATED_AT, direction: DESC }
+  ) {
+    edges {
+      node {
+        subscriber
+        merchant
+        token
+        amount
+        interval
+        nextPayment
+        ttlLedgers
+        ttlDays
+        status
+        createdAt
+      }
+      cursor
+    }
+    pageInfo {
+      hasNextPage
+      endCursor
+    }
+    totalCount
+  }
+}
+```
+
+**Variables**
+
+```json
+{ "first": 50, "after": null }
+```
+
+**Expected response**
+
+```json
+{
+  "data": {
+    "subscriptions": {
+      "edges": [
+        {
+          "node": {
+            "subscriber":   "GABC...SUBSCRIBER",
+            "merchant":     "GDEF...MERCHANT",
+            "token":        "CTOKEN...ADDRESS",
+            "amount":       "1000000",
+            "interval":     2592000,
+            "nextPayment":  "2026-08-26T14:00:00Z",
+            "ttlLedgers":   5200000,
+            "ttlDays":      301.0,
+            "status":       "ACTIVE",
+            "createdAt":    "2026-07-26T14:00:00Z"
+          },
+          "cursor": "eyJpZCI6MX0="
+        }
+      ],
+      "pageInfo": {
+        "hasNextPage": true,
+        "endCursor": "eyJpZCI6NTB9"
+      },
+      "totalCount": 142
+    }
+  }
+}
+```
+
+**Pagination:** Use cursor-based pagination. Pass the `endCursor` value as `after` on the next request to fetch the next page.
+
+---
+
+### GQL-2 — Fetch payment history with date filter
+
+```graphql
+query PaymentHistory(
+  $from: DateTime!
+  $to: DateTime!
+  $subscriber: String
+  $first: Int = 100
+  $after: String
+) {
+  payments(
+    filter: {
+      paidAtGte: $from
+      paidAtLte: $to
+      subscriber: $subscriber
+    }
+    first: $first
+    after: $after
+    orderBy: { field: PAID_AT, direction: DESC }
+  ) {
+    edges {
+      node {
+        txHash
+        subscriber
+        merchant
+        token
+        amount
+        paidAt
+        ledger
+      }
+      cursor
+    }
+    pageInfo {
+      hasNextPage
+      endCursor
+    }
+    totalCount
+  }
+}
+```
+
+**Variables**
+
+```json
+{
+  "from": "2026-01-01T00:00:00Z",
+  "to":   "2026-07-26T23:59:59Z",
+  "subscriber": null,
+  "first": 100,
+  "after": null
+}
+```
+
+---
+
+### GQL-3 — Fetch MRR analytics
+
+```graphql
+query MrrAnalytics {
+  mrr {
+    totalRaw
+    totalFormatted
+    token
+    tokenSymbol
+    tokenDecimals
+    activeSubscriptions
+    asOf
+    breakdown {
+      intervalLabel
+      count
+      mrrRaw
+    }
+  }
+}
+```
+
+**Expected response**
+
+```json
+{
+  "data": {
+    "mrr": {
+      "totalRaw":            54321000000,
+      "totalFormatted":      "5432.10",
+      "token":               "CTOKEN...ADDRESS",
+      "tokenSymbol":         "USDC",
+      "tokenDecimals":       7,
+      "activeSubscriptions": 142,
+      "asOf":                "2026-07-26T14:00:00Z",
+      "breakdown": [
+        { "intervalLabel": "Monthly", "count": 98,  "mrrRaw": 42000000000 },
+        { "intervalLabel": "Yearly",  "count": 30,  "mrrRaw": 10000000000 },
+        { "intervalLabel": "Weekly",  "count": 14,  "mrrRaw":  2321000000 }
+      ]
+    }
+  }
+}
+```
+
+---
+
+### Pagination
+
+All list queries use **cursor-based pagination** (Relay connection spec).
+
+| Argument | Type | Default | Description |
+|----------|------|---------|-------------|
+| `first` | `Int` | 50 | Number of records to return (max 200) |
+| `after` | `String` | `null` | Opaque cursor returned by the previous page's `endCursor` |
+
+**Iterate through all pages:**
+
+```javascript
+async function fetchAllSubscriptions(token) {
+  const endpoint = "https://api.sorobanpay.example.com/graphql";
+  const query = `
+    query($after: String) {
+      subscriptions(filter: { status: ACTIVE }, first: 200, after: $after) {
+        edges { node { subscriber merchant amount } cursor }
+        pageInfo { hasNextPage endCursor }
+      }
+    }
+  `;
+
+  let after = null;
+  let all = [];
+
+  do {
+    const res = await fetch(endpoint, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({ query, variables: { after } }),
+    });
+
+    const { data, errors } = await res.json();
+    if (errors?.length) throw new Error(errors[0].message);
+
+    const { edges, pageInfo } = data.subscriptions;
+    all = all.concat(edges.map((e) => e.node));
+    after = pageInfo.hasNextPage ? pageInfo.endCursor : null;
+  } while (after);
+
+  return all;
+}
+```
+
+---
+
+### Complexity limits
+
+The GraphQL server enforces query complexity scoring to prevent abusive or deeply nested queries from exhausting server resources.
+
+| Limit | Value | Scope |
+|-------|-------|-------|
+| Max query depth | 7 levels | Per query document |
+| Max query complexity | 1 000 points | Per query document |
+| Max aliases | 15 | Per query document |
+| Max `first` / page size | 200 records | Per connection field |
+| Request timeout | 10 seconds | Per HTTP request |
+
+**Complexity scoring rules:**
+
+- Each scalar field: +1 point
+- Each object field: +1 point
+- Each list field with pagination argument (`first: N`): +N points
+- Each resolver that hits the database: +10 points
+- Fragments are expanded before scoring
+
+**Example — query approaching the complexity limit:**
+
+```graphql
+# Complexity ≈ (200 records × 10 fields) + (10 DB hit × 1) = 2010 — REJECTED
+query TooComplex {
+  subscriptions(first: 200) {       # 200 × (9 scalars + 1 DB) = 2000
+    edges {
+      node {
+        subscriber merchant token amount interval
+        nextPayment ttlLedgers ttlDays status createdAt
+      }
+    }
+  }
+}
+```
+
+**Fix:** Reduce `first`, request fewer fields, or paginate with a smaller page size.
+
+---
+
+### GraphQL error handling
+
+The GraphQL endpoint follows the [GraphQL over HTTP spec](https://graphql.github.io/graphql-over-http/). Errors are always returned in the `errors` array — the HTTP status is always `200` for well-formed requests (even if the query produced errors).
+
+**Error response shape:**
+
+```json
+{
+  "data": null,
+  "errors": [
+    {
+      "message": "Not authenticated. Provide a valid Authorization: Bearer header.",
+      "extensions": {
+        "code": "UNAUTHENTICATED",
+        "status": 401
+      }
+    }
+  ]
+}
+```
+
+| Extension `code` | Meaning | Recovery |
+|-----------------|---------|----------|
+| `UNAUTHENTICATED` | Missing or expired JWT | Re-authenticate via [Recipe 1](#recipe-1--authenticate-as-a-merchant-sep-10-challenge-response) |
+| `FORBIDDEN` | Authenticated but querying another tenant's data | Verify the JWT's merchant claim matches the queried address |
+| `BAD_USER_INPUT` | Invalid argument (type mismatch, out-of-range value) | Fix the query variables |
+| `QUERY_TOO_COMPLEX` | Complexity limit exceeded | Reduce page size or request fewer fields |
+| `QUERY_DEPTH_LIMIT` | Depth limit exceeded | Flatten the query |
+| `NOT_FOUND` | Record does not exist | Verify the subscriber/merchant addresses |
+| `INTERNAL_SERVER_ERROR` | Unexpected server error | Retry; contact support if it persists |
+
+**JavaScript error handling pattern:**
+
+```javascript
+async function graphql(query, variables, token) {
+  const res = await fetch("https://api.sorobanpay.example.com/graphql", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify({ query, variables }),
+  });
+
+  const json = await res.json();
+
+  if (json.errors?.length) {
+    const [err] = json.errors;
+    const code = err.extensions?.code ?? "UNKNOWN";
+
+    if (code === "UNAUTHENTICATED") {
+      // Token expired — refresh and retry once
+      const newToken = await refreshToken();
+      return graphql(query, variables, newToken);
+    }
+
+    throw Object.assign(new Error(err.message), { code, extensions: err.extensions });
+  }
+
+  return json.data;
+}
+```
+
+---
+
+### Tenant isolation
+
+Every GraphQL resolver enforces **merchant-scoped tenant isolation**. The authenticated merchant can only query records where they are the declared merchant.
+
+Rules enforced at the resolver level (not filterable away by query variables):
+
+| Field / Type | Isolation rule |
+|-------------|----------------|
+| `subscriptions` | Returns only subscriptions where `merchant = jwt.sub` |
+| `payments` | Returns only payments where `merchant = jwt.sub` |
+| `mrr` | Computed over the authenticated merchant's subscriptions only |
+| `webhooks` | Returns only webhooks registered by the authenticated merchant |
+
+Attempting to query another tenant's subscriber directly (e.g., providing a different merchant address as a filter variable) will return an empty result set, not an error. The server silently overrides the `merchant` filter with the JWT claim.
+
+**Example — querying a specific subscriber:**
+
+```graphql
+# Valid: the merchant filter is automatically applied from the JWT.
+# The subscriber filter further narrows within your own subscriptions.
+query SubscriberDetail($subscriber: String!) {
+  subscriptions(
+    filter: { subscriber: $subscriber, status: ACTIVE }
+    first: 1
+  ) {
+    edges {
+      node { subscriber merchant amount interval nextPayment status }
+    }
+  }
+}
+```
+
+```json
+{ "subscriber": "GABC...SUBSCRIBER" }
+```
+
+If `GABC...SUBSCRIBER` does not have an active subscription with your merchant account, the `edges` array is empty — not a 403 error. This prevents merchant address enumeration.
+
+---
+
 ## See Also
 
 - [Storage TTL Management Guide](./operations.md) — TTL concepts, detection scripts, alert thresholds
 - [Network Configuration Guide](./networks.md) — testnet vs. mainnet RPC and passphrase values
 - Swagger UI: `https://api.sorobanpay.example.com/docs`
+- GraphQL Playground: `https://api.sorobanpay.example.com/graphql` (disabled in production)
 - SEP-10 Spec: https://github.com/stellar/stellar-protocol/blob/master/ecosystem/sep-0010.md
