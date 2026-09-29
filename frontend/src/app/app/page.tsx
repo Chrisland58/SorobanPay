@@ -9,6 +9,7 @@
 
 import { useState, useEffect, useRef } from 'react';
 import SubscriptionForm from '@/components/SubscriptionForm';
+import ContractFooter from '@/components/ContractFooter';
 import OnboardingGuide from '@/components/OnboardingGuide';
 import ShortcutsHelpModal from '@/components/ShortcutsHelpModal';
 import { useWallet } from '@/hooks/useWallet';
@@ -232,6 +233,9 @@ export default function AppPage() {
             </div>
           )}
         </section>
+
+        {/* Contract footer — links to explorer */}
+        <ContractFooter />
 
         {/* ── Payment history section ─────────────────────────────────────── */}
         {publicKey && (

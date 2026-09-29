@@ -1,0 +1,28 @@
+# ─── SorobanPay Contract — Cargo Audit Configuration ─────────────────────────
+#
+# Run: cargo audit --manifest-path contracts/subscription/Cargo.toml \
+#                  --config contracts/subscription/audit.toml
+#
+# ─────────────────────────────────────────────────────────────────────────────
+
+[advisories]
+ignore = [
+    # RUSTSEC-2024-0421 — `idna` accepts Punycode labels that do not produce
+    # any non-ASCII when decoded.
+    #
+    # This crate is a transitive dependency pulled in by soroban-sdk v20.
+    # SorobanPay does NOT perform any hostname or IDNA validation; the `idna`
+    # crate is unused at runtime inside the Wasm contract binary. The
+    # vulnerability does not apply to this use case.
+    #
+    # Remediation path: upgrade to soroban-sdk v21+ once the Stellar network
+    # protocol upgrade to Protocol 22 is deployed and available on testnet and
+    # mainnet. Track: https://github.com/stellar/rs-soroban-sdk/releases
+    "RUSTSEC-2024-0421",
+]
+
+# Treat unmaintained crates as warnings rather than errors, because
+# soroban-sdk v20 pins several older helper crates that are now archived.
+[output]
+deny = ["vulnerability", "unsound"]
+warn = ["unmaintained", "notice", "unsound"]
