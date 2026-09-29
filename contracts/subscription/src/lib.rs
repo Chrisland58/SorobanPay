@@ -1072,4 +1072,7 @@ mod property_tests;
 mod multi_token_tests;
 
 #[cfg(test)]
-mod event_schema_tests;
+mod regression_tests;
+
+#[cfg(test)]
+mod storage_limit_tests;
