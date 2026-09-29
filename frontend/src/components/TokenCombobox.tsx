@@ -73,12 +73,27 @@ function truncateAddress(addr: string): string {
 function filterTokens(tokens: KnownToken[], query: string): KnownToken[] {
   const q = query.trim().toLowerCase();
   if (!q) return tokens;
-  return tokens.filter(
-    (t) =>
-      t.symbol.toLowerCase().includes(q) ||
-      t.name.toLowerCase().includes(q) ||
-      t.contract.toLowerCase().startsWith(q),
-  );
+
+  const getMatchRank = (token: KnownToken): number => {
+    const symbol = token.symbol.toLowerCase();
+    const name = token.name.toLowerCase();
+    const description = token.description?.toLowerCase() ?? "";
+    const contract = token.contract.toLowerCase();
+
+    if (symbol.startsWith(q)) return 0;
+    if (name.startsWith(q)) return 1;
+    if (symbol.includes(q)) return 2;
+    if (name.includes(q)) return 3;
+    if (description.includes(q)) return 4;
+    if (contract.startsWith(q)) return 5;
+    return -1;
+  };
+
+  return tokens
+    .map((token) => ({ token, rank: getMatchRank(token) }))
+    .filter(({ rank }) => rank >= 0)
+    .sort((left, right) => left.rank - right.rank)
+    .map(({ token }) => token);
 }
 
 // ─── Component ────────────────────────────────────────────────────────────────
@@ -278,7 +293,7 @@ export function TokenCombobox({
     "w-full rounded-lg bg-gray-800 border border-gray-700 px-4 py-3 text-base " +
     "text-white placeholder-gray-500 " +
     "focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400 focus-visible:ring-offset-2 focus-visible:ring-offset-gray-900 " +
-    "disabled:opacity-50 min-h-[48px] transition-all duration-150";
+    "disabled:opacity-50 min-h-[48px] transition-all duration-150 motion-reduce:transition-none";
 
   const errorCls = hasError
     ? "border-red-500 ring-1 ring-red-400/30 focus-visible:ring-red-400"
@@ -377,8 +392,10 @@ export function TokenCombobox({
                      py-1 text-sm"
         >
           {filteredTokens.length === 0 && (
-            <li className="px-4 py-2 text-gray-500 text-xs">
-              No known tokens match — use the custom address option below.
+            <li role="presentation" className="px-4 py-2 text-gray-500 text-xs">
+              <span role="status" aria-live="polite">
+                No known tokens match. Use the custom address option below.
+              </span>
             </li>
           )}
 
@@ -398,7 +415,7 @@ export function TokenCombobox({
                   e.preventDefault();
                   selectToken(token);
                 }}
-                className={`flex items-center gap-3 px-4 py-2.5 cursor-pointer select-none transition-colors
+                className={`flex items-center gap-3 px-4 py-2.5 cursor-pointer select-none transition-colors motion-reduce:transition-none
                   ${isActive ? "bg-blue-700/40 text-white" : "text-gray-200 hover:bg-gray-800"}
                   ${isSelected ? "font-semibold" : ""}
                 `}
