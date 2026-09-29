@@ -543,3 +543,52 @@ export function mapError(err: unknown): MappedError {
     message: raw.length > 0 ? raw : FALLBACK_ERROR.message,
   };
 }
+
+// ─── Unified Error Language (UX-114) ──────────────────────────────────────────
+
+export interface UnifiedErrorPresentation {
+  title: string;
+  message: string;
+  action: string;
+  docsUrl?: string;
+}
+
+/**
+ * Normalizes error phrasing so inline alert banners and toast notifications
+ * present identical user-facing explanations and actionable recovery instructions.
+ */
+export function formatUnifiedError(err: unknown): UnifiedErrorPresentation {
+  const mapped = isContractLifecycleError(err)
+    ? mapLifecycleError(err)
+    : mapError(err);
+
+  return {
+    title: 'Action required',
+    message: mapped.message,
+    action: mapped.action,
+    docsUrl: mapped.docsUrl,
+  };
+}
+
+/** Format error suitable for inline alert banner components */
+export function formatInlineError(err: unknown): { title: string; body: string; action: string; docsUrl?: string } {
+  const unified = formatUnifiedError(err);
+  return {
+    title: unified.title,
+    body: unified.message,
+    action: unified.action,
+    docsUrl: unified.docsUrl,
+  };
+}
+
+/** Format error suitable for toast notifications */
+export function formatToastError(err: unknown): { title: string; message: string; action: string; docsUrl?: string } {
+  const unified = formatUnifiedError(err);
+  return {
+    title: unified.title,
+    message: unified.message,
+    action: unified.action,
+    docsUrl: unified.docsUrl,
+  };
+}
+

@@ -4,7 +4,7 @@
  * Skeleton.tsx
  *
  * Reusable skeleton loading components for async data fetch areas.
- * Uses Tailwind's `animate-pulse` utility for a pulsing shimmer effect.
+ * Uses a motion-safe pulse so reduced-motion preferences are respected.
  *
  * FE-46: Add skeleton loading states for all async data fetches.
  *
@@ -34,7 +34,7 @@ interface SkeletonBaseProps {
 export function SkeletonBlock({ className = "", label = "Loading…" }: SkeletonBaseProps) {
   return (
     <div
-      className={`animate-pulse rounded bg-gray-200 dark:bg-gray-800 ${className}`}
+      className={`motion-safe:animate-pulse rounded bg-gray-200 dark:bg-gray-800 ${className}`}
       aria-hidden="true"
       role="presentation"
     >
@@ -220,6 +220,51 @@ export function SkeletonPaymentHistory({
         </div>
       </div>
     </section>
+  );
+}
+
+export function PageLoadingSkeleton() {
+  return (
+    <main
+      aria-busy="true"
+      className="min-h-[60vh] w-full px-4 py-8 sm:py-12"
+    >
+      <p role="status" aria-label="Loading page" className="sr-only">
+        Loading page
+      </p>
+      <div
+        aria-hidden="true"
+        className="mx-auto w-full max-w-5xl space-y-6"
+      >
+        <div className="space-y-3">
+          <SkeletonLine width="w-48 sm:w-64" height="h-8" />
+          <SkeletonLine width="w-3/4 sm:w-96" height="h-4" />
+        </div>
+        <div className="rounded-xl border border-gray-200 bg-gray-50/40 p-4 dark:border-gray-800 dark:bg-gray-900/40 sm:p-6">
+          <div className="mb-5 flex flex-wrap items-center justify-between gap-3">
+            <SkeletonLine width="w-36" height="h-5" />
+            <SkeletonBlock className="h-9 w-24 rounded-lg" />
+          </div>
+          <div className="space-y-3">
+            {[0, 1, 2, 3].map((row) => (
+              <div
+                key={row}
+                className="flex min-h-14 items-center gap-3 border-b border-gray-200 py-3 last:border-0 dark:border-gray-800 sm:gap-6"
+              >
+                <SkeletonLine width="w-1/3 sm:w-1/4" height="h-4" />
+                <SkeletonLine width="w-1/4 sm:w-1/5" height="h-4" />
+                <SkeletonLine width="w-1/4 sm:w-1/6" height="h-4" />
+                <SkeletonBlock className="ml-auto h-6 w-16 rounded-full" />
+              </div>
+            ))}
+          </div>
+        </div>
+        <div className="grid gap-4 sm:grid-cols-2">
+          <SkeletonBlock className="h-28 w-full rounded-xl" />
+          <SkeletonBlock className="h-28 w-full rounded-xl" />
+        </div>
+      </div>
+    </main>
   );
 }
 

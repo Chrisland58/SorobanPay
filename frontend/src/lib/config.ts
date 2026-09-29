@@ -1,240 +1,318 @@
-"use client";
-
 /**
  * config.ts
  *
- * Typed, deterministic, environment-driven feature flags for experimental flows.
- * All flags are default-off; enable only via explicit environment variables.
+ * Frontend environment validation for SorobanPay.
  *
- * Design principles:
- *  - Default-off: All experimental features disabled unless explicitly enabled
- *  - Deterministic: Same env vars produce same behavior across server/client
- *  - Type-safe: TypeScript enforces flag existence and boolean values
- *  - Observable: Console warnings when dev-only flags are active in prod
+ * Validates all NEXT_PUBLIC_* configuration at startup and:
+ *   1. Throws a descriptive error at module-load time if required vars are
+ *      missing or malformed — failing loudly before any component renders.
+ *   2. Prevents any SERVER-side secrets (variables without the NEXT_PUBLIC_
+ *      prefix) from being referenced in client code.  This file is the single
+ *      gatekeeper: components import typed, validated values from here rather
+ *      than accessing `process.env` directly.
+ *   3. Exposes a fully-typed `AppConfig` object that downstream modules can
+ *      import without re-validating.
  *
- * Priority order:
- *  1. Environment variable (NEXT_PUBLIC_FF_*)
- *  2. Default (always false for experimental features)
+ * ## Secret prevention
  *
- * Usage:
- *  ```ts
- *  import { featureFlags } from '@/lib/config';
+ * Next.js only inlines `NEXT_PUBLIC_*` variables into client bundles at build
+ * time.  Any reference to a non-prefixed variable in client-side code will be
+ * `undefined` at runtime (the build does NOT leak the value, but silently
+ * produces undefined instead).  This file makes that implicit contract
+ * explicit:
  *
- *  if (featureFlags.stagedPayments) {
- *    // Show experimental two-phase payment UI
- *  }
- *  ```
+ *   - We enumerate every variable we expect.
+ *   - All expected variables MUST start with `NEXT_PUBLIC_`.
+ *   - Any reference to a non-public name throws a `ConfigError` immediately so
+ *     the mistake is caught in CI rather than silently returning `undefined` in
+ *     production.
  *
- * Environment variables:
- *  - NEXT_PUBLIC_FF_STAGED_PAYMENTS: Enable staged payment flow (default: false)
- *  - NEXT_PUBLIC_FF_BATCH_EXECUTE: Enable batch payment execution (default: false)
- *  - NEXT_PUBLIC_FF_PAYMENT_RETRY: Enable automatic payment retry UI (default: false)
+ * ## Usage
+ *
+ * ```ts
+ * import { appConfig } from '@/lib/config';
+ *
+ * const rpcUrl       = appConfig.rpcUrl;
+ * const contractId   = appConfig.contractId;
+ * const networkPass  = appConfig.networkPassphrase;
+ * ```
+ *
+ * ## Validation bypass for tests
+ *
+ * Call `setTestConfig(overrides)` in `beforeEach` / `afterEach` to inject
+ * test values without touching process.env.  Call `resetConfig()` in
+ * `afterEach` to restore the real environment.
+ *
+ * Issue #1052 — Add frontend environment validation
  */
 
-// ─── Types ─────────────────────────────────────────────────────────────────────
+// ─── Forbidden name guard ────────────────────────────────────────────────────
+//
+// This compile-time tuple lists every server-side variable name that must
+// NEVER appear in client code.  If you add a new variable to `readEnv` below,
+// TypeScript will error here if it does not start with `NEXT_PUBLIC_`.
+// (Runtime enforcement is provided by `assertPublicName`.)
 
-/**
- * Feature flags configuration.
- * Each flag represents an experimental or staged feature that can be toggled
- * via environment variables.
- */
-export interface FeatureFlags {
-  /**
-   * Staged Payments: Enable multi-phase payment flow with separate confirmation.
-   * When enabled, allows payment submissions to return intermediate confirmation
-   * state before final on-chain confirmation (two-phase flow).
-   *
-   * Env: NEXT_PUBLIC_FF_STAGED_PAYMENTS
-   * Default: false
-   */
-  stagedPayments: boolean;
+type AssertStartsWith<S extends string, Prefix extends string> =
+  S extends `${Prefix}${string}` ? S : never;
 
-  /**
-   * Batch Payment Execution: Enable batch collection of payments in a single operation.
-   * When enabled, merchants can execute multiple subscriber payments atomically.
-   *
-   * Env: NEXT_PUBLIC_FF_BATCH_EXECUTE
-   * Default: false
-   */
-  batchPaymentExecution: boolean;
+type PublicEnvKey = AssertStartsWith<
+  | 'NEXT_PUBLIC_CONTRACT_ID'
+  | 'NEXT_PUBLIC_RPC_URL'
+  | 'NEXT_PUBLIC_NETWORK_PASSPHRASE'
+  | 'NEXT_PUBLIC_STELLAR_NETWORK'
+  | 'NEXT_PUBLIC_CONFIG_ENDPOINT'
+  | 'NEXT_PUBLIC_API_BASE_URL',
+  'NEXT_PUBLIC_'
+>;
 
-  /**
-   * Automatic Payment Retry: Enable automatic retry UI for failed payments.
-   * When enabled, failed payments show a retry interface with exponential backoff.
-   *
-   * Env: NEXT_PUBLIC_FF_PAYMENT_RETRY
-   * Default: false
-   */
-  automaticPaymentRetry: boolean;
-}
+// ─── Error types ─────────────────────────────────────────────────────────────
 
-// ─── Constants ──────────────────────────────────────────────────────────────────
-
-/** All known feature flags (for validation and introspection) */
-const FLAG_NAMES = ['stagedPayments', 'batchPaymentExecution', 'automaticPaymentRetry'] as const;
-
-/** Map of feature flag names to their environment variable names */
-const FLAG_ENV_MAP: Record<keyof FeatureFlags, string> = {
-  stagedPayments: 'NEXT_PUBLIC_FF_STAGED_PAYMENTS',
-  batchPaymentExecution: 'NEXT_PUBLIC_FF_BATCH_EXECUTE',
-  automaticPaymentRetry: 'NEXT_PUBLIC_FF_PAYMENT_RETRY',
-};
-
-// ─── State ──────────────────────────────────────────────────────────────────────
-
-/** Cached feature flags (loaded once on first access) */
-let cachedFlags: FeatureFlags | null = null;
-
-// ─── Helpers ─────────────────────────────────────────────────────────────────────
-
-/**
- * Parse a boolean value from environment variable.
- * Accepts: "true", "1", "yes" (case-insensitive) → true
- * Everything else → false
- */
-function parseBoolEnv(value: string | undefined): boolean {
-  if (!value) return false;
-  return /^(true|1|yes)$/i.test(value);
-}
-
-/**
- * Load all feature flags from environment variables.
- * Returns default values (all false) for any undefined variables.
- */
-function loadFlagsFromEnv(): FeatureFlags {
-  return {
-    stagedPayments: parseBoolEnv(process.env.NEXT_PUBLIC_FF_STAGED_PAYMENTS),
-    batchPaymentExecution: parseBoolEnv(process.env.NEXT_PUBLIC_FF_BATCH_EXECUTE),
-    automaticPaymentRetry: parseBoolEnv(process.env.NEXT_PUBLIC_FF_PAYMENT_RETRY),
-  };
-}
-
-/**
- * Log warnings for development-only flags that are active in production.
- * Production is detected by VERCEL_ENV or by absence of NEXT_PUBLIC_DEV_MODE.
- */
-function warnProductionFlags(flags: FeatureFlags): void {
-  // Skip warnings in test environment
-  if (typeof process !== 'undefined' && process.env.NODE_ENV === 'test') {
-    return;
+export class ConfigError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ConfigError';
   }
+}
 
-  // Detect production
-  const isProduction =
-    typeof window !== 'undefined'
-      ? !localStorage.getItem('NEXT_PUBLIC_DEV_MODE')
-      : process.env.VERCEL_ENV === 'production' || process.env.NODE_ENV === 'production';
+// ─── Validated config shape ───────────────────────────────────────────────────
 
-  if (!isProduction) return;
+/**
+ * Fully-validated application configuration.
+ * All fields are guaranteed non-empty strings after validation.
+ */
+export interface AppConfig {
+  /** Soroban RPC endpoint URL (NEXT_PUBLIC_RPC_URL) */
+  readonly rpcUrl: string;
+  /** Deployed SorobanPay contract address (NEXT_PUBLIC_CONTRACT_ID) */
+  readonly contractId: string;
+  /** Stellar network passphrase (NEXT_PUBLIC_NETWORK_PASSPHRASE) */
+  readonly networkPassphrase: string;
+  /** Active network name derived from the passphrase */
+  readonly networkName: 'Mainnet' | 'Testnet';
+  /** Whether the app is running on Stellar mainnet */
+  readonly isProduction: boolean;
+  /** Optional backend API base URL (NEXT_PUBLIC_API_BASE_URL) */
+  readonly apiBaseUrl: string | null;
+}
 
-  // Log warnings for any enabled experimental flags
-  const enabledFlags = (Object.keys(flags) as (keyof FeatureFlags)[]).filter(
-    (key) => flags[key],
-  );
+// ─── Validation rules ─────────────────────────────────────────────────────────
 
-  if (enabledFlags.length > 0) {
-    console.warn(
-      '[config] Experimental feature flags enabled in production:',
-      enabledFlags.join(', '),
+interface EnvVarRule {
+  /** The NEXT_PUBLIC_* variable name */
+  key: PublicEnvKey;
+  /** Whether an empty / missing value is a hard error */
+  required: boolean;
+  /**
+   * Optional validator — return a non-empty string to indicate failure.
+   * Receives the trimmed non-empty value (not called when value is absent).
+   */
+  validate?: (value: string) => string | null;
+}
+
+/** Stellar contract C-address: 56 chars, starts with C */
+function isContractAddress(value: string): boolean {
+  return /^C[A-Z2-7]{55}$/.test(value);
+}
+
+/** Minimal URL check — must have a protocol and host */
+function isUrl(value: string): boolean {
+  try {
+    const u = new URL(value);
+    return u.protocol === 'https:' || u.protocol === 'http:';
+  } catch {
+    return false;
+  }
+}
+
+const ENV_RULES: EnvVarRule[] = [
+  {
+    key: 'NEXT_PUBLIC_RPC_URL',
+    required: true,
+    validate: (v) =>
+      isUrl(v)
+        ? null
+        : `NEXT_PUBLIC_RPC_URL must be a valid URL (got: "${v}")`,
+  },
+  {
+    key: 'NEXT_PUBLIC_CONTRACT_ID',
+    required: true,
+    validate: (v) =>
+      isContractAddress(v)
+        ? null
+        : `NEXT_PUBLIC_CONTRACT_ID must be a 56-character C-address (got: "${v.slice(0, 10)}…")`,
+  },
+  {
+    key: 'NEXT_PUBLIC_NETWORK_PASSPHRASE',
+    required: true,
+    validate: (v) =>
+      v.length >= 10
+        ? null
+        : `NEXT_PUBLIC_NETWORK_PASSPHRASE appears too short (got ${v.length} chars)`,
+  },
+];
+
+// ─── Known passphrases ────────────────────────────────────────────────────────
+
+const MAINNET_PASSPHRASE = 'Public Global Stellar Network ; September 2015';
+const TESTNET_PASSPHRASE = 'Test SDF Network ; September 2015';
+
+function resolveNetworkName(passphrase: string): 'Mainnet' | 'Testnet' {
+  return passphrase === MAINNET_PASSPHRASE ? 'Mainnet' : 'Testnet';
+}
+
+// ─── Runtime guard: prevent server-secret leakage ────────────────────────────
+
+/**
+ * Assert at runtime that we are only reading NEXT_PUBLIC_ variables.
+ * A programmer error (e.g. accidentally typing `process.env.DATABASE_URL`)
+ * will throw immediately in development and CI rather than silently returning
+ * undefined.
+ */
+function assertPublicName(name: string): void {
+  if (!name.startsWith('NEXT_PUBLIC_')) {
+    throw new ConfigError(
+      `[config] Attempted to read non-public env var "${name}" in client code. ` +
+        `Only NEXT_PUBLIC_* variables are available in the browser bundle. ` +
+        `Move server-side secrets to the backend and never reference them here.`,
     );
   }
 }
 
-// ─── Public API ────────────────────────────────────────────────────────────────
+/**
+ * Safe env reader — asserts the name is public before reading.
+ */
+function readEnv(key: PublicEnvKey): string | undefined {
+  assertPublicName(key);
+  return process.env[key]?.trim() || undefined;
+}
+
+// ─── Validation ───────────────────────────────────────────────────────────────
 
 /**
- * Get the current feature flags configuration.
- * Cached on first access; subsequent calls return the same instance.
- *
- * @returns Feature flags configuration object
+ * Validate a raw env map against the defined rules.
+ * Returns a list of error strings (empty means valid).
  */
-export function getFeatureFlags(): FeatureFlags {
-  if (cachedFlags) {
-    return cachedFlags;
+export function validateEnv(
+  env: Partial<Record<PublicEnvKey, string | undefined>>,
+): string[] {
+  const errors: string[] = [];
+
+  for (const rule of ENV_RULES) {
+    const raw = env[rule.key]?.trim();
+
+    if (!raw) {
+      if (rule.required) {
+        errors.push(
+          `Missing required environment variable: ${rule.key}. ` +
+            `Set it in frontend/.env.local (testnet) or your deployment environment (mainnet).`,
+        );
+      }
+      continue;
+    }
+
+    if (rule.validate) {
+      const msg = rule.validate(raw);
+      if (msg) errors.push(msg);
+    }
   }
 
-  const flags = loadFlagsFromEnv();
-  warnProductionFlags(flags);
-  cachedFlags = flags;
-  return flags;
+  return errors;
 }
 
-/**
- * Convenience export of feature flags.
- * Prefer using `getFeatureFlags()` in tests or when you need fresh values.
- * Safe for general usage; exports the cached instance.
- */
-export const featureFlags = getFeatureFlags();
+// ─── Config builder ───────────────────────────────────────────────────────────
 
 /**
- * Check if a specific feature flag is enabled.
- * Useful for single-flag checks in conditions.
- *
- * @param flag - The feature flag name
- * @returns true if the flag is enabled, false otherwise
+ * Build an AppConfig from a validated env map.
+ * Assumes `validateEnv` has already been called and returned no errors.
  */
-export function isFeatureEnabled(flag: keyof FeatureFlags): boolean {
-  return getFeatureFlags()[flag];
+function buildAppConfig(
+  env: Partial<Record<PublicEnvKey, string | undefined>>,
+): AppConfig {
+  const rpcUrl = env['NEXT_PUBLIC_RPC_URL']!.trim();
+  const contractId = env['NEXT_PUBLIC_CONTRACT_ID']!.trim();
+  const networkPassphrase = env['NEXT_PUBLIC_NETWORK_PASSPHRASE']!.trim();
+
+  const apiBaseUrl = env['NEXT_PUBLIC_API_BASE_URL']?.trim() ?? null;
+
+  return {
+    rpcUrl,
+    contractId,
+    networkPassphrase,
+    networkName: resolveNetworkName(networkPassphrase),
+    isProduction: networkPassphrase === MAINNET_PASSPHRASE,
+    apiBaseUrl: apiBaseUrl || null,
+  };
 }
 
-/**
- * Get environment variable name for a feature flag.
- * Useful for documentation or debugging.
- *
- * @param flag - The feature flag name
- * @returns The environment variable name
- */
-export function getFlagEnvName(flag: keyof FeatureFlags): string {
-  return FLAG_ENV_MAP[flag];
-}
+// ─── Module-load validation ───────────────────────────────────────────────────
 
 /**
- * Get all known feature flag names.
- * Useful for introspection or validation.
- *
- * @returns Array of feature flag names
+ * Load and validate configuration from `process.env`.
+ * Throws `ConfigError` immediately if any required variable is missing or invalid.
  */
-export function getAllFlagNames(): (keyof FeatureFlags)[] {
-  return [...FLAG_NAMES];
-}
+function loadConfig(): AppConfig {
+  const env: Partial<Record<PublicEnvKey, string | undefined>> = {
+    NEXT_PUBLIC_RPC_URL: readEnv('NEXT_PUBLIC_RPC_URL'),
+    NEXT_PUBLIC_CONTRACT_ID: readEnv('NEXT_PUBLIC_CONTRACT_ID'),
+    NEXT_PUBLIC_NETWORK_PASSPHRASE: readEnv('NEXT_PUBLIC_NETWORK_PASSPHRASE'),
+    NEXT_PUBLIC_STELLAR_NETWORK: readEnv('NEXT_PUBLIC_STELLAR_NETWORK'),
+    NEXT_PUBLIC_CONFIG_ENDPOINT: readEnv('NEXT_PUBLIC_CONFIG_ENDPOINT'),
+    NEXT_PUBLIC_API_BASE_URL: readEnv('NEXT_PUBLIC_API_BASE_URL'),
+  };
 
-/**
- * Clear cached feature flags (useful for testing).
- * After calling this, the next `getFeatureFlags()` call will re-read env vars.
- */
-export function clearFeatureFlagsCache(): void {
-  cachedFlags = null;
-}
-
-/**
- * Validate that feature flags are correctly configured.
- * This is mainly for documentation; it throws on invalid env var values
- * that don't parse as boolean (though the parser is lenient).
- *
- * @throws Error if feature flag configuration is invalid
- */
-export function validateFeatureFlags(): void {
-  const flags = loadFlagsFromEnv();
-
-  // Flags are always valid since parseBoolEnv doesn't throw.
-  // This function exists for API consistency and future stricter validation.
-  if (!flags) {
-    throw new Error('Feature flags not initialized');
+  const errors = validateEnv(env);
+  if (errors.length > 0) {
+    throw new ConfigError(
+      `[SorobanPay] Environment validation failed:\n` +
+        errors.map((e) => `  • ${e}`).join('\n') +
+        `\n\nSee frontend/.env.example for the required variables.`,
+    );
   }
+
+  return buildAppConfig(env);
+}
+
+// ─── Singleton config ─────────────────────────────────────────────────────────
+
+/**
+ * Validated, typed application configuration loaded at module-import time.
+ *
+ * Import this instead of accessing `process.env` directly in components:
+ *
+ * ```ts
+ * import { appConfig } from '@/lib/config';
+ * const { rpcUrl, contractId } = appConfig;
+ * ```
+ *
+ * @throws {ConfigError} if any required NEXT_PUBLIC_* variable is absent or invalid.
+ */
+export let appConfig: AppConfig = loadConfig();
+
+// ─── Test helpers ─────────────────────────────────────────────────────────────
+
+/**
+ * Override the module-level `appConfig` in tests.
+ * Call `resetConfig()` in `afterEach` to restore production values.
+ *
+ * ```ts
+ * import { setTestConfig, resetConfig } from '@/lib/config';
+ * beforeEach(() => setTestConfig({ contractId: 'C' + 'A'.repeat(55) }));
+ * afterEach(() => resetConfig());
+ * ```
+ */
+export function setTestConfig(overrides: Partial<AppConfig>): void {
+  appConfig = { ...appConfig, ...overrides };
 }
 
 /**
- * Get human-readable description of enabled flags.
- * Useful for logs or debugging.
- *
- * @returns String describing which flags are enabled, or "none"
+ * Restore the module-level `appConfig` to the value loaded from `process.env`.
+ * Use after `setTestConfig` in tests.
  */
-export function describeEnabledFlags(): string {
-  const flags = getFeatureFlags();
-  const enabled = (Object.keys(flags) as (keyof FeatureFlags)[])
-    .filter((key) => flags[key])
-    .map((key) => `${key} (${FLAG_ENV_MAP[key]})`)
-    .join(', ');
-
-  return enabled || 'none';
+export function resetConfig(): void {
+  appConfig = loadConfig();
 }
+
+// ─── Named network passphrases (re-exported for consumers) ───────────────────
+
+export { MAINNET_PASSPHRASE, TESTNET_PASSPHRASE };

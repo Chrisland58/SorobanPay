@@ -82,6 +82,31 @@ interface StoredNotificationPreference {
   email?: string;
 }
 
+export interface StoredWebhookEndpoint {
+  id: number;
+  merchant: string;
+  url: string;
+  active: boolean;
+  createdAt: Date;
+}
+
+export interface StoredWebhookDelivery {
+  id: number;
+  endpointId?: number;
+  eventId?: string;
+  event?: string;
+  merchant?: string;
+  statusCode?: number;
+  success?: boolean;
+  createdAt: Date;
+}
+
+export interface StoredIndexerState {
+  id: number;
+  lastCursor: string | null;
+  updatedAt: Date;
+}
+
 type InMemoryStoredSubscription = {
   subscriber: string;
   merchant: string;
@@ -97,6 +122,9 @@ export class InMemoryPrismaClient {
   private subscriptions: InMemoryStoredSubscription[] = [];
   private auditLogs: StoredAuditLog[] = [];
   private notificationPreferences: StoredNotificationPreference[] = [];
+  private webhookEndpoints: StoredWebhookEndpoint[] = [];
+  private webhookDeliveries: StoredWebhookDelivery[] = [];
+  private indexerStates: StoredIndexerState[] = [];
   private nextEventId = 1;
   private nextSummaryId = 1;
   private nextEndpointId = 1;
@@ -293,6 +321,9 @@ export class InMemoryPrismaClient {
     this.subscriptions = [];
     this.auditLogs = [];
     this.notificationPreferences = [];
+    this.webhookEndpoints = [];
+    this.webhookDeliveries = [];
+    this.indexerStates = [];
     this.nextEventId = 1;
     this.nextSummaryId = 1;
     this.nextEndpointId = 1;

@@ -108,7 +108,7 @@ function LoadingSkeleton() {
       {[1, 2, 3].map((i) => (
         <div
           key={i}
-          className="rounded-2xl border border-gray-800 bg-gray-900 p-5 animate-pulse"
+          className="rounded-2xl border border-gray-800 bg-gray-900 p-5 motion-safe:animate-pulse"
           aria-hidden="true"
         >
           <div className="flex justify-between mb-4">
