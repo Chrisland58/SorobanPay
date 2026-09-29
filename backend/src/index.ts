@@ -28,6 +28,7 @@ import notificationsRouter from './routes/notifications';
 import kycRouter from './routes/kyc';
 import versionRouter from './routes/version';
 import analyticsRouter from './routes/analytics';   // FE-50 / BE-52
+import reportsRouter from './routes/reports';        // BE-58: revenue reporting export
 import adminRouter from './routes/admin';
 import authRouter from './routes/auth';                        // BE-55: merchant auth
 import { buildHealthRouter } from './routes/health';
@@ -35,6 +36,7 @@ import { requireMerchant } from './middleware/merchantAuth';  // BE-55: JWT guar
 import { reconcile } from './services/reconciler';
 import { PrismaSubscriptionDB, fetchChainEventsFromDB } from './services/reconciler';
 import { getPrometheusMetrics } from './services/metricsService';
+import retriesRouter from './routes/retries';
 import { startRetryWorker, shutdownRetryWorker } from './services/retryQueue';
 
 // ─── Config ─────────────────────────────────────────────────────────────────
@@ -90,12 +92,14 @@ app.use('/health', buildHealthRouter(rpcUrl, contractId));
 // ─── Versioned routes — /api/v1/ ─────────────────────────────────────────────
 app.use('/api/v1/auth',          authRouter);                             // BE-55: unauthenticated
 app.use('/api/v1/subscriptions', requireMerchant, subscriptionsRouter);  // BE-55: protected
+app.use('/api/v1/subscriptions/:subscriber/:merchant/retries', retriesRouter);
 app.use('/api/v1/webhooks',      webhooksRouter);
 app.use('/api/v1/summaries',     summariesRouter);
 app.use('/api/v1/reconcile',     reconcileRouter);
 app.use('/api/v1/notifications', notificationsRouter);  // BE-68
 app.use('/api/v1/admin',         adminRouter);          // BE-75: admin dashboard
 app.use('/api/v1/analytics',     requireMerchant, analyticsRouter);  // FE-50: revenue analytics
+app.use('/api/v1/reports',       requireMerchant, reportsRouter);    // BE-58 / #798: payment reports export
 
 // ─── Prometheus metrics (unauthenticated — restrict to internal network) ─────
 app.get('/metrics', (_req, res) => {
@@ -111,6 +115,7 @@ app.use('/api/summaries',     summariesRouter);
 app.use('/api/reconcile',     reconcileRouter);
 app.use('/api/notifications', notificationsRouter);
 app.use('/api/analytics',     analyticsRouter);        // FE-50: backward-compat alias
+app.use('/api/reports',       reportsRouter);          // BE-58 / #798: backward-compat alias
 
 // GET /api  →  same version manifest
 app.use('/api', versionRouter);
@@ -197,8 +202,17 @@ app.listen(PORT, () => {
   eventIndexer.fetchAndStoreEvents();
 });
 
+// ─── Graceful shutdown ────────────────────────────────────────────────────────
 process.on('SIGTERM', async () => {
+  console.log('[server] SIGTERM received — shutting down gracefully...');
   eventIndexer.stopPolling();   // BE-51: stop cursor-based polling
+  await shutdownRetryWorker();
+  process.exit(0);
+});
+
+process.on('SIGINT', async () => {
+  console.log('[server] SIGINT received — shutting down gracefully...');
+  eventIndexer.stopPolling();
   await shutdownRetryWorker();
   process.exit(0);
 });

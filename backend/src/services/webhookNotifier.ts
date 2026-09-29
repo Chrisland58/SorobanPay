@@ -1,4 +1,4 @@
-import { createHash, createHmac, randomUUID } from 'crypto';
+import { createHash, createHmac, randomUUID, timingSafeEqual } from 'crypto';
 import prisma from '../lib/prisma';
 import { getTracer, withSpan, SpanKind } from '../lib/tracing';
 import { enqueueWebhookDelivery, getWebhookQueue } from './webhookQueue'; // BE-53
@@ -47,9 +47,26 @@ export function deriveEventId(txHash: string, eventIndex: number): string {
  *
  * Signature format: "sha256=<hex_digest>"
  */
-export function signPayload(body: string, secret: string): string {
-  const hmac = createHmac('sha256', secret).update(body).digest('hex');
-  return `sha256=${hmac}`;
+export { signPayload, verifyWebhookSignature } from './webhookSignature';
+
+/**
+ * BE-53: Check whether an endpoint's event filter list includes the given
+ * event type.
+ *
+ * The `events` field on WebhookEndpoint is a comma-separated list of event
+ * type strings, e.g. "payment.executed,payment.failed".  An empty string
+ * (or null/undefined) means "deliver all event types".
+ */
+function isEventAllowed(endpointEvents: string | null | undefined, eventType: string): boolean {
+  // No filter configured → deliver everything
+  if (!endpointEvents || endpointEvents.trim() === '') return true;
+
+  const allowed = endpointEvents
+    .split(',')
+    .map((e) => e.trim())
+    .filter(Boolean);
+
+  return allowed.includes(eventType);
 }
 
 /**
@@ -60,7 +77,7 @@ export function signPayload(body: string, secret: string): string {
  * Falls back to direct synchronous delivery when Redis is unavailable.
  */
 export async function notifyWebhooks(payload: WebhookPayload): Promise<void> {
-  const endpoints = await prisma.webhookEndpoint.findMany({
+  const endpoints = await (prisma as any).webhookEndpoint.findMany({
     where: { merchant: payload.merchant, active: true },
   });
 
@@ -70,8 +87,14 @@ export async function notifyWebhooks(payload: WebhookPayload): Promise<void> {
 
   const queue = getWebhookQueue();
 
+  const applicableEndpoints = endpoints.filter((ep: { id: number; url: string; secret: string | null; events: string }) => {
+    if (!ep.events) return true; // Default to all if not set
+    const configuredEvents = ep.events.split(',').map((e) => e.trim());
+    return configuredEvents.includes(payload.event);
+  });
+
   await Promise.all(
-    endpoints.map((ep: { id: number; url: string; secret: string | null }) => {
+    applicableEndpoints.map((ep: { id: number; url: string; secret: string | null }) => {
       if (queue) {
         // BE-53: Enqueue via BullMQ for reliable delivery with backoff
         return enqueueWebhookDelivery({ endpointId: ep.id, payload, eventId });
@@ -204,3 +227,6 @@ async function deliverWithRetry(
 function sleep(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
 }
+
+// Export for unit testing
+export { isEventAllowed };

@@ -9,11 +9,12 @@
 
 import { useState, useEffect, useRef } from 'react';
 import SubscriptionForm from '@/components/SubscriptionForm';
+import ContractFooter from '@/components/ContractFooter';
 import OnboardingGuide from '@/components/OnboardingGuide';
 import ShortcutsHelpModal from '@/components/ShortcutsHelpModal';
 import { useWallet } from '@/hooks/useWallet';
 import { useKeyboardShortcuts, SECTION_IDS } from '@/hooks/useKeyboardShortcuts';
-import { useClipboard } from '@/hooks/useClipboard';
+import BottomNavBar from '@/components/BottomNavBar';
 
 // ─── Live-region for screen-reader announcements ──────────────────────────────
 let _announce: ((msg: string) => void) | null = null;
@@ -80,7 +81,7 @@ export default function AppPage() {
     disconnect,
   } = useWallet();
 
-  const { copy, status: copyStatus } = useClipboard();
+  const [copied, setCopied] = useState(false);
   const { isHelpOpen, openHelp, closeHelp } = useKeyboardShortcuts();
 
   const shortKey = publicKey
@@ -89,7 +90,9 @@ export default function AppPage() {
 
   async function copyKey() {
     if (!publicKey) return;
-    await copy(publicKey);
+    await navigator.clipboard.writeText(publicKey);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
   }
 
   return (
@@ -98,7 +101,7 @@ export default function AppPage() {
       <ShortcutsTriggerButton onClick={openHelp} />
       <ShortcutsHelpModal isOpen={isHelpOpen} onClose={closeHelp} />
 
-      <main className="min-h-screen flex flex-col items-center px-4 py-12">
+      <main className="min-h-screen flex flex-col items-center px-4 py-12 pb-24 md:pb-12">
         {/* Onboarding guide */}
         <OnboardingGuide isConnected={!!publicKey} />
 
@@ -164,7 +167,6 @@ export default function AppPage() {
                 <span className="h-2 w-2 rounded-full bg-green-400 flex-shrink-0" aria-hidden="true" />
                 <span className="text-sm text-gray-300 flex-shrink-0">Connected:</span>
                 <button
-                  type="button"
                   onClick={copyKey}
                   title={publicKey}
                   aria-label={`Copy full public key: ${publicKey}`}
@@ -174,10 +176,9 @@ export default function AppPage() {
                 </button>
                 <span
                   aria-live="polite"
-                  role={copyStatus === 'error' ? 'alert' : 'status'}
-                  className={`text-xs flex-shrink-0 ${copyStatus === 'copied' ? 'text-green-400' : copyStatus === 'error' ? 'text-red-400' : 'sr-only'}`}
+                  className={`text-xs transition-opacity duration-300 flex-shrink-0 ${copied ? 'text-green-400 opacity-100' : 'opacity-0'}`}
                 >
-                  {copyStatus === 'copied' ? 'Wallet address copied.' : copyStatus === 'error' ? 'Could not copy wallet address. Try again.' : ''}
+                  Copied!
                 </span>
               </div>
               <button
@@ -234,6 +235,9 @@ export default function AppPage() {
           )}
         </section>
 
+        {/* Contract footer — links to explorer */}
+        <ContractFooter />
+
         {/* ── Payment history section ─────────────────────────────────────── */}
         {publicKey && (
           <section
@@ -277,6 +281,7 @@ export default function AppPage() {
           </section>
         )}
       </main>
+      <BottomNavBar />
     </>
   );
 }
