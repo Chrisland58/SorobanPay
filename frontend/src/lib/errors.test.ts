@@ -21,6 +21,9 @@ import {
   lifecycleErrorMessage,
   mapLifecycleError,
   mapError,
+  formatUnifiedError,
+  formatInlineError,
+  formatToastError,
 } from './errors';
 
 // ─── ContractLifecycleErrorCode values ────────────────────────────────────────
@@ -356,5 +359,31 @@ describe('mapLifecycleError', () => {
       expect(mapped.message).toBeTruthy();
       expect(mapped.action).toBeTruthy();
     });
+  });
+});
+
+// ─── Unified Toast and Inline Error Language ──────────────────────────────────
+
+describe('Unified Toast and Inline Error Language', () => {
+  it('formats unified error with message and action', () => {
+    const err = new Error('User declined transaction');
+    const unified = formatUnifiedError(err);
+    expect(unified.title).toBe('Action required');
+    expect(unified.message.toLowerCase()).toContain('declined');
+    expect(unified.action).toBeTruthy();
+  });
+
+  it('keeps inline and toast error language identical', () => {
+    const err = new ContractLifecycleError(
+      ContractLifecycleErrorCode.SIGNING_FAILED,
+      'User declined to sign transaction',
+    );
+    const inline = formatInlineError(err);
+    const toast = formatToastError(err);
+
+    expect(inline.title).toBe(toast.title);
+    expect(inline.body).toBe(toast.message);
+    expect(inline.action).toBe(toast.action);
+    expect(inline.docsUrl).toBe(toast.docsUrl);
   });
 });
