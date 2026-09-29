@@ -814,6 +814,15 @@ function ConfirmModal({
             </p>
           </div>
         </div>
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4"
+    >
+      <div className="w-full max-w-md bg-gray-900 border border-gray-700 rounded-2xl shadow-2xl p-6 space-y-5 text-white">
+        <h3 id="confirm-title" className="text-lg font-bold">
+          Confirm subscription
+        </h3>
+        <p className="text-sm text-gray-400">
+          Review the details before authorizing the on-chain transaction.
+        </p>
 
         {/* Low-allowance warning inside the confirmation dialog */}
         {allowanceResult && !allowanceResult.sufficient && (
@@ -838,6 +847,17 @@ function ConfirmModal({
                 title={full ?? undefined}
               >
                 {truncated}
+        <dl className="bg-gray-800/60 rounded-lg divide-y divide-gray-700 text-sm">
+          {[
+            ["Merchant", merchantAddress],
+            ["Token", tokenAddress],
+            ["Amount", `${amount} tokens`],
+            ["Interval", `${days} day${days !== 1 ? "s" : ""} (${interval} s)`],
+          ].map(([label, value]) => (
+            <div key={label} className="flex flex-col gap-0.5 px-4 py-3">
+              <dt className="text-xs text-gray-400 font-medium">{label}</dt>
+              <dd className="break-all font-mono text-xs text-gray-100">
+                {value}
               </dd>
             </div>
           ))}
@@ -856,6 +876,7 @@ function ConfirmModal({
             className="flex-1 rounded-lg bg-blue-600 hover:bg-blue-500 active:bg-blue-700 py-3 text-sm font-semibold transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400"
           >
             Confirm &amp; Authorize
+            Confirm & Authorize
           </button>
         </div>
       </div>
@@ -1413,6 +1434,10 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
   const [amount, setAmount]                   = useState(initialValues?.amount ?? '');
   const [interval, setInterval]               = useState(initialValues?.interval ?? String(DEFAULT_INTERVAL_SECONDS));
 
+  // Issue #22 — track which address fields have been blurred so we can show
+  // inline validation errors proactively (before the user hits submit).
+  const [touchedFields, setTouchedFields] = useState<Record<string, boolean>>({});
+
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isConfirming, setIsConfirming] = useState(false);
   const [confirmingTxHash, setConfirmingTxHash] = useState<string | null>(null);
@@ -1555,6 +1580,7 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
     setFieldErrors({});
     setShowConfirm(false);
     setAllowanceResult(null);
+    setTouchedFields({});
     setMerchantAddress("");
     setTokenAddress("");
     setAmount("");
@@ -1626,6 +1652,24 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
       showToast({ variant: 'error', message: mapped.message, action: mapped.action, docsUrl: mapped.docsUrl });
       setIsSubmitting(false);
     }
+   * Issue #22 — Proactive blur validation for address fields.
+   * When a user leaves a field (onBlur) we mark it as touched and
+   * immediately validate just that field, giving faster feedback than
+   * waiting for form submission.
+   */
+  function handleFieldBlur(field: keyof FieldErrors) {
+    setTouchedFields((prev) => ({ ...prev, [field]: true }));
+    const errors = validateSubscriptionForm({
+      merchantAddress,
+      tokenAddress,
+      amount,
+      interval,
+    });
+    // Only surface errors for fields the user has already interacted with.
+    setFieldErrors((prev) => ({
+      ...prev,
+      [field]: errors[field],
+    }));
   }
 
   function handleSubmit(e: FormEvent) {
@@ -2019,6 +2063,8 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
               autoComplete="off"
               value={merchantAddress}
               onChange={(e) => setMerchantAddress(e.target.value)}
+              onChange={(e) => { setMerchantAddress(e.target.value); if (touchedFields.merchantAddress) handleFieldBlur('merchantAddress'); }}
+              onBlur={() => handleFieldBlur('merchantAddress')}
               disabled={isSubmitting || isConfirming}
               required
               aria-required="true"
@@ -2062,6 +2108,8 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
               id="tokenAddress"
               value={tokenAddress}
               onChange={setTokenAddress}
+              onChange={(v) => { setTokenAddress(v); if (touchedFields.tokenAddress) handleFieldBlur('tokenAddress'); }}
+              onBlur={() => handleFieldBlur('tokenAddress')}
               disabled={isSubmitting || isConfirming}
               hasError={!!fieldErrors.tokenAddress}
               tokens={getKnownTokens(NETWORK_NAME)}

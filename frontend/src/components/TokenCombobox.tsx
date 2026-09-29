@@ -53,6 +53,7 @@ export interface TokenComboboxProps {
   id: string;
   value: string;
   onChange: (value: string) => void;
+  /** Issue #22 — called when the combobox input loses focus */
   onBlur?: () => void;
   disabled?: boolean;
   hasError?: boolean;
@@ -334,8 +335,8 @@ export function TokenCombobox({
         placeholder="Search token (USDC, EURC…) or paste contract address"
         onChange={handleInputChange}
         onFocus={openDropdown}
-        onBlur={onBlur}
         onKeyDown={handleKeyDown}
+        onBlur={onBlur}
         className={`${inputCls} ${errorCls} pr-10`}
       />
 
