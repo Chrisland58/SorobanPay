@@ -29,6 +29,13 @@ jobs:
         with:
           workspaces: contracts/subscription
 
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+
+      - name: Security audit (cargo audit)
+        run: cargo audit --manifest-path contracts/subscription/Cargo.toml
+        working-directory: contracts/subscription
+
       - name: Build (wasm32 release)
         run: cargo build --manifest-path contracts/subscription/Cargo.toml --target wasm32-unknown-unknown --release
 
