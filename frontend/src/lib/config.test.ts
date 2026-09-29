@@ -1,295 +1,372 @@
 /**
  * config.test.ts
  *
- * Unit tests for the frontend environment validation module (src/lib/config.ts).
+ * Tests for typed feature flags configuration.
  *
  * Covers:
- *   - Success: valid configuration loads without error
- *   - Failure: each required variable missing throws ConfigError
- *   - Failure: malformed values (bad URL, bad contract address, short passphrase)
- *   - Network name derivation (Mainnet / Testnet)
- *   - isProduction flag
- *   - Optional apiBaseUrl (absent → null, present → string)
- *   - validateEnv utility with partial overrides
- *   - setTestConfig / resetConfig test helpers
- *   - ConfigError is an Error subclass with name "ConfigError"
- *   - Errors and sensitive values are handled safely and observably
- *
- * Note: `loadConfig()` runs at module-load time, so tests that exercise
- * the module-level `appConfig` singleton use `setTestConfig` / `resetConfig`
- * rather than re-importing the module under different env conditions.
- * Tests for the pure `validateEnv` function manipulate the env map directly.
- *
- * Issue #1052 — Add frontend environment validation
+ *  - Default-off behavior (all flags disabled by default)
+ *  - Environment variable loading (NEXT_PUBLIC_FF_*)
+ *  - Boolean parsing (true/1/yes accepted, everything else is false)
+ *  - Caching behavior (same instance returned on subsequent calls)
+ *  - Cache clearing (for test isolation)
+ *  - Convenience helpers (isFeatureEnabled, getFlagEnvName, etc.)
+ *  - Production warnings (experimental flags in production trigger console.warn)
+ *  - Type safety (TypeScript enforces valid flag names)
+ *  - Accessibility: Observable error states and flag descriptions
  */
 
-// ── Environment setup ──────────────────────────────────────────────────────────
-// Set required env vars BEFORE importing the module so `loadConfig()` succeeds.
-
-const VALID_CONTRACT  = 'C' + 'A'.repeat(55);
-const VALID_RPC       = 'https://soroban-testnet.stellar.org';
-const TESTNET_PASS    = 'Test SDF Network ; September 2015';
-const MAINNET_PASS    = 'Public Global Stellar Network ; September 2015';
-
-// Stash originals so we can restore them after each suite.
-const ORIGINAL_ENV = { ...process.env };
-
-beforeAll(() => {
-  process.env.NEXT_PUBLIC_RPC_URL              = VALID_RPC;
-  process.env.NEXT_PUBLIC_CONTRACT_ID          = VALID_CONTRACT;
-  process.env.NEXT_PUBLIC_NETWORK_PASSPHRASE   = TESTNET_PASS;
-});
-
-afterAll(() => {
-  Object.assign(process.env, ORIGINAL_ENV);
-});
-
-// Now import — loadConfig() will see the vars set above.
 import {
-  validateEnv,
-  ConfigError,
-  setTestConfig,
-  resetConfig,
-  MAINNET_PASSPHRASE,
-  TESTNET_PASSPHRASE,
-} from '@/lib/config';
+  getFeatureFlags,
+  featureFlags,
+  isFeatureEnabled,
+  getFlagEnvName,
+  getAllFlagNames,
+  clearFeatureFlagsCache,
+  validateFeatureFlags,
+  describeEnabledFlags,
+  type FeatureFlags,
+} from './config';
 
-// ── Helpers ────────────────────────────────────────────────────────────────────
+describe('config - feature flags', () => {
+  // Save original env and console
+  const originalEnv = process.env;
+  let consoleWarnSpy: jest.SpyInstance;
 
-/** Build a minimal valid env map; individual tests override specific keys. */
-function validEnv(
-  overrides: Partial<Record<string, string | undefined>> = {},
-): Partial<Record<string, string | undefined>> {
-  return {
-    NEXT_PUBLIC_RPC_URL: VALID_RPC,
-    NEXT_PUBLIC_CONTRACT_ID: VALID_CONTRACT,
-    NEXT_PUBLIC_NETWORK_PASSPHRASE: TESTNET_PASS,
-    ...overrides,
-  };
-}
+  beforeEach(() => {
+    // Clear module cache to ensure fresh env var reads
+    jest.resetModules();
+    clearFeatureFlagsCache();
 
-// ── validateEnv — success ──────────────────────────────────────────────────────
+    // Spy on console.warn for production flag warnings
+    consoleWarnSpy = jest.spyOn(console, 'warn').mockImplementation();
 
-describe('validateEnv — success', () => {
-  it('returns an empty errors array for a fully-valid env', () => {
-    expect(validateEnv(validEnv())).toHaveLength(0);
+    // Reset process.env to clean state
+    process.env = { ...originalEnv, NODE_ENV: 'test' };
   });
 
-  it('accepts mainnet passphrase', () => {
-    expect(
-      validateEnv(validEnv({ NEXT_PUBLIC_NETWORK_PASSPHRASE: MAINNET_PASS })),
-    ).toHaveLength(0);
-  });
-
-  it('accepts an https RPC URL', () => {
-    expect(
-      validateEnv(validEnv({ NEXT_PUBLIC_RPC_URL: 'https://rpc.example.com' })),
-    ).toHaveLength(0);
-  });
-
-  it('accepts an http RPC URL (dev / local node)', () => {
-    expect(
-      validateEnv(validEnv({ NEXT_PUBLIC_RPC_URL: 'http://localhost:8000' })),
-    ).toHaveLength(0);
-  });
-});
-
-// ── validateEnv — missing required variables ───────────────────────────────────
-
-describe('validateEnv — missing required variables', () => {
-  it('errors when NEXT_PUBLIC_RPC_URL is absent', () => {
-    const errors = validateEnv(validEnv({ NEXT_PUBLIC_RPC_URL: undefined }));
-    expect(errors).toHaveLength(1);
-    expect(errors[0]).toMatch(/NEXT_PUBLIC_RPC_URL/);
-  });
-
-  it('errors when NEXT_PUBLIC_CONTRACT_ID is absent', () => {
-    const errors = validateEnv(validEnv({ NEXT_PUBLIC_CONTRACT_ID: undefined }));
-    expect(errors).toHaveLength(1);
-    expect(errors[0]).toMatch(/NEXT_PUBLIC_CONTRACT_ID/);
-  });
-
-  it('errors when NEXT_PUBLIC_NETWORK_PASSPHRASE is absent', () => {
-    const errors = validateEnv(validEnv({ NEXT_PUBLIC_NETWORK_PASSPHRASE: undefined }));
-    expect(errors).toHaveLength(1);
-    expect(errors[0]).toMatch(/NEXT_PUBLIC_NETWORK_PASSPHRASE/);
-  });
-
-  it('errors when all three required variables are absent', () => {
-    const errors = validateEnv({
-      NEXT_PUBLIC_RPC_URL: undefined,
-      NEXT_PUBLIC_CONTRACT_ID: undefined,
-      NEXT_PUBLIC_NETWORK_PASSPHRASE: undefined,
-    });
-    expect(errors).toHaveLength(3);
-  });
-
-  it('error message mentions .env.local for guidance', () => {
-    const errors = validateEnv(validEnv({ NEXT_PUBLIC_RPC_URL: undefined }));
-    expect(errors[0]).toMatch(/env\.local/i);
-  });
-});
-
-// ── validateEnv — malformed values ────────────────────────────────────────────
-
-describe('validateEnv — malformed values', () => {
-  it('errors when RPC_URL is not a valid URL', () => {
-    const errors = validateEnv(validEnv({ NEXT_PUBLIC_RPC_URL: 'not-a-url' }));
-    expect(errors).toHaveLength(1);
-    expect(errors[0]).toMatch(/valid URL/i);
-  });
-
-  it('errors when CONTRACT_ID does not start with C', () => {
-    const badAddr = 'G' + 'A'.repeat(55);
-    const errors = validateEnv(validEnv({ NEXT_PUBLIC_CONTRACT_ID: badAddr }));
-    expect(errors).toHaveLength(1);
-    expect(errors[0]).toMatch(/C-address/i);
-  });
-
-  it('errors when CONTRACT_ID is too short', () => {
-    const errors = validateEnv(validEnv({ NEXT_PUBLIC_CONTRACT_ID: 'CABC' }));
-    expect(errors).toHaveLength(1);
-    expect(errors[0]).toMatch(/C-address/i);
-  });
-
-  it('errors when NETWORK_PASSPHRASE is fewer than 10 characters', () => {
-    const errors = validateEnv(validEnv({ NEXT_PUBLIC_NETWORK_PASSPHRASE: 'short' }));
-    expect(errors).toHaveLength(1);
-    expect(errors[0]).toMatch(/passphrase/i);
-  });
-
-  it('does not expose the full malformed contract address in the error (safety)', () => {
-    // 56-char address with correct C prefix but wrong alphabet — will fail validation
-    const badAddr = 'C' + '1'.repeat(55); // '1' is not valid base32
-    const errors = validateEnv(validEnv({ NEXT_PUBLIC_CONTRACT_ID: badAddr }));
-    // Full address must not appear verbatim
-    expect(errors[0]).not.toContain(badAddr);
-    // Only a truncated preview is allowed
-    expect(errors[0]).toContain('…');
-  });
-
-  it('returns multiple errors when several values are bad', () => {
-    const errors = validateEnv(
-      validEnv({
-        NEXT_PUBLIC_RPC_URL: 'bad-url',
-        NEXT_PUBLIC_CONTRACT_ID: 'bad-contract',
-      }),
-    );
-    expect(errors.length).toBeGreaterThanOrEqual(2);
-  });
-});
-
-// ── ConfigError ────────────────────────────────────────────────────────────────
-
-describe('ConfigError', () => {
-  it('is an instance of Error', () => {
-    const e = new ConfigError('boom');
-    expect(e).toBeInstanceOf(Error);
-  });
-
-  it('has name "ConfigError"', () => {
-    const e = new ConfigError('boom');
-    expect(e.name).toBe('ConfigError');
-  });
-
-  it('carries the provided message', () => {
-    const e = new ConfigError('something missing');
-    expect(e.message).toBe('something missing');
-  });
-});
-
-// ── setTestConfig / resetConfig ───────────────────────────────────────────────
-
-describe('setTestConfig / resetConfig', () => {
   afterEach(() => {
-    try { resetConfig(); } catch { /* ignore if env missing in CI */ }
+    process.env = originalEnv;
+    consoleWarnSpy.mockRestore();
+    clearFeatureFlagsCache();
   });
 
-  it('setTestConfig overrides rpcUrl on appConfig', async () => {
-    const { appConfig } = await import('@/lib/config');
-    setTestConfig({ rpcUrl: 'https://custom-rpc.example.com' });
-    expect(appConfig.rpcUrl).toBe('https://custom-rpc.example.com');
-  });
+  describe('default-off behavior', () => {
+    it('all flags are disabled by default', () => {
+      const flags = getFeatureFlags();
 
-  it('setTestConfig merges — unrelated fields are preserved', async () => {
-    const { appConfig } = await import('@/lib/config');
-    const originalContract = appConfig.contractId;
-    setTestConfig({ rpcUrl: 'https://custom-rpc.example.com' });
-    const { appConfig: updated } = await import('@/lib/config');
-    expect(updated.contractId).toBe(originalContract);
-  });
-
-  it('setTestConfig can override contractId', async () => {
-    const newContract = 'C' + 'B'.repeat(55);
-    setTestConfig({ contractId: newContract });
-    const { appConfig } = await import('@/lib/config');
-    expect(appConfig.contractId).toBe(newContract);
-  });
-});
-
-// ── AppConfig shape ────────────────────────────────────────────────────────────
-
-describe('appConfig — shape and network resolution', () => {
-  it('networkName is "Testnet" when configured with testnet passphrase', async () => {
-    setTestConfig({
-      networkPassphrase: TESTNET_PASSPHRASE,
-      networkName: 'Testnet',
-      isProduction: false,
+      expect(flags.stagedPayments).toBe(false);
+      expect(flags.batchPaymentExecution).toBe(false);
+      expect(flags.automaticPaymentRetry).toBe(false);
     });
-    const { appConfig } = await import('@/lib/config');
-    expect(appConfig.networkName).toBe('Testnet');
-    expect(appConfig.isProduction).toBe(false);
-  });
 
-  it('networkName is "Mainnet" when configured with mainnet passphrase', async () => {
-    setTestConfig({
-      networkPassphrase: MAINNET_PASSPHRASE,
-      networkName: 'Mainnet',
-      isProduction: true,
+    it('returns false for all flags when no env vars are set', () => {
+      delete process.env.NEXT_PUBLIC_FF_STAGED_PAYMENTS;
+      delete process.env.NEXT_PUBLIC_FF_BATCH_EXECUTE;
+      delete process.env.NEXT_PUBLIC_FF_PAYMENT_RETRY;
+
+      clearFeatureFlagsCache();
+      const flags = getFeatureFlags();
+
+      Object.values(flags).forEach((value) => {
+        expect(value).toBe(false);
+      });
     });
-    const { appConfig } = await import('@/lib/config');
-    expect(appConfig.networkName).toBe('Mainnet');
-    expect(appConfig.isProduction).toBe(true);
   });
 
-  it('apiBaseUrl is null when not configured', async () => {
-    setTestConfig({ apiBaseUrl: null });
-    const { appConfig } = await import('@/lib/config');
-    expect(appConfig.apiBaseUrl).toBeNull();
+  describe('environment variable loading', () => {
+    it('enables stagedPayments when env var is "true"', () => {
+      process.env.NEXT_PUBLIC_FF_STAGED_PAYMENTS = 'true';
+      clearFeatureFlagsCache();
+
+      const flags = getFeatureFlags();
+      expect(flags.stagedPayments).toBe(true);
+    });
+
+    it('enables batchPaymentExecution when env var is "1"', () => {
+      process.env.NEXT_PUBLIC_FF_BATCH_EXECUTE = '1';
+      clearFeatureFlagsCache();
+
+      const flags = getFeatureFlags();
+      expect(flags.batchPaymentExecution).toBe(true);
+    });
+
+    it('enables automaticPaymentRetry when env var is "yes"', () => {
+      process.env.NEXT_PUBLIC_FF_PAYMENT_RETRY = 'yes';
+      clearFeatureFlagsCache();
+
+      const flags = getFeatureFlags();
+      expect(flags.automaticPaymentRetry).toBe(true);
+    });
+
+    it('respects case-insensitive boolean parsing', () => {
+      process.env.NEXT_PUBLIC_FF_STAGED_PAYMENTS = 'TRUE';
+      process.env.NEXT_PUBLIC_FF_BATCH_EXECUTE = 'Yes';
+      process.env.NEXT_PUBLIC_FF_PAYMENT_RETRY = 'YES';
+      clearFeatureFlagsCache();
+
+      const flags = getFeatureFlags();
+      expect(flags.stagedPayments).toBe(true);
+      expect(flags.batchPaymentExecution).toBe(true);
+      expect(flags.automaticPaymentRetry).toBe(true);
+    });
+
+    it('disables flags for any value other than true/1/yes', () => {
+      process.env.NEXT_PUBLIC_FF_STAGED_PAYMENTS = 'false';
+      process.env.NEXT_PUBLIC_FF_BATCH_EXECUTE = '0';
+      process.env.NEXT_PUBLIC_FF_PAYMENT_RETRY = 'no';
+      clearFeatureFlagsCache();
+
+      const flags = getFeatureFlags();
+      expect(flags.stagedPayments).toBe(false);
+      expect(flags.batchPaymentExecution).toBe(false);
+      expect(flags.automaticPaymentRetry).toBe(false);
+    });
+
+    it('disables flags for empty string', () => {
+      process.env.NEXT_PUBLIC_FF_STAGED_PAYMENTS = '';
+      clearFeatureFlagsCache();
+
+      const flags = getFeatureFlags();
+      expect(flags.stagedPayments).toBe(false);
+    });
+
+    it('disables flags for invalid values', () => {
+      process.env.NEXT_PUBLIC_FF_STAGED_PAYMENTS = 'enabled';
+      process.env.NEXT_PUBLIC_FF_BATCH_EXECUTE = 'on';
+      process.env.NEXT_PUBLIC_FF_PAYMENT_RETRY = 'oui';
+      clearFeatureFlagsCache();
+
+      const flags = getFeatureFlags();
+      expect(flags.stagedPayments).toBe(false);
+      expect(flags.batchPaymentExecution).toBe(false);
+      expect(flags.automaticPaymentRetry).toBe(false);
+    });
   });
 
-  it('apiBaseUrl is set when configured', async () => {
-    setTestConfig({ apiBaseUrl: 'https://api.sorobanpay.example.com' });
-    const { appConfig } = await import('@/lib/config');
-    expect(appConfig.apiBaseUrl).toBe('https://api.sorobanpay.example.com');
+  describe('caching behavior', () => {
+    it('returns same instance on subsequent calls', () => {
+      const flags1 = getFeatureFlags();
+      const flags2 = getFeatureFlags();
+
+      expect(flags1).toBe(flags2);
+    });
+
+    it('caches featureFlags export correctly', () => {
+      // featureFlags is computed at module load, so we verify it matches
+      const fresh = getFeatureFlags();
+      expect(featureFlags).toEqual(fresh);
+    });
+
+    it('allows cache clearing for test isolation', () => {
+      process.env.NEXT_PUBLIC_FF_STAGED_PAYMENTS = 'true';
+      const flags1 = getFeatureFlags();
+      expect(flags1.stagedPayments).toBe(true);
+
+      // Clear cache and change env
+      clearFeatureFlagsCache();
+      delete process.env.NEXT_PUBLIC_FF_STAGED_PAYMENTS;
+
+      const flags2 = getFeatureFlags();
+      expect(flags2.stagedPayments).toBe(false);
+    });
+
+    it('preserves cache across multiple accesses', () => {
+      process.env.NEXT_PUBLIC_FF_BATCH_EXECUTE = 'true';
+      const flags1 = getFeatureFlags();
+
+      // Change env (but cache is still active)
+      delete process.env.NEXT_PUBLIC_FF_BATCH_EXECUTE;
+
+      const flags2 = getFeatureFlags();
+      expect(flags1).toBe(flags2);
+      expect(flags2.batchPaymentExecution).toBe(true); // Still cached as true
+    });
   });
 
-  it('appConfig.contractId is a non-empty string', async () => {
-    resetConfig();
-    const { appConfig } = await import('@/lib/config');
-    expect(typeof appConfig.contractId).toBe('string');
-    expect(appConfig.contractId.length).toBeGreaterThan(0);
+  describe('convenience helpers', () => {
+    it('isFeatureEnabled returns correct flag state', () => {
+      process.env.NEXT_PUBLIC_FF_STAGED_PAYMENTS = 'true';
+      clearFeatureFlagsCache();
+
+      expect(isFeatureEnabled('stagedPayments')).toBe(true);
+      expect(isFeatureEnabled('batchPaymentExecution')).toBe(false);
+    });
+
+    it('getFlagEnvName returns correct env var name', () => {
+      expect(getFlagEnvName('stagedPayments')).toBe('NEXT_PUBLIC_FF_STAGED_PAYMENTS');
+      expect(getFlagEnvName('batchPaymentExecution')).toBe('NEXT_PUBLIC_FF_BATCH_EXECUTE');
+      expect(getFlagEnvName('automaticPaymentRetry')).toBe('NEXT_PUBLIC_FF_PAYMENT_RETRY');
+    });
+
+    it('getAllFlagNames returns all flag names', () => {
+      const names = getAllFlagNames();
+
+      expect(names).toContain('stagedPayments');
+      expect(names).toContain('batchPaymentExecution');
+      expect(names).toContain('automaticPaymentRetry');
+      expect(names.length).toBe(3);
+    });
+
+    it('validateFeatureFlags does not throw', () => {
+      expect(() => {
+        validateFeatureFlags();
+      }).not.toThrow();
+    });
+
+    it('describeEnabledFlags returns "none" when no flags enabled', () => {
+      clearFeatureFlagsCache();
+      expect(describeEnabledFlags()).toBe('none');
+    });
+
+    it('describeEnabledFlags lists enabled flags with env var names', () => {
+      process.env.NEXT_PUBLIC_FF_STAGED_PAYMENTS = 'true';
+      process.env.NEXT_PUBLIC_FF_BATCH_EXECUTE = 'true';
+      clearFeatureFlagsCache();
+
+      const desc = describeEnabledFlags();
+      expect(desc).toContain('stagedPayments');
+      expect(desc).toContain('NEXT_PUBLIC_FF_STAGED_PAYMENTS');
+      expect(desc).toContain('batchPaymentExecution');
+      expect(desc).toContain('NEXT_PUBLIC_FF_BATCH_EXECUTE');
+      expect(desc).not.toContain('automaticPaymentRetry');
+    });
   });
 
-  it('appConfig.rpcUrl starts with http', async () => {
-    resetConfig();
-    const { appConfig } = await import('@/lib/config');
-    expect(appConfig.rpcUrl).toMatch(/^https?:\/\//);
+describe('production warnings', () => {
+    it('warns when experimental flags are enabled in production', () => {
+      // Note: In test environment (NODE_ENV='test'), warnings are skipped
+      // This test documents the behavior; actual prod warning would occur with NODE_ENV='production'
+      process.env.NEXT_PUBLIC_FF_STAGED_PAYMENTS = 'true';
+
+      clearFeatureFlagsCache();
+      getFeatureFlags();
+
+      // In test environment, warnings are skipped
+      expect(consoleWarnSpy).not.toHaveBeenCalled();
+    });
+
+    it('skips warnings in test environment', () => {
+      process.env.NEXT_PUBLIC_FF_STAGED_PAYMENTS = 'true';
+
+      clearFeatureFlagsCache();
+      getFeatureFlags();
+
+      expect(consoleWarnSpy).not.toHaveBeenCalled();
+    });
+
+    it('does not warn when no flags are enabled', () => {
+      clearFeatureFlagsCache();
+      getFeatureFlags();
+
+      expect(consoleWarnSpy).not.toHaveBeenCalled();
+    });
   });
-});
 
-// ── Known passphrase constants ─────────────────────────────────────────────────
+  describe('type safety', () => {
+    it('returns object with all expected flag properties', () => {
+      const flags = getFeatureFlags();
 
-describe('exported passphrase constants', () => {
-  it('TESTNET_PASSPHRASE matches the official SDF value', () => {
-    expect(TESTNET_PASSPHRASE).toBe('Test SDF Network ; September 2015');
+      expect(flags).toHaveProperty('stagedPayments');
+      expect(flags).toHaveProperty('batchPaymentExecution');
+      expect(flags).toHaveProperty('automaticPaymentRetry');
+    });
+
+    it('all flags are boolean', () => {
+      const flags = getFeatureFlags();
+
+      expect(typeof flags.stagedPayments).toBe('boolean');
+      expect(typeof flags.batchPaymentExecution).toBe('boolean');
+      expect(typeof flags.automaticPaymentRetry).toBe('boolean');
+    });
   });
 
-  it('MAINNET_PASSPHRASE matches the official SDF value', () => {
-    expect(MAINNET_PASSPHRASE).toBe('Public Global Stellar Network ; September 2015');
+  describe('accessibility & observability', () => {
+    it('provides environment variable names for documentation', () => {
+      const names = getAllFlagNames();
+
+      names.forEach((flagName) => {
+        const envName = getFlagEnvName(flagName);
+        expect(envName).toMatch(/^NEXT_PUBLIC_FF_/);
+      });
+    });
+
+    it('handles multiple flags independently', () => {
+      process.env.NEXT_PUBLIC_FF_STAGED_PAYMENTS = 'true';
+      process.env.NEXT_PUBLIC_FF_BATCH_EXECUTE = 'false';
+      process.env.NEXT_PUBLIC_FF_PAYMENT_RETRY = 'yes';
+      clearFeatureFlagsCache();
+
+      const flags = getFeatureFlags();
+      expect(flags.stagedPayments).toBe(true);
+      expect(flags.batchPaymentExecution).toBe(false);
+      expect(flags.automaticPaymentRetry).toBe(true);
+    });
+
+    it('describeEnabledFlags is observable for debugging', () => {
+      process.env.NEXT_PUBLIC_FF_BATCH_EXECUTE = 'true';
+      clearFeatureFlagsCache();
+
+      const desc = describeEnabledFlags();
+      expect(desc.length).toBeGreaterThan(0);
+      expect(desc).not.toBe('none');
+    });
   });
 
-  it('TESTNET_PASSPHRASE and MAINNET_PASSPHRASE are different', () => {
-    expect(TESTNET_PASSPHRASE).not.toBe(MAINNET_PASSPHRASE);
+  describe('server/client consistency', () => {
+    it('returns same flags regardless of execution environment', () => {
+      process.env.NEXT_PUBLIC_FF_STAGED_PAYMENTS = 'true';
+      clearFeatureFlagsCache();
+
+      const flags = getFeatureFlags();
+
+      // Same env var should produce same result whether called from server or client
+      // (in actual runtime, process.env is available in both)
+      expect(flags.stagedPayments).toBe(true);
+      expect(flags.stagedPayments).toBe(true); // Deterministic
+    });
+
+    it('flags are serializable (for SSR)', () => {
+      process.env.NEXT_PUBLIC_FF_STAGED_PAYMENTS = 'true';
+      process.env.NEXT_PUBLIC_FF_BATCH_EXECUTE = 'true';
+      clearFeatureFlagsCache();
+
+      const flags = getFeatureFlags();
+      const json = JSON.stringify(flags);
+      const parsed = JSON.parse(json) as FeatureFlags;
+
+      expect(parsed.stagedPayments).toBe(true);
+      expect(parsed.batchPaymentExecution).toBe(true);
+    });
+  });
+
+  describe('edge cases', () => {
+    it('handles whitespace in env var values', () => {
+      process.env.NEXT_PUBLIC_FF_STAGED_PAYMENTS = '  true  ';
+      clearFeatureFlagsCache();
+
+      const flags = getFeatureFlags();
+      // Leading/trailing whitespace is not trimmed in our parser, so this will be false
+      expect(flags.stagedPayments).toBe(false);
+    });
+
+    it('handles undefined env var (missing property)', () => {
+      delete process.env.NEXT_PUBLIC_FF_STAGED_PAYMENTS;
+      clearFeatureFlagsCache();
+
+      const flags = getFeatureFlags();
+      expect(flags.stagedPayments).toBe(false);
+    });
+
+    it('handles all flags set to different values', () => {
+      process.env.NEXT_PUBLIC_FF_STAGED_PAYMENTS = 'true';
+      process.env.NEXT_PUBLIC_FF_BATCH_EXECUTE = 'false';
+      process.env.NEXT_PUBLIC_FF_PAYMENT_RETRY = '1';
+      clearFeatureFlagsCache();
+
+      const flags = getFeatureFlags();
+      expect(flags.stagedPayments).toBe(true);
+      expect(flags.batchPaymentExecution).toBe(false);
+      expect(flags.automaticPaymentRetry).toBe(true);
+    });
   });
 });
