@@ -50,6 +50,8 @@ export interface MerchantSubscriptionsTableProps {
   onRefresh: () => void;
 }
 
+type SubscriptionStatusFilter = 'all' | 'due' | 'not-due' | 'expired';
+
 // ── Status badge ──────────────────────────────────────────────────────────────
 
 function StatusBadge({ sub }: { sub: MerchantSubscription }) {
@@ -155,6 +157,8 @@ export default function MerchantSubscriptionsTable({
   const [selectedSubscribers, setSelectedSubscribers] = useState<Set<string>>(
     new Set(),
   );
+  const [statusFilter, setStatusFilter] = useState<SubscriptionStatusFilter>('all');
+  const [subscriberQuery, setSubscriberQuery] = useState('');
 
   // Selectable rows: only due, non-expired, non-collecting rows
   const selectableSubscribers = useMemo(
@@ -198,6 +202,16 @@ export default function MerchantSubscriptionsTable({
 
   const dueCount = subscriptions.filter((s) => s.isDue && !s.isExpired).length;
   const selectedCount = selectedSubscribers.size;
+  const normalizedQuery = subscriberQuery.trim().toUpperCase();
+  const filteredSubscriptions = subscriptions.filter((sub) => {
+    const matchesStatus =
+      statusFilter === 'all' ||
+      (statusFilter === 'due' && sub.isDue && !sub.isExpired) ||
+      (statusFilter === 'not-due' && !sub.isDue && !sub.isExpired) ||
+      (statusFilter === 'expired' && sub.isExpired);
+    return matchesStatus && sub.subscriber.toUpperCase().includes(normalizedQuery);
+  });
+  const hasActiveFilters = statusFilter !== 'all' || normalizedQuery.length > 0;
 
   // ── Loading state ──────────────────────────────────────────────────────────
   if (isLoading && subscriptions.length === 0) {
@@ -276,7 +290,7 @@ export default function MerchantSubscriptionsTable({
   return (
     <div className="rounded-2xl border border-gray-800 bg-gray-900/60 overflow-hidden">
       {/* Table toolbar */}
-      <div className="flex flex-wrap items-center justify-between gap-3 px-4 py-3 border-b border-gray-800">
+      <div className="flex flex-col gap-3 px-4 py-3 border-b border-gray-800 sm:flex-row sm:items-center sm:justify-between">
         <div className="flex items-center gap-3 text-sm text-gray-400">
           <span>
             <span className="font-semibold text-white">{subscriptions.length}</span>{' '}
@@ -290,7 +304,46 @@ export default function MerchantSubscriptionsTable({
             </span>
           )}
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex min-w-0 flex-col gap-2 sm:flex-row sm:items-end">
+          <label className="flex min-w-0 flex-col gap-1 text-xs text-gray-400 sm:w-48">
+            Search subscriber
+            <input
+              type="search"
+              value={subscriberQuery}
+              onChange={(event) => setSubscriberQuery(event.target.value)}
+              placeholder="Enter a wallet address"
+              aria-label="Search subscribers by wallet address"
+              className="min-h-[40px] w-full rounded-lg border border-gray-700 bg-gray-900 px-3 text-sm text-gray-100 placeholder:text-gray-500 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400 motion-reduce:transition-none"
+            />
+          </label>
+          <label className="flex flex-col gap-1 text-xs text-gray-400 sm:w-36">
+            Status
+            <select
+              value={statusFilter}
+              onChange={(event) => setStatusFilter(event.target.value as SubscriptionStatusFilter)}
+              aria-label="Filter subscriptions by status"
+              className="min-h-[40px] w-full rounded-lg border border-gray-700 bg-gray-900 px-3 text-sm text-gray-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400 motion-reduce:transition-none"
+            >
+              <option value="all">All statuses</option>
+              <option value="due">Due</option>
+              <option value="not-due">Not due</option>
+              <option value="expired">Expired</option>
+            </select>
+          </label>
+          {hasActiveFilters && (
+            <button
+              type="button"
+              onClick={() => {
+                setSubscriberQuery('');
+                setStatusFilter('all');
+              }}
+              className="min-h-[40px] rounded-lg border border-gray-700 px-3 text-xs text-gray-300 hover:border-gray-500 hover:text-white focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400 motion-reduce:transition-none"
+            >
+              Clear filters
+            </button>
+          )}
+        </div>
+        <div className="flex items-center justify-end gap-2">
           {/* Batch collect */}
           {selectedCount > 0 && (
             <button
@@ -360,7 +413,13 @@ export default function MerchantSubscriptionsTable({
             </tr>
           </thead>
           <tbody>
-            {subscriptions.map((sub) => {
+            {filteredSubscriptions.length === 0 ? (
+              <tr>
+                <td colSpan={7} role="status" className="px-4 py-8 text-center text-sm text-gray-400">
+                  No subscriptions match these filters.
+                </td>
+              </tr>
+            ) : filteredSubscriptions.map((sub) => {
               const isCollecting = collectingRows.has(sub.subscriber);
               const result = rowResults.get(sub.subscriber);
               const isSelected = selectedSubscribers.has(sub.subscriber);
