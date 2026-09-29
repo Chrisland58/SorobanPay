@@ -94,7 +94,7 @@ const inputCls =
   'text-white placeholder-gray-500 ' +
   'focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400 ' +
   'focus-visible:ring-offset-2 focus-visible:ring-offset-gray-900 ' +
-  'disabled:opacity-50 min-h-[48px] transition-all duration-150';
+  'disabled:opacity-50 min-h-[48px] transition-all duration-150 motion-reduce:transition-none';
 
 const errorInputCls =
   'border-red-500 ring-1 ring-red-400/30 focus-visible:ring-red-400';
@@ -111,13 +111,17 @@ function StepIndicator({ current }: { current: number }) {
           const done = n < current;
           const active = n === current;
           return (
-            <li key={n} className="flex items-center flex-1 min-w-0">
-              <div className="flex flex-col items-center flex-shrink-0">
+            <li
+              key={n}
+              aria-current={active ? 'step' : undefined}
+              aria-label={`Step ${n} of ${TOTAL_STEPS}: ${label}`}
+              className="flex items-center flex-1 min-w-0"
+            >
+              <div className="flex min-w-0 flex-col items-center">
                 <span
-                  aria-current={active ? 'step' : undefined}
                   className={`
-                    h-8 w-8 rounded-full flex items-center justify-center text-xs font-bold
-                    transition-colors duration-200
+                    h-8 w-8 shrink-0 rounded-full flex items-center justify-center text-xs font-bold
+                    transition-colors duration-200 motion-reduce:transition-none
                     ${done  ? 'bg-green-600 text-white'  : ''}
                     ${active ? 'bg-blue-600 text-white ring-2 ring-blue-400 ring-offset-2 ring-offset-gray-900' : ''}
                     ${!done && !active ? 'bg-gray-700 text-gray-400' : ''}
@@ -126,7 +130,8 @@ function StepIndicator({ current }: { current: number }) {
                   {done ? '✓' : n}
                 </span>
                 <span className={`
-                  mt-1 text-[10px] font-medium leading-tight text-center hidden sm:block
+                  mt-1 w-full break-words text-[10px] font-medium leading-tight text-center
+                  ${active ? 'block' : 'hidden sm:block'}
                   ${active ? 'text-blue-300' : done ? 'text-green-400' : 'text-gray-500'}
                 `}>
                   {label}
@@ -134,7 +139,7 @@ function StepIndicator({ current }: { current: number }) {
               </div>
               {idx < STEP_LABELS.length - 1 && (
                 <div className={`
-                  flex-1 h-0.5 mx-1 transition-colors duration-300
+                  flex-1 h-0.5 mx-1 transition-colors duration-300 motion-reduce:transition-none
                   ${done ? 'bg-green-600' : 'bg-gray-700'}
                 `} aria-hidden="true" />
               )}
@@ -220,7 +225,7 @@ function StepMerchant({
 
       <button
         type="submit"
-        className="mt-6 w-full rounded-lg bg-blue-600 hover:bg-blue-500 active:bg-blue-700 py-3 text-sm font-semibold text-white min-h-[48px] transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400"
+        className="mt-6 w-full rounded-lg bg-blue-600 hover:bg-blue-500 active:bg-blue-700 py-3 text-sm font-semibold text-white min-h-[48px] transition-colors motion-reduce:transition-none focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400"
       >
         Next: Token &amp; Amount →
       </button>
@@ -344,13 +349,13 @@ function StepTokenAmount({
         </div>
       </div>
 
-      <div className="flex gap-3 mt-6">
+      <div className="flex flex-col gap-3 mt-6 sm:flex-row">
         <button type="button" onClick={onBack}
-          className="flex-1 rounded-lg border border-gray-600 bg-gray-800/60 text-gray-300 hover:bg-gray-700 py-3 text-sm font-semibold min-h-[48px] transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-500">
+          className="flex-1 rounded-lg border border-gray-600 bg-gray-800/60 text-gray-300 hover:bg-gray-700 py-3 text-sm font-semibold min-h-[48px] transition-colors motion-reduce:transition-none focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-500">
           ← Back
         </button>
         <button type="submit"
-          className="flex-1 rounded-lg bg-blue-600 hover:bg-blue-500 active:bg-blue-700 py-3 text-sm font-semibold text-white min-h-[48px] transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400">
+          className="flex-1 rounded-lg bg-blue-600 hover:bg-blue-500 active:bg-blue-700 py-3 text-sm font-semibold text-white min-h-[48px] transition-colors motion-reduce:transition-none focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400">
           Next: Schedule →
         </button>
       </div>
@@ -426,7 +431,7 @@ function StepSchedule({
                 aria-pressed={active}
                 className={`
                   rounded-lg border py-2.5 text-sm font-semibold min-h-[48px]
-                  transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400
+                  transition-colors motion-reduce:transition-none focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400
                   ${active
                     ? 'bg-blue-600 border-blue-500 text-white'
                     : 'bg-gray-800 border-gray-600 text-gray-300 hover:bg-gray-700 hover:border-gray-500'}
@@ -442,7 +447,7 @@ function StepSchedule({
             aria-pressed={useCustom}
             className={`
               rounded-lg border py-2.5 text-sm font-semibold min-h-[48px]
-              transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400
+              transition-colors motion-reduce:transition-none focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400
               ${useCustom
                 ? 'bg-blue-600 border-blue-500 text-white'
                 : 'bg-gray-800 border-gray-600 text-gray-300 hover:bg-gray-700 hover:border-gray-500'}
@@ -490,13 +495,13 @@ function StepSchedule({
         </div>
       )}
 
-      <div className="flex gap-3">
+      <div className="flex flex-col gap-3 sm:flex-row">
         <button type="button" onClick={onBack}
-          className="flex-1 rounded-lg border border-gray-600 bg-gray-800/60 text-gray-300 hover:bg-gray-700 py-3 text-sm font-semibold min-h-[48px] transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-500">
+          className="flex-1 rounded-lg border border-gray-600 bg-gray-800/60 text-gray-300 hover:bg-gray-700 py-3 text-sm font-semibold min-h-[48px] transition-colors motion-reduce:transition-none focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-500">
           ← Back
         </button>
         <button type="submit"
-          className="flex-1 rounded-lg bg-blue-600 hover:bg-blue-500 active:bg-blue-700 py-3 text-sm font-semibold text-white min-h-[48px] transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400">
+          className="flex-1 rounded-lg bg-blue-600 hover:bg-blue-500 active:bg-blue-700 py-3 text-sm font-semibold text-white min-h-[48px] transition-colors motion-reduce:transition-none focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400">
           Next: Review →
         </button>
       </div>
@@ -542,7 +547,7 @@ function StepReview({
 
       <dl className="rounded-xl bg-gray-800/60 border border-gray-700 divide-y divide-gray-700/60 mb-6 overflow-hidden">
         {rows.map(([label, val]) => (
-          <div key={label} className="flex flex-col sm:flex-row sm:items-center gap-0.5 sm:gap-4 px-4 py-3">
+          <div key={label} className="flex min-w-0 flex-col gap-0.5 px-4 py-3 sm:flex-row sm:items-center sm:gap-4">
             <dt className="text-xs text-gray-400 font-semibold shrink-0 sm:w-40">{label}</dt>
             <dd className="font-mono text-sm text-gray-100 break-all">{val}</dd>
           </div>
@@ -561,9 +566,9 @@ function StepReview({
         </div>
       )}
 
-      <div className="flex gap-3">
+      <div className="flex flex-col gap-3 sm:flex-row">
         <button type="button" onClick={onBack}
-          className="flex-1 rounded-lg border border-gray-600 bg-gray-800/60 text-gray-300 hover:bg-gray-700 py-3 text-sm font-semibold min-h-[48px] transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-500">
+          className="flex-1 rounded-lg border border-gray-600 bg-gray-800/60 text-gray-300 hover:bg-gray-700 py-3 text-sm font-semibold min-h-[48px] transition-colors motion-reduce:transition-none focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-500">
           ← Back
         </button>
         <button
@@ -571,7 +576,7 @@ function StepReview({
           onClick={onConfirm}
           disabled={isSelfSubscription}
           aria-disabled={isSelfSubscription}
-          className="flex-1 rounded-lg bg-green-600 hover:bg-green-500 active:bg-green-700 py-3 text-sm font-semibold text-white min-h-[48px] transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-green-400 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-green-600"
+          className="flex-1 rounded-lg bg-green-600 hover:bg-green-500 active:bg-green-700 py-3 text-sm font-semibold text-white min-h-[48px] transition-colors motion-reduce:transition-none focus:outline-none focus-visible:ring-2 focus-visible:ring-green-400 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-green-600"
         >
           Confirm &amp; Sign →
         </button>
@@ -658,13 +663,13 @@ function StepSigning({
           )}
           <p className="text-xs text-gray-400">Your form data has been preserved — review and retry.</p>
         </div>
-        <div className="flex gap-3">
+        <div className="flex flex-col gap-3 sm:flex-row">
           <button type="button" onClick={onRetry}
-            className="flex-1 rounded-lg border border-gray-600 bg-gray-800/60 text-gray-300 hover:bg-gray-700 py-3 text-sm font-semibold min-h-[48px] transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-500">
+            className="flex-1 rounded-lg border border-gray-600 bg-gray-800/60 text-gray-300 hover:bg-gray-700 py-3 text-sm font-semibold min-h-[48px] transition-colors motion-reduce:transition-none focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-500">
             ← Edit details
           </button>
           <button type="button" onClick={() => { hasRun.current = false; submit(); }}
-            className="flex-1 rounded-lg bg-blue-600 hover:bg-blue-500 py-3 text-sm font-semibold text-white min-h-[48px] transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400">
+            className="flex-1 rounded-lg bg-blue-600 hover:bg-blue-500 py-3 text-sm font-semibold text-white min-h-[48px] transition-colors motion-reduce:transition-none focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400">
             Retry
           </button>
         </div>
@@ -680,14 +685,14 @@ function StepSigning({
       </p>
       <div className="rounded-xl bg-blue-900/20 border border-blue-600/40 p-5 space-y-4" role="status" aria-label="Transaction in progress">
         <div className="flex items-center gap-3">
-          <svg className="animate-spin h-6 w-6 text-blue-400 shrink-0" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" aria-hidden="true">
+          <svg className="animate-spin motion-reduce:animate-none h-6 w-6 text-blue-400 shrink-0" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" aria-hidden="true">
             <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
             <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
           </svg>
           <span className="text-sm font-medium text-blue-300">Submitting transaction…</span>
         </div>
         <div className="h-2 w-full bg-gray-700 rounded-full overflow-hidden">
-          <div className="h-full bg-gradient-to-r from-blue-400 via-blue-500 to-blue-400 rounded-full animate-progress" />
+          <div className="h-full bg-gradient-to-r from-blue-400 via-blue-500 to-blue-400 rounded-full animate-progress motion-reduce:animate-none" />
         </div>
         <p className="text-xs text-gray-400 text-center">This may take 10–30 seconds.</p>
       </div>
@@ -714,16 +719,16 @@ function WizardSuccess({
         </h3>
       </div>
 
-      <div className="rounded-xl bg-green-900/30 border border-green-700/60 p-4 space-y-3 mb-5">
+      <div className="min-w-0 rounded-xl bg-green-900/30 border border-green-700/60 p-4 space-y-3 mb-5">
         <div className="bg-gray-800/50 rounded-lg p-3">
           <p className="text-xs text-gray-400 mb-1 font-medium">Transaction hash</p>
           <p className="font-mono text-xs text-gray-200 break-all leading-relaxed">{data.txHash}</p>
         </div>
-        <div className="grid grid-cols-2 gap-x-4 gap-y-2 text-xs text-gray-300">
+        <div className="grid min-w-0 grid-cols-1 gap-x-4 gap-y-2 text-xs text-gray-300 sm:grid-cols-2">
           <span className="font-medium">Amount</span>
-          <span>{data.amount} tokens</span>
+          <span className="break-words">{data.amount} tokens</span>
           <span className="font-medium">Interval</span>
-          <span>Every {days} day{days !== 1 ? 's' : ''}</span>
+          <span className="break-words">Every {days} day{days !== 1 ? 's' : ''}</span>
         </div>
       </div>
 
@@ -734,7 +739,7 @@ function WizardSuccess({
       </ul>
 
       <button type="button" onClick={onReset}
-        className="w-full rounded-lg border-2 border-green-600/70 text-green-300 hover:bg-green-900/40 py-3 text-sm font-semibold min-h-[48px] transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-green-400">
+        className="w-full rounded-lg border-2 border-green-600/70 text-green-300 hover:bg-green-900/40 py-3 text-sm font-semibold min-h-[48px] transition-colors motion-reduce:transition-none focus:outline-none focus-visible:ring-2 focus-visible:ring-green-400">
         Create another subscription
       </button>
     </div>
@@ -814,7 +819,7 @@ function WizardShell() {
             type="button"
             onClick={handleAbandon}
             aria-label="Cancel and start over"
-            className="text-xs text-gray-500 hover:text-gray-300 transition-colors focus:outline-none focus-visible:ring-1 focus-visible:ring-gray-400 rounded px-2 py-1 min-h-[44px] flex items-center"
+            className="text-xs text-gray-500 hover:text-gray-300 transition-colors motion-reduce:transition-none focus:outline-none focus-visible:ring-1 focus-visible:ring-gray-400 rounded px-2 py-1 min-h-[44px] flex items-center"
           >
             Cancel
           </button>
