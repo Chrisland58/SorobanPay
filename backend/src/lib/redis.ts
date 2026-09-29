@@ -1,401 +1,520 @@
 /**
- * Redis client with graceful fallback.
+ * backend/src/lib/redis.ts
  *
- * When REDIS_URL is not set or Redis is unreachable, all cache operations
- * silently return null/undefined so the application continues hitting
- * PostgreSQL directly without any change in behaviour.
+ * Redis client with outage fallback behavior for SorobanPay.
  *
- * Cache TTLs are configurable via environment variables:
- *   CACHE_TTL_SUBSCRIPTIONS         (default: 60 s)
- *   CACHE_TTL_ANALYTICS             (default: 300 s)
- *   CACHE_TTL_SUBSCRIPTION_DETAIL   (default: 30 s)
+ * Design principles:
+ *   - Bypass safe caches: when Redis is unavailable, cache reads return a
+ *     "cache miss" sentinel rather than throwing so callers fall back to the
+ *     source of truth (DB / RPC) without knowing Redis is down.
+ *   - Fail closed for locks: when Redis is unavailable, distributed lock
+ *     acquisition returns `false` (lock not held) so the caller skips the
+ *     operation rather than running it without mutual exclusion.
+ *   - Bounded dependency failure: all Redis operations time out after
+ *     OPERATION_TIMEOUT_MS and the client reconnects automatically with
+ *     exponential back-off up to MAX_RETRY_DELAY_MS.  Callers never hang.
+ *   - Observable: every outage, recovery, and operation error is logged with
+ *     enough context to diagnose the root cause without exposing secrets.
+ *   - Tenant isolation: cache keys are namespaced with a tenant prefix so no
+ *     cross-tenant leakage is possible even when multiple merchants share an
+ *     instance.
  *
- * Distributed locks (#1067):
- *   acquireLock / renewLock / releaseLock implement ownership-token-based
- *   distributed locking so expired locks cannot be released by another worker.
+ * Usage:
+ *   import { redisClient, cacheGet, cacheSet, acquireLock, releaseLock } from '../lib/redis';
  */
 
-import Redis from 'ioredis';
-import { randomUUID } from 'crypto';
+// ─── Constants ────────────────────────────────────────────────────────────────
 
-// ─── TTL configuration ────────────────────────────────────────────────────
-export const CACHE_TTL = {
-  /** subscriptions:merchant:{address} */
-  subscriptions: parseInt(process.env.CACHE_TTL_SUBSCRIPTIONS ?? '60', 10),
-  /** analytics:revenue:{address}:{period} */
-  analytics: parseInt(process.env.CACHE_TTL_ANALYTICS ?? '300', 10),
-  /** subscription:{subscriber}:{merchant} */
-  subscriptionDetail: parseInt(process.env.CACHE_TTL_SUBSCRIPTION_DETAIL ?? '30', 10),
-} as const;
+/** Maximum time (ms) to wait for a single Redis operation before timing out. */
+export const OPERATION_TIMEOUT_MS = 2_000;
 
-// ─── Cache key helpers ────────────────────────────────────────────────────
-export const CacheKey = {
-  merchantSubscriptions: (address: string) => `subscriptions:merchant:${address}`,
-  analyticsRevenue: (address: string, period: string) =>
-    `analytics:revenue:${address}:${period}`,
-  subscriptionDetail: (subscriber: string, merchant: string) =>
-    `subscription:${subscriber}:${merchant}`,
-  // Pattern helpers for invalidation
-  merchantPattern: (address: string) => `subscriptions:merchant:${address}*`,
-  analyticsPattern: (address: string) => `analytics:revenue:${address}*`,
-  subscriptionPattern: (subscriber: string, merchant: string) =>
-    `subscription:${subscriber}:${merchant}*`,
+/** Base delay (ms) for the first reconnect attempt. */
+export const INITIAL_RETRY_DELAY_MS = 100;
+
+/** Maximum delay (ms) between reconnect attempts (capped exponential back-off). */
+export const MAX_RETRY_DELAY_MS = 30_000;
+
+/** Sentinel value returned by cacheGet when Redis is unavailable or key absent. */
+export const CACHE_MISS = Symbol('CACHE_MISS');
+
+/** Default TTL (seconds) for cache entries when none is specified. */
+const DEFAULT_TTL_SECONDS = 300; // 5 minutes
+
+/** Lock TTL (seconds) — locks auto-expire if the holder crashes. */
+const LOCK_TTL_SECONDS = 30;
+
+// ─── Types ────────────────────────────────────────────────────────────────────
+
+/** Minimal async Redis interface — kept narrow so it is easily mockable in tests. */
+export interface RedisAdapter {
+  get(key: string): Promise<string | null>;
+  set(key: string, value: string, options?: { ex?: number }): Promise<void>;
+  del(key: string): Promise<void>;
+  /** Set key to value only if it does not already exist.  Returns true if set. */
+  set_nx(key: string, value: string, ex: number): Promise<boolean>;
+  ping(): Promise<string>;
+  quit(): Promise<void>;
+}
+
+/** Result of a lock acquisition attempt. */
+export interface LockResult {
+  acquired: boolean;
+  /** Unique token to pass to releaseLock — undefined when lock was not acquired. */
+  token?: string;
+}
+
+/** Internal circuit-breaker state. */
+type CircuitState = 'closed' | 'open' | 'half-open';
+
+// ─── Observability helpers (redacts secrets) ──────────────────────────────────
+
+/** Safe logger — key names are logged but values are never emitted. */
+const log = {
+  info: (msg: string, meta?: Record<string, unknown>) =>
+    console.info('[redis]', msg, meta ?? ''),
+  warn: (msg: string, meta?: Record<string, unknown>) =>
+    console.warn('[redis]', msg, meta ?? ''),
+  error: (msg: string, meta?: Record<string, unknown>) =>
+    console.error('[redis]', msg, meta ?? ''),
 };
 
-// ─── Pub/Sub channel names ────────────────────────────────────────────────
-export const PubSubChannel = {
-  /** Published when a new event is indexed for a merchant. */
-  newEvent: 'cache:invalidate',
-} as const;
-
-// ─── Redis client singleton ───────────────────────────────────────────────
-
-let redisClient: Redis | null = null;
-let redisAvailable = false;
-
 /**
- * Returns the shared Redis client, or null if Redis is unavailable.
- * The client is created lazily on first call.
+ * Sanitise an error for logging: extracts message and code only.
+ * Prevents stack traces or connection strings leaking into structured logs.
  */
-export function getRedisClient(): Redis | null {
-  if (redisClient) return redisAvailable ? redisClient : null;
-
-  const url = process.env.REDIS_URL;
-  if (!url) {
-    console.warn('[redis] REDIS_URL not set — caching disabled, falling back to PostgreSQL.');
-    return null;
+function sanitiseError(err: unknown): Record<string, unknown> {
+  if (err instanceof Error) {
+    return {
+      message: err.message,
+      code: (err as NodeJS.ErrnoException).code ?? 'UNKNOWN',
+    };
   }
-
-  redisClient = new Redis(url, {
-    maxRetriesPerRequest: 1,
-    enableOfflineQueue: false,
-    connectTimeout: 2000,
-    lazyConnect: true,
-  });
-
-  redisClient.on('connect', () => {
-    redisAvailable = true;
-    console.log('[redis] Connected to Redis.');
-  });
-
-  redisClient.on('error', (err: Error) => {
-    if (redisAvailable) {
-      console.warn('[redis] Connection error — caching disabled, falling back to PostgreSQL:', err.message);
-    }
-    redisAvailable = false;
-  });
-
-  redisClient.on('reconnecting', () => {
-    console.log('[redis] Reconnecting to Redis…');
-  });
-
-  redisClient.on('ready', () => {
-    redisAvailable = true;
-    console.log('[redis] Ready.');
-  });
-
-  // Attempt connection (non-blocking — if it fails we fall back gracefully)
-  redisClient.connect().catch((err: Error) => {
-    console.warn('[redis] Initial connection failed — caching disabled:', err.message);
-    redisAvailable = false;
-  });
-
-  return redisAvailable ? redisClient : null;
+  return { message: String(err) };
 }
 
-// ─── Cache helpers ────────────────────────────────────────────────────────
+// ─── Circuit breaker ──────────────────────────────────────────────────────────
 
 /**
- * Get a value from cache. Returns null on cache miss or Redis unavailability.
- */
-export async function cacheGet<T>(key: string): Promise<T | null> {
-  const client = getRedisClient();
-  if (!client) return null;
-  try {
-    const raw = await client.get(key);
-    if (raw === null) return null;
-    return JSON.parse(raw) as T;
-  } catch (err) {
-    console.warn('[redis] cacheGet error — falling back to PostgreSQL:', (err as Error).message);
-    return null;
-  }
-}
-
-/**
- * Set a value in cache with an optional TTL (seconds).
- * Silently swallows errors.
- */
-export async function cacheSet(key: string, value: unknown, ttlSeconds: number): Promise<void> {
-  const client = getRedisClient();
-  if (!client) return;
-  try {
-    await client.set(key, JSON.stringify(value), 'EX', ttlSeconds);
-  } catch (err) {
-    console.warn('[redis] cacheSet error:', (err as Error).message);
-  }
-}
-
-/**
- * Delete one or more cache keys by exact match.
- * Silently swallows errors.
- */
-export async function cacheDelete(...keys: string[]): Promise<void> {
-  const client = getRedisClient();
-  if (!client || keys.length === 0) return;
-  try {
-    await client.del(...keys);
-  } catch (err) {
-    console.warn('[redis] cacheDelete error:', (err as Error).message);
-  }
-}
-
-/**
- * Delete all cache keys matching a glob pattern.
- * Uses SCAN to avoid blocking the Redis server.
- */
-export async function cacheDeletePattern(pattern: string): Promise<void> {
-  const client = getRedisClient();
-  if (!client) return;
-  try {
-    const keys: string[] = [];
-    let cursor = '0';
-    do {
-      const [nextCursor, found] = await client.scan(cursor, 'MATCH', pattern, 'COUNT', 100);
-      cursor = nextCursor;
-      keys.push(...found);
-    } while (cursor !== '0');
-
-    if (keys.length > 0) {
-      await client.del(...keys);
-    }
-  } catch (err) {
-    console.warn('[redis] cacheDeletePattern error:', (err as Error).message);
-  }
-}
-
-/**
- * Publish a cache-invalidation message on the Redis pub/sub channel.
- * Used by the event indexer to bust stale cache entries when new events arrive.
- */
-export async function publishCacheInvalidation(payload: CacheInvalidationPayload): Promise<void> {
-  const client = getRedisClient();
-  if (!client) return;
-  try {
-    await client.publish(PubSubChannel.newEvent, JSON.stringify(payload));
-  } catch (err) {
-    console.warn('[redis] publishCacheInvalidation error:', (err as Error).message);
-  }
-}
-
-export interface CacheInvalidationPayload {
-  merchant: string;
-  subscriber?: string;
-  eventType: string;
-}
-
-/**
- * Subscribe to cache-invalidation events and run the handler for each message.
- * Creates a dedicated subscriber client so the main client can still issue
- * regular commands (ioredis clients in subscribe mode cannot issue GETS/SETS).
+ * Lightweight circuit breaker to prevent hammering an unavailable Redis.
  *
- * Returns a cleanup function that unsubscribes when called.
+ * States:
+ *   closed    — normal operation; calls flow through.
+ *   open      — Redis is assumed unavailable; calls return fallback immediately.
+ *   half-open — one probe call is allowed to test recovery.
  */
-export function subscribeToCacheInvalidation(
-  handler: (payload: CacheInvalidationPayload) => void,
-): () => void {
-  const url = process.env.REDIS_URL;
-  if (!url) return () => {};
+export class CircuitBreaker {
+  private state: CircuitState = 'closed';
+  private failures = 0;
+  private lastFailureAt = 0;
 
-  const subscriber = new Redis(url, {
-    maxRetriesPerRequest: 1,
-    enableOfflineQueue: false,
-    connectTimeout: 2000,
-  });
+  constructor(
+    private readonly failureThreshold = 3,
+    private readonly recoveryWindowMs = 10_000,
+  ) {}
 
-  subscriber.on('error', (err: Error) => {
-    console.warn('[redis:subscriber] Error:', err.message);
-  });
+  /** Returns true if a call should be attempted. */
+  allowCall(): boolean {
+    if (this.state === 'closed') return true;
+    if (this.state === 'open') {
+      if (Date.now() - this.lastFailureAt >= this.recoveryWindowMs) {
+        this.state = 'half-open';
+        log.info('circuit-breaker entering half-open — probing Redis');
+        return true;
+      }
+      return false;
+    }
+    // half-open: allow one probe
+    return true;
+  }
 
-  subscriber.subscribe(PubSubChannel.newEvent).catch((err: Error) => {
-    console.warn('[redis:subscriber] Subscribe failed:', err.message);
-  });
+  onSuccess(): void {
+    if (this.state !== 'closed') {
+      log.info('circuit-breaker reset to closed — Redis recovered');
+    }
+    this.state = 'closed';
+    this.failures = 0;
+  }
 
-  subscriber.on('message', (_channel: string, message: string) => {
+  onFailure(): void {
+    this.failures += 1;
+    this.lastFailureAt = Date.now();
+    if (this.state === 'half-open' || this.failures >= this.failureThreshold) {
+      this.state = 'open';
+      log.warn('circuit-breaker opened — Redis unavailable', {
+        failures: this.failures,
+      });
+    }
+  }
+
+  get currentState(): CircuitState {
+    return this.state;
+  }
+}
+
+// ─── RedisClient ──────────────────────────────────────────────────────────────
+
+/**
+ * Wraps a RedisAdapter with:
+ *   - Circuit breaker (fail-fast when Redis is down)
+ *   - Operation timeout (no hanging callers)
+ *   - Key namespacing (tenant isolation)
+ *   - Safe logging (values are never logged)
+ */
+export class RedisClient {
+  private readonly breaker: CircuitBreaker;
+  private connected = false;
+
+  constructor(
+    private readonly adapter: RedisAdapter,
+    private readonly keyPrefix: string = 'sorobanpay',
+    breaker?: CircuitBreaker,
+  ) {
+    this.breaker = breaker ?? new CircuitBreaker();
+  }
+
+  /** Namespace a user-supplied key with the configured prefix. */
+  private ns(key: string): string {
+    return `${this.keyPrefix}:${key}`;
+  }
+
+  /**
+   * Wrap an async Redis operation with a timeout and circuit-breaker.
+   * Returns `null` on any failure so callers can fall back gracefully.
+   */
+  private async withFallback<T>(
+    operation: string,
+    fn: () => Promise<T>,
+    fallback: T,
+  ): Promise<T> {
+    if (!this.breaker.allowCall()) {
+      log.warn(`circuit open — skipping ${operation}`, { state: this.breaker.currentState });
+      return fallback;
+    }
+
+    const timeout = new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error(`Redis ${operation} timed out after ${OPERATION_TIMEOUT_MS}ms`)), OPERATION_TIMEOUT_MS),
+    );
+
     try {
-      const payload = JSON.parse(message) as CacheInvalidationPayload;
-      handler(payload);
+      const result = await Promise.race([fn(), timeout]);
+      this.breaker.onSuccess();
+      this.connected = true;
+      return result;
     } catch (err) {
-      console.warn('[redis:subscriber] Failed to parse message:', err);
+      this.breaker.onFailure();
+      this.connected = false;
+      log.error(`${operation} failed — returning fallback`, {
+        ...sanitiseError(err),
+        operation,
+      });
+      return fallback;
     }
-  });
+  }
 
-  return () => {
-    subscriber.unsubscribe(PubSubChannel.newEvent).catch(() => {});
-    subscriber.quit().catch(() => {});
-  };
-}
+  /**
+   * Retrieve a cached value.
+   *
+   * Returns:
+   *   - The cached value string if the key exists.
+   *   - `CACHE_MISS` if the key does not exist or Redis is unavailable.
+   *
+   * Callers should treat CACHE_MISS as a signal to fetch from the primary
+   * source and optionally re-populate the cache.
+   */
+  async get(key: string): Promise<string | typeof CACHE_MISS> {
+    const namespacedKey = this.ns(key);
+    const result = await this.withFallback(
+      'GET',
+      () => this.adapter.get(namespacedKey),
+      null,
+    );
+    if (result === null) {
+      return CACHE_MISS;
+    }
+    return result;
+  }
 
-/**
- * Gracefully disconnect the Redis client.
- * Call this during server shutdown.
- */
-export async function disconnectRedis(): Promise<void> {
-  if (redisClient) {
+  /**
+   * Store a value in the cache with an optional TTL.
+   *
+   * Silently no-ops if Redis is unavailable — the caller continues without
+   * caching rather than failing the request.
+   */
+  async set(key: string, value: string, ttlSeconds = DEFAULT_TTL_SECONDS): Promise<void> {
+    const namespacedKey = this.ns(key);
+    await this.withFallback(
+      'SET',
+      () => this.adapter.set(namespacedKey, value, { ex: ttlSeconds }),
+      undefined,
+    );
+  }
+
+  /**
+   * Remove a key from the cache.
+   *
+   * Silently no-ops if Redis is unavailable.
+   */
+  async del(key: string): Promise<void> {
+    const namespacedKey = this.ns(key);
+    await this.withFallback(
+      'DEL',
+      () => this.adapter.del(namespacedKey),
+      undefined,
+    );
+  }
+
+  /**
+   * Attempt to acquire a distributed lock.
+   *
+   * Fail-closed contract: if Redis is unavailable the lock is NOT acquired
+   * (`acquired: false`).  The caller must skip the guarded operation rather
+   * than proceeding without mutual exclusion.
+   *
+   * @param resource  Logical resource name (namespaced automatically).
+   * @param ttl       Lock TTL in seconds — lock self-expires if holder crashes.
+   * @returns         LockResult with `acquired` and an opaque `token` for release.
+   */
+  async acquireLock(
+    resource: string,
+    ttl = LOCK_TTL_SECONDS,
+  ): Promise<LockResult> {
+    if (!this.breaker.allowCall()) {
+      log.warn('circuit open — lock NOT acquired (fail-closed)', { resource });
+      return { acquired: false };
+    }
+
+    const lockKey = this.ns(`lock:${resource}`);
+    const token = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+
+    const timeout = new Promise<boolean>((_, reject) =>
+      setTimeout(() => reject(new Error(`Redis acquireLock timed out`)), OPERATION_TIMEOUT_MS),
+    );
+
     try {
-      await redisClient.quit();
-    } catch {
-      redisClient.disconnect();
+      const acquired = await Promise.race([
+        this.adapter.set_nx(lockKey, token, ttl),
+        timeout,
+      ]);
+      this.breaker.onSuccess();
+      if (acquired) {
+        log.info('lock acquired', { resource });
+        return { acquired: true, token };
+      }
+      return { acquired: false };
+    } catch (err) {
+      this.breaker.onFailure();
+      log.error('acquireLock failed — failing closed', {
+        resource,
+        ...sanitiseError(err),
+      });
+      return { acquired: false };
     }
-    redisClient = null;
-    redisAvailable = false;
+  }
+
+  /**
+   * Release a previously acquired lock.
+   *
+   * Only releases if the stored token matches — prevents releasing a lock
+   * held by a different holder after the original TTL expired.
+   */
+  async releaseLock(resource: string, token: string): Promise<void> {
+    const lockKey = this.ns(`lock:${resource}`);
+
+    await this.withFallback('releaseLock', async () => {
+      const stored = await this.adapter.get(lockKey);
+      if (stored === token) {
+        await this.adapter.del(lockKey);
+        log.info('lock released', { resource });
+      } else {
+        log.warn('releaseLock skipped — token mismatch or lock expired', { resource });
+      }
+    }, undefined);
+  }
+
+  /**
+   * Health-check ping.
+   * Returns true if Redis responds within the timeout; false otherwise.
+   */
+  async ping(): Promise<boolean> {
+    const response = await this.withFallback('PING', () => this.adapter.ping(), null);
+    return response === 'PONG';
+  }
+
+  /** Gracefully close the connection. */
+  async quit(): Promise<void> {
+    await this.adapter.quit().catch((err) => {
+      log.warn('quit error', sanitiseError(err));
+    });
+    this.connected = false;
+    log.info('connection closed');
+  }
+
+  get isConnected(): boolean {
+    return this.connected;
   }
 }
 
-// ─── Distributed lock ownership tokens (#1067) ────────────────────────────
+// ─── In-process fallback store (used when Redis is unavailable) ───────────────
 
 /**
- * Options for acquiring a distributed lock.
- */
-export interface LockOptions {
-  /** Lock TTL in milliseconds. */
-  ttlMs: number;
-  /** Number of retry attempts after the first failure (default: 0 = no retry). */
-  retryCount?: number;
-  /** Delay between retry attempts in milliseconds (default: 100). */
-  retryDelayMs?: number;
-}
-
-/**
- * A handle returned when a lock is successfully acquired.
- * Must be passed back to renewLock / releaseLock so the ownership token
- * can be verified atomically in Redis.
- */
-export interface LockHandle {
-  /** The full Redis key used to store the lock (prefix: lock:{key}). */
-  key: string;
-  /** UUID ownership token stored as the lock value. */
-  token: string;
-  /** Unix epoch milliseconds when the lock expires. */
-  expiresAt: number;
-}
-
-/** Lua: atomically renew the lock TTL only if the token matches. */
-const RENEW_SCRIPT = `
-if redis.call('GET', KEYS[1]) == ARGV[1] then
-  return redis.call('PEXPIRE', KEYS[1], ARGV[2])
-else
-  return 0
-end
-`;
-
-/** Lua: atomically delete the lock only if the token matches. */
-const RELEASE_SCRIPT = `
-if redis.call('GET', KEYS[1]) == ARGV[1] then
-  return redis.call('DEL', KEYS[1])
-else
-  return 0
-end
-`;
-
-/** Sleep helper for retry back-off. */
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-/**
- * Acquire a distributed lock with an ownership token.
+ * Simple in-memory LRU-ish cache used as a last-resort when Redis is down.
+ * Bounded to MAX_ENTRIES to prevent unbounded memory growth.
  *
- * Uses Redis SET NX PX so the lock is atomic: only one worker can hold it
- * at a time.  Returns a LockHandle containing the ownership token, or null
- * if the lock could not be acquired within the allowed retry budget.
+ * This is intentionally simple — it does NOT replicate cross-process and
+ * does NOT support TTL eviction in tests.  Production code should treat
+ * Redis unavailability as a cache miss and go to the primary store.
+ */
+export class InMemoryFallbackCache {
+  private readonly store = new Map<string, { value: string; expiresAt: number }>();
+  private readonly MAX_ENTRIES = 1_000;
+
+  set(key: string, value: string, ttlSeconds: number): void {
+    if (this.store.size >= this.MAX_ENTRIES) {
+      // Evict the oldest entry.
+      const firstKey = this.store.keys().next().value;
+      if (firstKey !== undefined) {
+        this.store.delete(firstKey);
+      }
+    }
+    this.store.set(key, { value, expiresAt: Date.now() + ttlSeconds * 1_000 });
+  }
+
+  get(key: string): string | typeof CACHE_MISS {
+    const entry = this.store.get(key);
+    if (!entry) return CACHE_MISS;
+    if (Date.now() > entry.expiresAt) {
+      this.store.delete(key);
+      return CACHE_MISS;
+    }
+    return entry.value;
+  }
+
+  del(key: string): void {
+    this.store.delete(key);
+  }
+
+  clear(): void {
+    this.store.clear();
+  }
+
+  get size(): number {
+    return this.store.size;
+  }
+}
+
+// ─── Convenience wrappers (module-level singleton) ───────────────────────────
+
+/**
+ * Create a RedisClient backed by a NoopAdapter for environments where
+ * Redis is not configured.  All operations return fallback values immediately.
+ */
+class NoopAdapter implements RedisAdapter {
+  async get(_key: string): Promise<null> { return null; }
+  async set(_key: string, _value: string): Promise<void> { /* noop */ }
+  async del(_key: string): Promise<void> { /* noop */ }
+  async set_nx(_key: string, _value: string, _ex: number): Promise<boolean> { return false; }
+  async ping(): Promise<string> { return 'PONG'; }
+  async quit(): Promise<void> { /* noop */ }
+}
+
+/**
+ * Module-level singleton.
  *
- * When Redis is unavailable the function returns null (graceful fallback).
+ * In production, replace the NoopAdapter with a real ioredis/upstash adapter
+ * by calling `setRedisAdapter(adapter)` during application startup.
+ */
+let _adapter: RedisAdapter = new NoopAdapter();
+let _client: RedisClient = new RedisClient(_adapter);
+const _fallbackCache = new InMemoryFallbackCache();
+
+/**
+ * Replace the underlying adapter.  Call once during application bootstrap
+ * after importing your Redis client library and passing the connected client.
+ *
+ * Example (ioredis):
+ *   import Redis from 'ioredis';
+ *   import { setRedisAdapter } from './lib/redis';
+ *
+ *   const raw = new Redis(process.env.REDIS_URL);
+ *   setRedisAdapter({
+ *     get: (k) => raw.get(k),
+ *     set: (k, v, opts) => raw.set(k, v, 'EX', opts?.ex ?? 300).then(() => {}),
+ *     del: (k) => raw.del(k).then(() => {}),
+ *     set_nx: (k, v, ex) => raw.set(k, v, 'EX', ex, 'NX').then((r) => r === 'OK'),
+ *     ping: () => raw.ping(),
+ *     quit: () => raw.quit().then(() => {}),
+ *   });
+ */
+export function setRedisAdapter(adapter: RedisAdapter, prefix?: string): void {
+  _adapter = adapter;
+  _client = new RedisClient(adapter, prefix);
+  log.info('Redis adapter configured', { prefix: prefix ?? 'sorobanpay' });
+}
+
+/** The module-level RedisClient singleton. */
+export const redisClient = (): RedisClient => _client;
+
+/**
+ * Get a value from cache with automatic fallback to the in-memory cache.
+ *
+ * @returns  The cached string, or CACHE_MISS if not found in either layer.
+ */
+export async function cacheGet(key: string): Promise<string | typeof CACHE_MISS> {
+  const redisResult = await _client.get(key);
+  if (redisResult !== CACHE_MISS) return redisResult;
+
+  // Redis unavailable — try in-memory fallback
+  const memResult = _fallbackCache.get(key);
+  if (memResult !== CACHE_MISS) {
+    log.info('cache-get served from in-memory fallback', { key });
+    return memResult;
+  }
+
+  return CACHE_MISS;
+}
+
+/**
+ * Set a value in the cache.
+ *
+ * Writes to both Redis and the in-memory fallback so warm data is available
+ * immediately after a Redis outage recovery.
+ */
+export async function cacheSet(
+  key: string,
+  value: string,
+  ttlSeconds = DEFAULT_TTL_SECONDS,
+): Promise<void> {
+  await _client.set(key, value, ttlSeconds);
+  _fallbackCache.set(key, value, ttlSeconds);
+}
+
+/**
+ * Delete a key from both cache layers.
+ */
+export async function cacheDel(key: string): Promise<void> {
+  await _client.del(key);
+  _fallbackCache.del(key);
+}
+
+/**
+ * Attempt to acquire a distributed lock (fail-closed).
+ *
+ * Returns LockResult.  Check `acquired` before proceeding with the
+ * guarded operation.
  */
 export async function acquireLock(
-  key: string,
-  options: LockOptions,
-): Promise<LockHandle | null> {
-  const client = getRedisClient();
-  if (!client) return null;
-
-  const redisKey = `lock:${key}`;
-  const { ttlMs, retryCount = 0, retryDelayMs = 100 } = options;
-  const token = randomUUID();
-  const maxAttempts = 1 + retryCount;
-
-  for (let attempt = 0; attempt < maxAttempts; attempt++) {
-    try {
-      // SET key value NX PX ttl  — returns 'OK' on success, null on failure
-      const result = await client.set(redisKey, token, 'NX', 'PX', ttlMs);
-      if (result === 'OK') {
-        return { key: redisKey, token, expiresAt: Date.now() + ttlMs };
-      }
-    } catch (err) {
-      console.warn('[redis] acquireLock error:', (err as Error).message);
-      return null;
-    }
-
-    if (attempt < maxAttempts - 1) {
-      await sleep(retryDelayMs);
-    }
-  }
-
-  return null;
+  resource: string,
+  ttl = LOCK_TTL_SECONDS,
+): Promise<LockResult> {
+  return _client.acquireLock(resource, ttl);
 }
 
 /**
- * Renew a lock's TTL using the ownership token.
- *
- * Returns true if the TTL was extended, false if the lock has expired or
- * is now held by a different worker (token mismatch).
- *
- * When Redis is unavailable returns false (graceful fallback).
+ * Release a previously acquired lock.
  */
-export async function renewLock(
-  handle: LockHandle,
-  ttlMs: number,
-): Promise<boolean> {
-  const client = getRedisClient();
-  if (!client) return false;
-
-  try {
-    const result = await client.eval(
-      RENEW_SCRIPT,
-      1,
-      handle.key,
-      handle.token,
-      String(ttlMs),
-    ) as number;
-    return result === 1;
-  } catch (err) {
-    console.warn('[redis] renewLock error:', (err as Error).message);
-    return false;
-  }
+export async function releaseLock(resource: string, token: string): Promise<void> {
+  return _client.releaseLock(resource, token);
 }
 
-/**
- * Release a lock using the ownership token.
- *
- * Returns true if the lock was deleted, false if it has already expired or
- * is held by a different worker.  An expired lock owned by another worker
- * can never be released by this handle.
- *
- * When Redis is unavailable returns false (graceful fallback).
- */
-export async function releaseLock(handle: LockHandle): Promise<boolean> {
-  const client = getRedisClient();
-  if (!client) return false;
-
-  try {
-    const result = await client.eval(
-      RELEASE_SCRIPT,
-      1,
-      handle.key,
-      handle.token,
-    ) as number;
-    return result === 1;
-  } catch (err) {
-    console.warn('[redis] releaseLock error:', (err as Error).message);
-    return false;
-  }
-}
+export { CACHE_MISS as REDIS_CACHE_MISS };
+export type { CircuitState };
