@@ -228,3 +228,23 @@ model PaymentRetry {
   @@index([nextRetryAt])
   @@index([status])
 }
+
+// #1069: Reconciliation audit trail
+// Records every repair action made by runReconciledWithAudit() with full context.
+model ReconciliationAudit {
+  id            Int      @id @default(autoincrement())
+  correlationId String
+  actor         String
+  tenantId      String
+  repairKind    String
+  aggregateId   String
+  beforeValue   String?
+  afterValue    String?
+  sourceEvents  String
+  decision      String
+  timestamp     DateTime @default(now())
+  createdAt     DateTime @default(now())
+
+  @@index([correlationId])
+  @@index([tenantId, timestamp])
+}

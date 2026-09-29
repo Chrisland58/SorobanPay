@@ -115,7 +115,7 @@ type InMemoryStoredSubscription = {
   status: string;
 }
 
-/** Minimal Prisma-compatible client for use in integration tests. */
+  /** Minimal Prisma-compatible client for use in integration tests. */
 export class InMemoryPrismaClient {
   private events: StoredEvent[] = [];
   private summaries: StoredSummary[] = [];
@@ -125,10 +125,12 @@ export class InMemoryPrismaClient {
   private webhookEndpoints: StoredWebhookEndpoint[] = [];
   private webhookDeliveries: StoredWebhookDelivery[] = [];
   private indexerStates: StoredIndexerState[] = [];
+  private reconciliationAudits: any[] = [];
   private nextEventId = 1;
   private nextSummaryId = 1;
   private nextEndpointId = 1;
   private nextDeliveryId = 1;
+  private nextReconciliationAuditId = 1;
 
   event = {
     findFirst: async (args: { where: Partial<StoredEvent> }) => {
@@ -315,6 +317,17 @@ export class InMemoryPrismaClient {
     }
   }
 
+  reconciliationAudit = {
+    create: async (args: { data: any }) => {
+      const record = { id: this.nextReconciliationAuditId++, ...args.data, createdAt: new Date() };
+      this.reconciliationAudits.push(record);
+      return record;
+    },
+    findMany: async (_args?: { where?: any; orderBy?: any }) => {
+      return [...this.reconciliationAudits];
+    },
+  };
+
   reset(): void {
     this.events = [];
     this.summaries = [];
@@ -324,9 +337,11 @@ export class InMemoryPrismaClient {
     this.webhookEndpoints = [];
     this.webhookDeliveries = [];
     this.indexerStates = [];
+    this.reconciliationAudits = [];
     this.nextEventId = 1;
     this.nextSummaryId = 1;
     this.nextEndpointId = 1;
     this.nextDeliveryId = 1;
+    this.nextReconciliationAuditId = 1;
   }
 }
