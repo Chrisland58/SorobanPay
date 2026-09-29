@@ -17,6 +17,12 @@
  * Security:
  *   In production, only HTTPS webhook URLs are delivered to (enforced at
  *   registration time in the webhooks router).
+ *
+ * Persistence (Issue #1064):
+ *   Every attempt records status, HTTP response code, latency (ms), next
+ *   retry time (for failed attempts), and a redacted copy of the payload so
+ *   that sensitive field values (secret, token, password, authorization, key,
+ *   signature) are never written to the database.
  */
 
 import { Queue, Worker, Job } from 'bullmq';
@@ -109,7 +115,7 @@ export function startWebhookWorker(): Worker {
   );
 
   _worker.on('completed', (job) => {
-    console.log(`[webhookQueue] Job ${job.id} completed (endpoint ${job.data.endpointId})`);
+    console.log(`[webhookQueue] Job ${job.id} delivered (endpoint ${job.data.endpointId})`);
   });
 
   _worker.on('failed', (job, err) => {
@@ -133,6 +139,69 @@ export async function shutdownWebhookWorker(): Promise<void> {
   console.log('[webhookQueue] Worker shut down');
 }
 
+// ─── Payload redaction (Issue #1064) ─────────────────────────────────────────
+
+/**
+ * Sensitive field names (case-insensitive) whose values are replaced with
+ * "[REDACTED]" before persisting the payload to the database.
+ *
+ * This prevents secrets, tokens, passwords, and HMAC signatures from being
+ * stored in plaintext in WebhookDelivery.payload, which may be surfaced in
+ * logs, dashboards, or exports.
+ */
+const SENSITIVE_KEYS = new Set([
+  'secret',
+  'token',
+  'password',
+  'authorization',
+  'key',
+  'signature',
+]);
+
+/**
+ * Recursively traverse a parsed JSON value and replace the string value of
+ * any object key whose name matches SENSITIVE_KEYS (case-insensitive) with
+ * the literal string "[REDACTED]".
+ *
+ * Arrays are traversed element-by-element. Primitive values are returned
+ * unchanged.
+ */
+function redactValue(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map(redactValue);
+  }
+  if (value !== null && typeof value === 'object') {
+    const redacted: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      redacted[k] = SENSITIVE_KEYS.has(k.toLowerCase()) ? '[REDACTED]' : redactValue(v);
+    }
+    return redacted;
+  }
+  return value;
+}
+
+/**
+ * Parse `rawBody` as JSON, redact sensitive field values at every nesting
+ * level, and return the re-serialised string.
+ *
+ * If `rawBody` is not valid JSON the original string is returned unchanged
+ * (fail-open: a delivery record is always written, even if it cannot be
+ * redacted).
+ *
+ * @param rawBody  The raw JSON string that would be sent to the merchant.
+ * @returns        A re-serialised JSON string with sensitive values replaced,
+ *                 or the original string if parsing fails.
+ */
+export function redactPayload(rawBody: string): string {
+  try {
+    const parsed = JSON.parse(rawBody);
+    return JSON.stringify(redactValue(parsed));
+  } catch {
+    // Not valid JSON — return as-is so the delivery record is still written.
+    return rawBody;
+  }
+}
+
 // ─── Job processor ────────────────────────────────────────────────────────────
 
 async function processWebhookJob(job: Job<WebhookJobData>): Promise<void> {
@@ -152,6 +221,10 @@ async function processWebhookJob(job: Job<WebhookJobData>): Promise<void> {
   const deliveryId = randomUUID();
   const body = JSON.stringify({ ...payload, eventId });
 
+  // Redact the payload before persisting — the original `body` is used for
+  // the actual HTTP delivery so the merchant receives the full payload.
+  const storedPayload = redactPayload(body);
+
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
     'X-SorobanPay-Event-ID': eventId,
@@ -165,6 +238,9 @@ async function processWebhookJob(job: Job<WebhookJobData>): Promise<void> {
     headers['X-SorobanPay-Signature'] = `sha256=${hmac}`;
   }
 
+  // Track start time for latency measurement (Issue #1064)
+  const startTime = Date.now();
+
   try {
     const res = await fetch(endpoint.url, {
       method: 'POST',
@@ -173,6 +249,8 @@ async function processWebhookJob(job: Job<WebhookJobData>): Promise<void> {
       signal: AbortSignal.timeout(10_000),
     });
 
+    const latencyMs = Date.now() - startTime;
+
     await prisma.webhookDelivery.create({
       data: {
         eventId,
@@ -180,7 +258,7 @@ async function processWebhookJob(job: Job<WebhookJobData>): Promise<void> {
         url: endpoint.url,
         merchant: endpoint.merchant,
         event: payload.event,
-        payload: body,
+        payload: storedPayload,
         statusCode: res.status,
         attempt: attemptNumber,
         success: res.ok,
@@ -189,17 +267,33 @@ async function processWebhookJob(job: Job<WebhookJobData>): Promise<void> {
     });
 
     if (!res.ok) {
+      // Compute next retry time for logging
+      const nextRetryDelayMs = BACKOFF_DELAYS_MS[Math.min(attemptNumber, BACKOFF_DELAYS_MS.length - 1)];
+      const nextRetryAt = new Date(Date.now() + nextRetryDelayMs);
+
+      console.warn(
+        `[webhookQueue] Delivery status=failed event=${payload.event} ` +
+        `endpoint=${endpointId} attempt=${attemptNumber} ` +
+        `statusCode=${res.status} latencyMs=${latencyMs} ` +
+        `nextRetryAt=${nextRetryAt.toISOString()}`,
+      );
       throw new Error(`HTTP ${res.status} from ${endpoint.url}`);
     }
 
     console.log(
-      `[webhookQueue] Delivered ${payload.event} to ${endpoint.url} ` +
-      `(attempt ${attemptNumber}, status ${res.status})`,
+      `[webhookQueue] Delivery status=delivered event=${payload.event} ` +
+      `endpoint=${endpointId} attempt=${attemptNumber} ` +
+      `statusCode=${res.status} latencyMs=${latencyMs}`,
     );
   } catch (err) {
+    const latencyMs = Date.now() - startTime;
     const msg = err instanceof Error ? err.message : String(err);
 
-    // Record failed attempt
+    // Compute next retry time for logging and observability
+    const nextRetryDelayMs = BACKOFF_DELAYS_MS[Math.min(attemptNumber, BACKOFF_DELAYS_MS.length - 1)];
+    const nextRetryAt = new Date(Date.now() + nextRetryDelayMs);
+
+    // Record failed attempt with latency metadata and redacted payload
     await prisma.webhookDelivery.create({
       data: {
         eventId,
@@ -207,7 +301,7 @@ async function processWebhookJob(job: Job<WebhookJobData>): Promise<void> {
         url: endpoint.url,
         merchant: endpoint.merchant,
         event: payload.event,
-        payload: body,
+        payload: storedPayload,
         statusCode: 0,
         attempt: attemptNumber,
         success: false,
@@ -215,6 +309,14 @@ async function processWebhookJob(job: Job<WebhookJobData>): Promise<void> {
         endpointId,
       },
     });
+
+    console.error(
+      `[webhookQueue] Delivery status=failed event=${payload.event} ` +
+      `endpoint=${endpointId} attempt=${attemptNumber} ` +
+      `latencyMs=${latencyMs} ` +
+      `nextRetryAt=${nextRetryAt.toISOString()} ` +
+      `error="${msg}"`,
+    );
 
     // Re-throw so BullMQ can schedule the next retry
     throw err;

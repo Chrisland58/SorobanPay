@@ -101,8 +101,8 @@ jest.mock('../src/lib/prisma', () => ({
       }) => {
         const existing = _mockWebhookEndpoints.find(
           (w) =>
-            w.merchant === (args.create as MockWebhookEndpoint).merchant &&
-            w.url === (args.create as MockWebhookEndpoint).url,
+            w.merchant === (args.create as unknown as MockWebhookEndpoint).merchant &&
+            w.url === (args.create as unknown as MockWebhookEndpoint).url,
         );
         if (existing) {
           Object.assign(existing, args.update);
@@ -299,7 +299,7 @@ describe('Pact provider verification — SorobanPayBackend', () => {
         },
       },
 
-      logLevel: 'warn',
+      logLevel: 'warn' as any,
       // Fail the test if the pact file does not exist (consumer must run first)
       failIfNoPactsFound: true,
     };

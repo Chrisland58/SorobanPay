@@ -36,6 +36,7 @@ import { requireMerchant } from './middleware/merchantAuth';  // BE-55: JWT guar
 import { reconcile } from './services/reconciler';
 import { PrismaSubscriptionDB, fetchChainEventsFromDB } from './services/reconciler';
 import { getPrometheusMetrics } from './services/metricsService';
+import retriesRouter from './routes/retries';
 import { startRetryWorker, shutdownRetryWorker } from './services/retryQueue';
 
 // ─── Config ─────────────────────────────────────────────────────────────────
@@ -91,6 +92,7 @@ app.use('/health', buildHealthRouter(rpcUrl, contractId));
 // ─── Versioned routes — /api/v1/ ─────────────────────────────────────────────
 app.use('/api/v1/auth',          authRouter);                             // BE-55: unauthenticated
 app.use('/api/v1/subscriptions', requireMerchant, subscriptionsRouter);  // BE-55: protected
+app.use('/api/v1/subscriptions/:subscriber/:merchant/retries', retriesRouter);
 app.use('/api/v1/webhooks',      webhooksRouter);
 app.use('/api/v1/summaries',     summariesRouter);
 app.use('/api/v1/reconcile',     reconcileRouter);
@@ -200,8 +202,17 @@ app.listen(PORT, () => {
   eventIndexer.fetchAndStoreEvents();
 });
 
+// ─── Graceful shutdown ────────────────────────────────────────────────────────
 process.on('SIGTERM', async () => {
+  console.log('[server] SIGTERM received — shutting down gracefully...');
   eventIndexer.stopPolling();   // BE-51: stop cursor-based polling
+  await shutdownRetryWorker();
+  process.exit(0);
+});
+
+process.on('SIGINT', async () => {
+  console.log('[server] SIGINT received — shutting down gracefully...');
+  eventIndexer.stopPolling();
   await shutdownRetryWorker();
   process.exit(0);
 });
