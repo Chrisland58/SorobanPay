@@ -1,14 +1,18 @@
 /**
  * #134 — Health endpoint.
- * GET /health  →  200 { status: "ok", ... } | 503 { status: "error", ... }
+ * GET /health  →  200 { status: "ok", apiVersion: "v1", ... } | 503 { status: "error", ... }
  *
  * Checks:
  *  1. Soroban RPC is reachable (getHealth)
  *  2. The configured contract ID is resolvable (getContractData produces any response)
+ *
+ * The response always includes `apiVersion` so monitoring systems and clients
+ * can confirm which API version they are speaking to.
  */
 
 import { Router, Request, Response } from 'express';
 import { rpc, xdr } from '@stellar/stellar-sdk';
+import { DEFAULT_VERSION } from '../middleware/versioning';
 
 export function buildHealthRouter(rpcUrl: string, contractId: string): Router {
   const router = Router();
@@ -45,7 +49,31 @@ export function buildHealthRouter(rpcUrl: string, contractId: string): Router {
     }
 
     const status = healthy ? 'ok' : 'error';
-    res.status(healthy ? 200 : 503).json({ status, checks });
+    res.status(healthy ? 200 : 503).json({
+      status,
+      apiVersion: DEFAULT_VERSION,
+      checks,
+    });
+  });
+
+  // Dedicated readiness probe for Kubernetes
+  router.get('/ready', async (_req: Request, res: Response) => {
+    const checks: Record<string, string> = {};
+    let ready = true;
+
+    try {
+      await server.getHealth();
+      checks.rpc = 'ok';
+    } catch (err) {
+      checks.rpc = `error: ${(err as Error).message}`;
+      ready = false;
+    }
+
+    res.status(ready ? 200 : 503).json({
+      status: ready ? 'ready' : 'not_ready',
+      checks,
+      timestamp: new Date().toISOString(),
+    });
   });
 
   return router;
