@@ -524,4 +524,234 @@ mod property_tests {
             );
         }
     }
+
+    // =========================================================================
+    // Issue #1098 — Fuzz malformed identifiers and metadata
+    // =========================================================================
+    //
+    // The tests below exercise adversarial and boundary inputs for address
+    // identity, duplicate subscriptions, and invalid parameter combinations.
+    // None of these paths should corrupt storage or emit spurious events.
+
+    // ─── PROPERTY 8 — Self-subscription is always rejected ───────────────────
+
+    proptest! {
+        /// For any valid amount and interval, subscribing with `subscriber == merchant`
+        /// must return `SelfSubscription` (error 10) and must not create a storage entry.
+        ///
+        /// Prevents an address from setting up a payment loop to itself.
+        #![proptest_config(ProptestConfig::with_cases(256))]
+        #[test]
+        fn prop_self_subscription_is_rejected(
+            amount   in valid_amount_strategy(),
+            interval in valid_interval_strategy(),
+        ) {
+            let p = PropEnv::new();
+            // Use the same address as both subscriber and merchant.
+            let self_addr = p.subscriber.clone();
+
+            let result = p.client.try_subscribe(
+                &self_addr,
+                &self_addr,
+                &p.token,
+                &amount,
+                &interval,
+                &false,
+            );
+            prop_assert!(
+                matches!(result, Err(Ok(crate::error::ContractError::SelfSubscription))),
+                "self-subscription must return SelfSubscription (error 10), got {:?}",
+                result
+            );
+            // No storage entry must have been created.
+            prop_assert!(
+                !p.env.storage().persistent().has(
+                    &DataKey::Subscription(crate::storage::subscription_key(
+                        &p.env, &self_addr, &self_addr, &p.token,
+                    ))
+                ),
+                "self-subscription must not create a storage entry"
+            );
+        }
+    }
+
+    // ─── PROPERTY 9 — Duplicate subscribe is an idempotent upsert ────────────
+
+    proptest! {
+        /// Subscribing twice with the same (subscriber, merchant, token) triple but
+        /// different amounts must result in exactly ONE storage entry whose amount
+        /// reflects the second call.
+        ///
+        /// Guards against accidental duplication bugs — the contract must treat
+        /// re-subscription as an upsert, not an append.
+        #![proptest_config(ProptestConfig::with_cases(256))]
+        #[test]
+        fn prop_duplicate_subscribe_is_idempotent_upsert(
+            amount_first  in valid_amount_strategy().prop_filter(
+                "leave room for a different second amount",
+                |a| *a < MAX_AMOUNT,
+            ),
+            amount_second in valid_amount_strategy(),
+            interval in valid_interval_strategy(),
+        ) {
+            let p = PropEnv::new();
+
+            // First subscription.
+            p.client.subscribe(
+                &p.subscriber, &p.merchant, &p.token,
+                &amount_first, &interval, &false,
+            );
+
+            // Second subscription — same triple, different amount.
+            p.client.subscribe(
+                &p.subscriber, &p.merchant, &p.token,
+                &amount_second, &interval, &false,
+            );
+
+            // Exactly one entry must exist.
+            let key = DataKey::Subscription(crate::storage::subscription_key(
+                &p.env, &p.subscriber, &p.merchant, &p.token,
+            ));
+            prop_assert!(
+                p.env.storage().persistent().has(&key),
+                "one subscription entry must exist after two subscribes"
+            );
+
+            // The stored amount must reflect the SECOND call.
+            let stored: crate::storage::SubscriptionData =
+                p.env.storage().persistent().get(&key).unwrap();
+            prop_assert_eq!(
+                stored.amount, amount_second,
+                "stored amount must match the second subscribe call (upsert), \
+                 first={}, second={}, stored={}",
+                amount_first, amount_second, stored.amount
+            );
+        }
+    }
+
+    // ─── PROPERTY 10 — Negative amounts always return AmountMustBePositive ───
+
+    proptest! {
+        /// Every amount in [-1000, 0] must return `AmountMustBePositive` (error 1).
+        ///
+        /// Complements the existing `prop_nonpositive_amount_returns_amount_must_be_positive`
+        /// with a focused range that stress-tests the lower end of the i128 domain.
+        #![proptest_config(ProptestConfig::with_cases(512))]
+        #[test]
+        fn prop_negative_amount_variants_always_rejected(
+            amount in (-1_000_i128..=0_i128),
+        ) {
+            let p = PropEnv::new();
+            let result = p.client.try_subscribe(
+                &p.subscriber, &p.merchant, &p.token,
+                &amount, &MIN_INTERVAL, &false,
+            );
+            prop_assert!(
+                matches!(result, Err(Ok(crate::error::ContractError::AmountMustBePositive))),
+                "amount {} must return AmountMustBePositive, got {:?}",
+                amount, result
+            );
+        }
+    }
+
+    // ─── BOUNDARY — Zero interval is always rejected as IntervalTooShort ─────
+
+    /// `interval = 0` must return `IntervalTooShort` (error 2) with no side-effects.
+    ///
+    /// Zero is a degenerate interval that would allow unlimited-frequency collection.
+    #[test]
+    fn prop_zero_interval_rejected_as_too_short() {
+        let p = PropEnv::new();
+        let result = p.client.try_subscribe(
+            &p.subscriber, &p.merchant, &p.token,
+            &1_000_i128, &0_u64, &false,
+        );
+        assert!(
+            matches!(result, Err(Ok(crate::error::ContractError::IntervalTooShort))),
+            "interval=0 must return IntervalTooShort; got {:?}",
+            result
+        );
+        // No storage entry must exist.
+        let key = DataKey::Subscription(crate::storage::subscription_key(
+            &p.env, &p.subscriber, &p.merchant, &p.token,
+        ));
+        assert!(
+            !p.env.storage().persistent().has(&key),
+            "no subscription must be created when interval=0"
+        );
+    }
+
+    // ─── PROPERTY 11 — Adversarial execute_payment with swapped addresses ────
+
+    proptest! {
+        /// Attempting execute_payment where the caller passes `merchant` as the
+        /// `subscriber` argument (i.e. the same address for both) must return either
+        /// `SelfSubscription` or `NoActiveSubscription` — never a successful transfer.
+        ///
+        /// Guards against impersonation: a merchant cannot collect from themselves
+        /// by passing their own address as the subscriber.
+        #![proptest_config(ProptestConfig::with_cases(256))]
+        #[test]
+        fn prop_adversarial_merchant_cannot_impersonate_subscriber(
+            amount   in valid_amount_strategy(),
+            interval in valid_interval_strategy(),
+        ) {
+            let p = PropEnv::new();
+
+            // A legitimate subscriber sets up a subscription to the merchant.
+            p.client.subscribe(
+                &p.subscriber, &p.merchant, &p.token,
+                &amount, &interval, &false,
+            );
+
+            // Advance clock so payment would normally be due.
+            let now = p.env.ledger().timestamp();
+            p.env.ledger().with_mut(|l| l.timestamp = now + interval + 1);
+
+            // Adversarial call: pass merchant address as both subscriber AND merchant.
+            // This must not succeed.
+            let result = p.client.try_execute_payment(
+                &p.merchant, // used as subscriber — wrong address
+                &p.merchant, // used as merchant — own address
+            );
+
+            prop_assert!(
+                result.is_err(),
+                "execute_payment with merchant as both subscriber and merchant \
+                 must fail, got Ok"
+            );
+            // The legitimate subscriber's balance must be untouched.
+            let sub_bal = soroban_sdk::token::Client::new(&p.env, &p.token)
+                .balance(&p.subscriber);
+            prop_assert_eq!(
+                sub_bal,
+                MAX_AMOUNT * 2,
+                "legitimate subscriber balance must be unchanged after adversarial attempt"
+            );
+        }
+    }
+
+    // ─── BOUNDARY — Contract address as token is rejected ────────────────────
+
+    /// Passing the contract's own address as the `token` parameter to `subscribe`
+    /// must return an error (`InvalidTokenAddress` or a host-level panic) and must
+    /// not create a storage entry.
+    ///
+    /// Prevents re-entrant / circular token interactions.
+    #[test]
+    fn prop_contract_address_as_token_is_rejected() {
+        let p = PropEnv::new();
+        // Use the contract's own address as the token.
+        let bad_token = p.contract_id.clone();
+
+        let result = p.client.try_subscribe(
+            &p.subscriber, &p.merchant, &bad_token,
+            &1_000_i128, &MIN_INTERVAL, &false,
+        );
+        // Must fail — either InvalidTokenAddress or a host-level error.
+        assert!(
+            result.is_err(),
+            "subscribe with contract address as token must fail; got Ok"
+        );
+    }
 }

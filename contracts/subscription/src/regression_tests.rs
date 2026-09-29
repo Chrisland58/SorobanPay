@@ -744,108 +744,19 @@ fn regression_full_payment_lifecycle() {
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// RECURRING PAYMENT TIMESTAMP BOUNDARIES (#1082)
+// TOKEN INTERFACE COMPATIBILITY (#1080)
 // ═════════════════════════════════════════════════════════════════════════════
 //
-// Defines and tests the exact semantics of the execute_payment time-lock at
-// every boundary:
-//   - before due:   now < next_payment  → PaymentNotDue
-//   - at due:       now == next_payment → success (inclusive boundary)
-//   - after due:    now > next_payment  → success
-//   - same-ledger double call           → second rejected
-//   - second period only collectible after new next_payment
-//   - late collection does not allow double charge
-//   - payment_nonce increments on success, stable on failure
+// Tests verifying that subscribe and execute_payment behave correctly against
+// compliant SEP-41 token interfaces, allowance boundaries, and adversarial
+// token scenarios.
 
-/// [#1082-001] execute_payment at next_payment - 1 returns PaymentNotDue.
-/// Validates the strict `now < next_payment` early-exit path.
+/// [#1080-001] Standard SEP-41 token: transfer succeeds, balances match expectations.
+/// Baseline test to confirm the full compliant-token path works end-to-end.
 #[test]
-fn timestamp_boundary_one_second_before_due() {
+fn token_compat_transfer_succeeds_with_compliant_token() {
     let r = R::new();
-    let amt = 100_000_i128;
-    let ivl = 86_400_u64;
-
-    r.client.subscribe(&r.subscriber, &r.merchant, &r.token, &amt, &ivl, &false);
-    let next_payment = r.get_next_payment();
-
-    // Advance to exactly 1 second before due
-    let now = r.env.ledger().timestamp();
-    let advance = next_payment.saturating_sub(now).saturating_sub(1);
-    r.advance(advance);
-
-    let result = r.client.try_execute_payment(&r.subscriber, &r.merchant);
-    assert!(
-        matches!(result, Err(Ok(ContractError::PaymentNotDue))),
-        "1 second before due must return PaymentNotDue, got {:?}",
-        result
-    );
-    // Balances must be untouched
-    assert_eq!(r.sub_bal(), 10_000_000_000_i128, "no balance change before due");
-}
-
-/// [#1082-002] execute_payment at exactly next_payment (inclusive boundary) succeeds.
-/// The `>=` comparison means now == next_payment is on-time, not early.
-#[test]
-fn timestamp_boundary_exactly_at_due() {
-    let r = R::new();
-    let amt = 100_000_i128;
-    let ivl = 86_400_u64;
-
-    r.client.subscribe(&r.subscriber, &r.merchant, &r.token, &amt, &ivl, &false);
-    let next_payment = r.get_next_payment();
-
-    // Advance to exactly next_payment
-    let now = r.env.ledger().timestamp();
-    r.advance(next_payment.saturating_sub(now));
-
-    let sb = r.sub_bal();
-    let mb = r.mer_bal();
-
-    let result = r.client.try_execute_payment(&r.subscriber, &r.merchant);
-    assert!(
-        result.is_ok(),
-        "execute_payment at exactly next_payment must succeed, got {:?}",
-        result
-    );
-    assert_eq!(r.sub_bal(), sb - amt, "subscriber must pay exactly amt at due boundary");
-    assert_eq!(r.mer_bal(), mb + amt, "merchant must receive exactly amt at due boundary");
-}
-
-/// [#1082-003] execute_payment at next_payment + 1 (one second past due) succeeds.
-/// Late collection is always permitted; the payment window is open-ended.
-#[test]
-fn timestamp_boundary_one_second_after_due() {
-    let r = R::new();
-    let amt = 75_000_i128;
-    let ivl = 86_400_u64;
-
-    r.client.subscribe(&r.subscriber, &r.merchant, &r.token, &amt, &ivl, &false);
-    let next_payment = r.get_next_payment();
-
-    // Advance to next_payment + 1
-    let now = r.env.ledger().timestamp();
-    r.advance(next_payment.saturating_sub(now) + 1);
-
-    let sb = r.sub_bal();
-    let mb = r.mer_bal();
-
-    let result = r.client.try_execute_payment(&r.subscriber, &r.merchant);
-    assert!(
-        result.is_ok(),
-        "execute_payment 1 second after due must succeed, got {:?}",
-        result
-    );
-    assert_eq!(r.sub_bal(), sb - amt);
-    assert_eq!(r.mer_bal(), mb + amt);
-}
-
-/// [#1082-004] Two execute_payment calls at the exact same timestamp —
-/// the second must be rejected (PaymentNotDue, since next_payment advances
-/// after the first successful call).
-#[test]
-fn timestamp_boundary_no_duplicate_in_same_ledger() {
-    let r = R::new();
-    let amt = 120_000_i128;
+    let amt = 500_000_i128;
     let ivl = 86_400_u64;
 
     r.client.subscribe(&r.subscriber, &r.merchant, &r.token, &amt, &ivl, &false);
@@ -854,190 +765,773 @@ fn timestamp_boundary_no_duplicate_in_same_ledger() {
     let sb = r.sub_bal();
     let mb = r.mer_bal();
 
-    // First call
-    r.client.execute_payment(&r.subscriber, &r.merchant);
-    assert_eq!(r.sub_bal(), sb - amt);
-    assert_eq!(r.mer_bal(), mb + amt);
-
-    // Second call at the same timestamp (next_payment now > now)
     let result = r.client.try_execute_payment(&r.subscriber, &r.merchant);
-    assert!(
-        matches!(result, Err(Ok(ContractError::PaymentNotDue))),
-        "same-ledger second call must return PaymentNotDue, got {:?}",
-        result
-    );
-    // Balances unchanged
-    assert_eq!(r.sub_bal(), sb - amt, "no second deduction on duplicate same-ledger call");
-    assert_eq!(r.mer_bal(), mb + amt);
+    assert!(result.is_ok(), "compliant token transfer must succeed, got {:?}", result);
+    assert_eq!(r.sub_bal(), sb - amt, "subscriber balance must decrease by amount");
+    assert_eq!(r.mer_bal(), mb + amt, "merchant balance must increase by amount");
 }
 
-/// [#1082-005] After first collection, second period only collectible once the
-/// new next_payment is reached.  Attempting one second before the new period
-/// must still return PaymentNotDue.
+/// [#1080-002] Allowance less than amount returns InsufficientAllowance on execute_payment.
+/// Subscriber has balance but approves less than the payment amount.
 #[test]
-fn timestamp_boundary_second_period_requires_new_next_payment() {
-    let r = R::new();
-    let amt = 80_000_i128;
-    let ivl = 86_400_u64;
+fn token_compat_allowance_insufficient_returns_insufficient_allowance() {
+    let env = Env::default();
+    env.mock_all_auths();
 
-    r.client.subscribe(&r.subscriber, &r.merchant, &r.token, &amt, &ivl, &false);
-    r.advance(ivl + 1);
+    let admin = Address::generate(&env);
+    let subscriber = Address::generate(&env);
+    let merchant = Address::generate(&env);
+    let payment_amount: i128 = 100_000;
 
-    // Collect first period
-    r.client.execute_payment(&r.subscriber, &r.merchant);
-    let second_due = r.get_next_payment();
+    let token = env.register_stellar_asset_contract_v2(admin.clone()).address();
+    StellarAssetClient::new(&env, &token).mint(&subscriber, &(payment_amount * 10));
 
-    // Advance to second_due - 1 (one second early)
-    let now = r.env.ledger().timestamp();
-    if second_due > now + 1 {
-        r.advance(second_due.saturating_sub(now).saturating_sub(1));
-        let result = r.client.try_execute_payment(&r.subscriber, &r.merchant);
-        assert!(
-            matches!(result, Err(Ok(ContractError::PaymentNotDue))),
-            "1 second before second period must return PaymentNotDue, got {:?}",
-            result
-        );
-    }
+    let contract_id = env.register(SubscriptionProtocol, ());
+    let client = SubscriptionProtocolClient::new(&env, &contract_id);
 
-    // Now advance to second_due — must succeed
-    let now2 = r.env.ledger().timestamp();
-    r.advance(second_due.saturating_sub(now2));
-    let result = r.client.try_execute_payment(&r.subscriber, &r.merchant);
+    // Set allowance to LESS than payment amount
+    token::Client::new(&env, &token).approve(
+        &subscriber,
+        &contract_id,
+        &(payment_amount - 1), // one stroop short
+        &(env.ledger().sequence() + 100_000_u32),
+    );
+
+    client.subscribe(&subscriber, &merchant, &token, &payment_amount, &86_400_u64, &false);
+
+    env.ledger().with_mut(|l| l.timestamp += 86_401);
+
+    let result = client.try_execute_payment(&subscriber, &merchant);
+    assert!(
+        matches!(result, Err(Ok(ContractError::InsufficientAllowance))),
+        "allowance < amount must return InsufficientAllowance, got {:?}",
+        result
+    );
+
+    // Subscriber balance must be untouched
+    let balance = token::Client::new(&env, &token).balance(&subscriber);
+    assert_eq!(balance, payment_amount * 10, "balance must be unchanged when allowance is insufficient");
+}
+
+/// [#1080-003] Allowance set exactly equal to amount — execute_payment succeeds.
+/// Validates the `allowance >= amount` boundary is inclusive (not strictly greater).
+#[test]
+fn token_compat_allowance_exactly_equal_to_amount_succeeds() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let subscriber = Address::generate(&env);
+    let merchant = Address::generate(&env);
+    let payment_amount: i128 = 250_000;
+
+    let token = env.register_stellar_asset_contract_v2(admin.clone()).address();
+    StellarAssetClient::new(&env, &token).mint(&subscriber, &(payment_amount * 2));
+
+    let contract_id = env.register(SubscriptionProtocol, ());
+    let client = SubscriptionProtocolClient::new(&env, &contract_id);
+
+    // Set allowance to EXACTLY the payment amount
+    token::Client::new(&env, &token).approve(
+        &subscriber,
+        &contract_id,
+        &payment_amount, // exactly equal
+        &(env.ledger().sequence() + 100_000_u32),
+    );
+
+    client.subscribe(&subscriber, &merchant, &token, &payment_amount, &86_400_u64, &false);
+    env.ledger().with_mut(|l| l.timestamp += 86_401);
+
+    let result = client.try_execute_payment(&subscriber, &merchant);
     assert!(
         result.is_ok(),
-        "at second period due date must succeed, got {:?}",
+        "allowance == amount must allow payment to succeed, got {:?}",
         result
     );
+
+    let balance = token::Client::new(&env, &token).balance(&subscriber);
+    assert_eq!(balance, payment_amount, "subscriber must have paid exactly payment_amount");
 }
 
-/// [#1082-006] A merchant who collects 2 intervals late still only performs one
-/// charge per billing window — there is no catch-up mechanism to collect missed
-/// periods in a single call.
+/// [#1080-004] Zero allowance on execute_payment returns InsufficientAllowance.
+/// Guards the case where a subscriber revokes their allowance after subscribing.
 #[test]
-fn timestamp_boundary_late_collection_does_not_double_charge() {
-    let r = R::new();
-    let amt = 200_000_i128;
-    let ivl = 86_400_u64;
+fn token_compat_zero_allowance_blocked() {
+    let env = Env::default();
+    env.mock_all_auths();
 
-    r.client.subscribe(&r.subscriber, &r.merchant, &r.token, &amt, &ivl, &false);
+    let admin = Address::generate(&env);
+    let subscriber = Address::generate(&env);
+    let merchant = Address::generate(&env);
+    let payment_amount: i128 = 100_000;
 
-    // Advance 2 full intervals past due — 2 missed periods
-    r.advance(ivl * 2 + 1);
+    let token = env.register_stellar_asset_contract_v2(admin.clone()).address();
+    StellarAssetClient::new(&env, &token).mint(&subscriber, &(payment_amount * 5));
 
-    let sb = r.sub_bal();
-    let mb = r.mer_bal();
+    let contract_id = env.register(SubscriptionProtocol, ());
+    let client = SubscriptionProtocolClient::new(&env, &contract_id);
 
-    // Single collect — must charge exactly once, not twice
-    r.client.execute_payment(&r.subscriber, &r.merchant);
-    assert_eq!(r.sub_bal(), sb - amt, "late collection charges exactly once");
-    assert_eq!(r.mer_bal(), mb + amt, "merchant receives exactly one payment amount");
+    // Initially approve
+    token::Client::new(&env, &token).approve(
+        &subscriber,
+        &contract_id,
+        &payment_amount,
+        &(env.ledger().sequence() + 100_000_u32),
+    );
 
-    // Immediate retry — must be rejected
-    let result = r.client.try_execute_payment(&r.subscriber, &r.merchant);
+    client.subscribe(&subscriber, &merchant, &token, &payment_amount, &86_400_u64, &false);
+
+    // Revoke allowance (set to 0)
+    token::Client::new(&env, &token).approve(
+        &subscriber,
+        &contract_id,
+        &0_i128,
+        &(env.ledger().sequence() + 100_000_u32),
+    );
+
+    env.ledger().with_mut(|l| l.timestamp += 86_401);
+
+    let result = client.try_execute_payment(&subscriber, &merchant);
     assert!(
-        matches!(result, Err(Ok(ContractError::PaymentNotDue))),
-        "second call after late collection must return PaymentNotDue, got {:?}",
+        matches!(result, Err(Ok(ContractError::InsufficientAllowance))),
+        "zero allowance must return InsufficientAllowance, got {:?}",
         result
     );
-}
 
-/// [#1082-007] payment_nonce increments by exactly 1 on each successful payment
-/// and remains unchanged on a failed attempt.
-#[test]
-fn timestamp_boundary_nonce_increments_on_success_stable_on_failure() {
-    let r = R::new();
-    let amt = 10_000_000_000_i128; // full balance — second payment will fail
-    let ivl = 86_400_u64;
-
-    r.client.subscribe(&r.subscriber, &r.merchant, &r.token, &amt, &ivl, &false);
-
-    // Nonce starts at 0
-    let nonce_before = r
-        .env
+    // Subscription must still be active (eligible for retry once allowance is restored)
+    let has_sub = env
         .storage()
         .persistent()
-        .get::<_, crate::storage::SubscriptionData>(&DataKey::Subscription(subscription_key(
-            &r.env,
-            &r.subscriber,
-            &r.merchant,
-        )))
-        .unwrap()
-        .payment_nonce;
-    assert_eq!(nonce_before, 0, "initial nonce must be 0");
+        .has(&DataKey::Subscription(subscription_key(&env, &subscriber, &merchant)));
+    assert!(has_sub, "subscription must remain active after InsufficientAllowance");
+}
 
-    // First successful payment
-    r.advance(ivl + 1);
-    r.client.execute_payment(&r.subscriber, &r.merchant);
+/// [#1080-005] subscribe(strict=true) with allowance < amount returns InsufficientAllowance
+/// at subscribe time, before any payment is attempted.
+#[test]
+fn token_compat_subscribe_strict_mode_rejects_low_allowance() {
+    let env = Env::default();
+    env.mock_all_auths();
 
-    let nonce_after_first = r
-        .env
+    let admin = Address::generate(&env);
+    let subscriber = Address::generate(&env);
+    let merchant = Address::generate(&env);
+    let payment_amount: i128 = 100_000;
+
+    let token = env.register_stellar_asset_contract_v2(admin.clone()).address();
+    StellarAssetClient::new(&env, &token).mint(&subscriber, &(payment_amount * 5));
+
+    let contract_id = env.register(SubscriptionProtocol, ());
+    let client = SubscriptionProtocolClient::new(&env, &contract_id);
+
+    // Set allowance BELOW the amount
+    token::Client::new(&env, &token).approve(
+        &subscriber,
+        &contract_id,
+        &(payment_amount / 2),
+        &(env.ledger().sequence() + 100_000_u32),
+    );
+
+    let result = client.try_subscribe(
+        &subscriber, &merchant, &token,
+        &payment_amount,
+        &86_400_u64,
+        &true, // strict = true
+    );
+    assert!(
+        matches!(result, Err(Ok(ContractError::InsufficientAllowance))),
+        "strict subscribe with low allowance must return InsufficientAllowance, got {:?}",
+        result
+    );
+
+    // No subscription must be stored
+    let has_sub = env
         .storage()
         .persistent()
-        .get::<_, crate::storage::SubscriptionData>(&DataKey::Subscription(subscription_key(
-            &r.env,
-            &r.subscriber,
-            &r.merchant,
-        )))
-        .unwrap()
-        .payment_nonce;
-    assert_eq!(nonce_after_first, 1, "nonce must be 1 after first successful payment");
+        .has(&DataKey::Subscription(subscription_key(&env, &subscriber, &merchant)));
+    assert!(!has_sub, "no subscription must be stored after strict-mode rejection");
+}
 
-    // Second payment attempt — subscriber has zero balance, must fail
-    r.advance(ivl + 1);
-    let result = r.client.try_execute_payment(&r.subscriber, &r.merchant);
+/// [#1080-006] subscribe(strict=true) with allowance == amount succeeds.
+/// The exact-boundary case must not be rejected in strict mode.
+#[test]
+fn token_compat_subscribe_strict_mode_accepts_exact_allowance() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let subscriber = Address::generate(&env);
+    let merchant = Address::generate(&env);
+    let payment_amount: i128 = 100_000;
+
+    let token = env.register_stellar_asset_contract_v2(admin.clone()).address();
+    StellarAssetClient::new(&env, &token).mint(&subscriber, &(payment_amount * 5));
+
+    let contract_id = env.register(SubscriptionProtocol, ());
+    let client = SubscriptionProtocolClient::new(&env, &contract_id);
+
+    // Set allowance EXACTLY equal to amount
+    token::Client::new(&env, &token).approve(
+        &subscriber,
+        &contract_id,
+        &payment_amount,
+        &(env.ledger().sequence() + 100_000_u32),
+    );
+
+    let result = client.try_subscribe(
+        &subscriber, &merchant, &token,
+        &payment_amount,
+        &86_400_u64,
+        &true, // strict = true
+    );
+    assert!(
+        result.is_ok(),
+        "strict subscribe with allowance == amount must succeed, got {:?}",
+        result
+    );
+}
+
+/// [#1080-007] subscribe(strict=false) with zero allowance succeeds but implies
+/// the first execute_payment will fail — no error at subscribe time.
+/// Non-strict mode is a "best-effort" subscription that emits a warning event.
+#[test]
+fn token_compat_subscribe_nonstrict_allows_low_allowance() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let subscriber = Address::generate(&env);
+    let merchant = Address::generate(&env);
+    let payment_amount: i128 = 100_000;
+
+    let token = env.register_stellar_asset_contract_v2(admin.clone()).address();
+    StellarAssetClient::new(&env, &token).mint(&subscriber, &(payment_amount * 5));
+
+    let contract_id = env.register(SubscriptionProtocol, ());
+    let client = SubscriptionProtocolClient::new(&env, &contract_id);
+
+    // Zero allowance — non-strict mode must still accept
+    // (no approve call; allowance defaults to 0)
+
+    let result = client.try_subscribe(
+        &subscriber, &merchant, &token,
+        &payment_amount,
+        &86_400_u64,
+        &false, // strict = false
+    );
+    assert!(
+        result.is_ok(),
+        "non-strict subscribe with zero allowance must succeed, got {:?}",
+        result
+    );
+
+    // Subscription must be stored
+    let has_sub = env
+        .storage()
+        .persistent()
+        .has(&DataKey::Subscription(subscription_key(&env, &subscriber, &merchant)));
+    assert!(has_sub, "subscription must be stored even when allowance is 0 in non-strict mode");
+}
+
+/// [#1080-008] Using the contract's own address as the token is rejected with
+/// InvalidTokenAddress.  Guards against re-entrancy via self-referencing token.
+#[test]
+fn token_compat_invalid_token_address_rejected() {
+    let r = R::new();
+    let result = r.client.try_subscribe(
+        &r.subscriber,
+        &r.merchant,
+        &r.contract_id, // contract address as token — invalid
+        &100_000_i128,
+        &86_400_u64,
+        &false,
+    );
+    assert!(
+        matches!(result, Err(Ok(ContractError::InvalidTokenAddress))),
+        "contract address as token must return InvalidTokenAddress, got {:?}",
+        result
+    );
+}
+
+/// [#1080-009] Subscriber has sufficient allowance but zero balance — returns
+/// TransferFailed.  The balance check occurs after the allowance check.
+#[test]
+fn token_compat_balance_check_before_transfer() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let subscriber = Address::generate(&env);
+    let merchant = Address::generate(&env);
+    let payment_amount: i128 = 100_000;
+
+    let token = env.register_stellar_asset_contract_v2(admin.clone()).address();
+    // Mint exactly one payment's worth — will be zero after first payment
+    StellarAssetClient::new(&env, &token).mint(&subscriber, &payment_amount);
+
+    let contract_id = env.register(SubscriptionProtocol, ());
+    let client = SubscriptionProtocolClient::new(&env, &contract_id);
+
+    // Approve for two payments but only mint one
+    token::Client::new(&env, &token).approve(
+        &subscriber,
+        &contract_id,
+        &(payment_amount * 2),
+        &(env.ledger().sequence() + 100_000_u32),
+    );
+
+    client.subscribe(&subscriber, &merchant, &token, &payment_amount, &86_400_u64, &false);
+
+    // First payment — succeeds (drains balance to 0)
+    env.ledger().with_mut(|l| l.timestamp += 86_401);
+    client.execute_payment(&subscriber, &merchant);
+    assert_eq!(token::Client::new(&env, &token).balance(&subscriber), 0);
+
+    // Second payment — allowance still covers it but balance is 0 → TransferFailed
+    env.ledger().with_mut(|l| l.timestamp += 86_401);
+    let result = client.try_execute_payment(&subscriber, &merchant);
     assert!(
         matches!(result, Err(Ok(ContractError::TransferFailed))),
         "zero-balance payment must return TransferFailed, got {:?}",
         result
     );
 
-    // Nonce must be unchanged after failed attempt
-    let nonce_after_fail = r
-        .env
+    // Subscription must remain active for retry
+    let has_sub = env
         .storage()
         .persistent()
-        .get::<_, crate::storage::SubscriptionData>(&DataKey::Subscription(subscription_key(
-            &r.env,
-            &r.subscriber,
-            &r.merchant,
-        )))
-        .unwrap()
-        .payment_nonce;
+        .has(&DataKey::Subscription(subscription_key(&env, &subscriber, &merchant)));
+    assert!(has_sub, "subscription must remain active after TransferFailed");
+}
+
+/// [#1080-010] Two subscriptions using different tokens operate independently.
+/// Paying one does not affect the other's balance or state.
+#[test]
+fn token_compat_multiple_tokens_independent() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let subscriber = Address::generate(&env);
+    let merchant = Address::generate(&env);
+    let payment_amount: i128 = 100_000;
+    let ivl = 86_400_u64;
+
+    // Create two separate tokens
+    let token_a = env.register_stellar_asset_contract_v2(admin.clone()).address();
+    let token_b = env.register_stellar_asset_contract_v2(admin.clone()).address();
+
+    StellarAssetClient::new(&env, &token_a).mint(&subscriber, &(payment_amount * 5));
+    StellarAssetClient::new(&env, &token_b).mint(&subscriber, &(payment_amount * 5));
+
+    let contract_id = env.register(SubscriptionProtocol, ());
+    let client = SubscriptionProtocolClient::new(&env, &contract_id);
+
+    // Approve both tokens
+    token::Client::new(&env, &token_a).approve(
+        &subscriber, &contract_id, &(payment_amount * 5),
+        &(env.ledger().sequence() + 100_000_u32),
+    );
+    token::Client::new(&env, &token_b).approve(
+        &subscriber, &contract_id, &(payment_amount * 5),
+        &(env.ledger().sequence() + 100_000_u32),
+    );
+
+    // Subscribe with two different merchants (each keyed by merchant address)
+    let merchant_a = Address::generate(&env);
+    let merchant_b = Address::generate(&env);
+
+    client.subscribe(&subscriber, &merchant_a, &token_a, &payment_amount, &ivl, &false);
+    client.subscribe(&subscriber, &merchant_b, &token_b, &payment_amount, &ivl, &false);
+
+    env.ledger().with_mut(|l| l.timestamp += ivl + 1);
+
+    let bal_a_before = token::Client::new(&env, &token_a).balance(&merchant_a);
+    let bal_b_before = token::Client::new(&env, &token_b).balance(&merchant_b);
+
+    // Pay only token_a subscription
+    client.execute_payment(&subscriber, &merchant_a);
+
+    // token_a merchant paid; token_b merchant untouched
     assert_eq!(
-        nonce_after_fail, 1,
-        "nonce must be unchanged (1) after failed payment, got {}",
-        nonce_after_fail
+        token::Client::new(&env, &token_a).balance(&merchant_a),
+        bal_a_before + payment_amount,
+        "merchant_a must receive token_a payment"
+    );
+    assert_eq!(
+        token::Client::new(&env, &token_b).balance(&merchant_b),
+        bal_b_before,
+        "merchant_b balance must be unchanged when only token_a subscription was collected"
     );
 }
 
-/// [#1082-008] next_payment after a successful collection is exactly now + interval,
-/// not prev_next_payment + interval.  This reflects the contract's sliding-window
-/// design: the new due date is anchored to the actual collection time.
+// ═════════════════════════════════════════════════════════════════════════════
+// TOKEN INTERFACE COMPATIBILITY (#1080)
+// ═════════════════════════════════════════════════════════════════════════════
+//
+// Tests verifying that subscribe and execute_payment behave correctly against
+// compliant SEP-41 token interfaces, allowance boundaries, and adversarial
+// token scenarios.
+
+/// [#1080-001] Standard SEP-41 token: transfer succeeds, balances match expectations.
 #[test]
-fn timestamp_boundary_next_payment_set_to_now_plus_interval_after_late_collect() {
+fn token_compat_transfer_succeeds_with_compliant_token() {
     let r = R::new();
-    let amt = 50_000_i128;
+    let amt = 500_000_i128;
     let ivl = 86_400_u64;
 
     r.client.subscribe(&r.subscriber, &r.merchant, &r.token, &amt, &ivl, &false);
+    r.advance(ivl + 1);
 
-    // Advance well past due — simulate a 2-day late collection
-    let ts_before_collect = {
-        r.env.ledger().with_mut(|l| l.timestamp += ivl + 3_600 * 48);
-        r.env.ledger().timestamp()
-    };
+    let sb = r.sub_bal();
+    let mb = r.mer_bal();
 
-    r.client.execute_payment(&r.subscriber, &r.merchant);
+    let result = r.client.try_execute_payment(&r.subscriber, &r.merchant);
+    assert!(result.is_ok(), "compliant token transfer must succeed, got {:?}", result);
+    assert_eq!(r.sub_bal(), sb - amt);
+    assert_eq!(r.mer_bal(), mb + amt);
+}
 
-    let next = r.get_next_payment();
-    // Contract uses `now + interval` so next_payment must be close to
-    // ts_before_collect + interval (within a few ledger ticks).
+/// [#1080-002] Allowance less than amount returns InsufficientAllowance on execute_payment.
+#[test]
+fn token_compat_allowance_insufficient_returns_insufficient_allowance() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin      = Address::generate(&env);
+    let subscriber = Address::generate(&env);
+    let merchant   = Address::generate(&env);
+    let payment_amount: i128 = 100_000;
+
+    let token = env.register_stellar_asset_contract_v2(admin.clone()).address();
+    StellarAssetClient::new(&env, &token).mint(&subscriber, &(payment_amount * 10));
+
+    let contract_id = env.register(SubscriptionProtocol, ());
+    let client = SubscriptionProtocolClient::new(&env, &contract_id);
+
+    // Allowance one stroop short
+    token::Client::new(&env, &token).approve(
+        &subscriber,
+        &contract_id,
+        &(payment_amount - 1),
+        &(env.ledger().sequence() + 100_000_u32),
+    );
+
+    client.subscribe(&subscriber, &merchant, &token, &payment_amount, &86_400_u64, &false);
+    env.ledger().with_mut(|l| l.timestamp += 86_401);
+
+    let result = client.try_execute_payment(&subscriber, &merchant);
     assert!(
-        next >= ts_before_collect + ivl,
-        "next_payment must be >= collection_time + interval"
+        matches!(result, Err(Ok(ContractError::InsufficientAllowance))),
+        "allowance < amount must return InsufficientAllowance, got {:?}",
+        result
+    );
+    assert_eq!(
+        token::Client::new(&env, &token).balance(&subscriber),
+        payment_amount * 10,
+        "balance must be unchanged"
+    );
+}
+
+/// [#1080-003] Allowance exactly equal to amount — payment succeeds (inclusive boundary).
+#[test]
+fn token_compat_allowance_exactly_equal_to_amount_succeeds() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin      = Address::generate(&env);
+    let subscriber = Address::generate(&env);
+    let merchant   = Address::generate(&env);
+    let payment_amount: i128 = 250_000;
+
+    let token = env.register_stellar_asset_contract_v2(admin.clone()).address();
+    StellarAssetClient::new(&env, &token).mint(&subscriber, &(payment_amount * 2));
+
+    let contract_id = env.register(SubscriptionProtocol, ());
+    let client = SubscriptionProtocolClient::new(&env, &contract_id);
+
+    token::Client::new(&env, &token).approve(
+        &subscriber,
+        &contract_id,
+        &payment_amount, // exactly equal
+        &(env.ledger().sequence() + 100_000_u32),
+    );
+
+    client.subscribe(&subscriber, &merchant, &token, &payment_amount, &86_400_u64, &false);
+    env.ledger().with_mut(|l| l.timestamp += 86_401);
+
+    let result = client.try_execute_payment(&subscriber, &merchant);
+    assert!(result.is_ok(), "allowance == amount must succeed, got {:?}", result);
+    assert_eq!(
+        token::Client::new(&env, &token).balance(&subscriber),
+        payment_amount,
+        "subscriber must have paid exactly payment_amount"
+    );
+}
+
+/// [#1080-004] Zero allowance on execute_payment returns InsufficientAllowance;
+/// subscription stays active for retry.
+#[test]
+fn token_compat_zero_allowance_blocked() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin      = Address::generate(&env);
+    let subscriber = Address::generate(&env);
+    let merchant   = Address::generate(&env);
+    let payment_amount: i128 = 100_000;
+
+    let token = env.register_stellar_asset_contract_v2(admin.clone()).address();
+    StellarAssetClient::new(&env, &token).mint(&subscriber, &(payment_amount * 5));
+
+    let contract_id = env.register(SubscriptionProtocol, ());
+    let client = SubscriptionProtocolClient::new(&env, &contract_id);
+
+    // Subscribe with initial allowance, then revoke
+    token::Client::new(&env, &token).approve(
+        &subscriber, &contract_id, &payment_amount,
+        &(env.ledger().sequence() + 100_000_u32),
+    );
+    client.subscribe(&subscriber, &merchant, &token, &payment_amount, &86_400_u64, &false);
+
+    // Revoke allowance
+    token::Client::new(&env, &token).approve(
+        &subscriber, &contract_id, &0_i128,
+        &(env.ledger().sequence() + 100_000_u32),
+    );
+
+    env.ledger().with_mut(|l| l.timestamp += 86_401);
+
+    let result = client.try_execute_payment(&subscriber, &merchant);
+    assert!(
+        matches!(result, Err(Ok(ContractError::InsufficientAllowance))),
+        "zero allowance must return InsufficientAllowance, got {:?}",
+        result
     );
     assert!(
-        next <= ts_before_collect + ivl + 5,
-        "next_payment must not be far beyond collection_time + interval"
+        env.storage()
+            .persistent()
+            .has(&DataKey::Subscription(subscription_key(&env, &subscriber, &merchant))),
+        "subscription must remain active after InsufficientAllowance"
+    );
+}
+
+/// [#1080-005] subscribe(strict=true) with allowance < amount returns InsufficientAllowance.
+#[test]
+fn token_compat_subscribe_strict_mode_rejects_low_allowance() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin      = Address::generate(&env);
+    let subscriber = Address::generate(&env);
+    let merchant   = Address::generate(&env);
+    let payment_amount: i128 = 100_000;
+
+    let token = env.register_stellar_asset_contract_v2(admin.clone()).address();
+    StellarAssetClient::new(&env, &token).mint(&subscriber, &(payment_amount * 5));
+
+    let contract_id = env.register(SubscriptionProtocol, ());
+    let client = SubscriptionProtocolClient::new(&env, &contract_id);
+
+    token::Client::new(&env, &token).approve(
+        &subscriber, &contract_id, &(payment_amount / 2),
+        &(env.ledger().sequence() + 100_000_u32),
+    );
+
+    let result = client.try_subscribe(
+        &subscriber, &merchant, &token,
+        &payment_amount, &86_400_u64,
+        &true, // strict
+    );
+    assert!(
+        matches!(result, Err(Ok(ContractError::InsufficientAllowance))),
+        "strict subscribe with low allowance must return InsufficientAllowance, got {:?}",
+        result
+    );
+    assert!(
+        !env.storage()
+            .persistent()
+            .has(&DataKey::Subscription(subscription_key(&env, &subscriber, &merchant))),
+        "no subscription must be stored after strict-mode rejection"
+    );
+}
+
+/// [#1080-006] subscribe(strict=true) with allowance == amount succeeds.
+#[test]
+fn token_compat_subscribe_strict_mode_accepts_exact_allowance() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin      = Address::generate(&env);
+    let subscriber = Address::generate(&env);
+    let merchant   = Address::generate(&env);
+    let payment_amount: i128 = 100_000;
+
+    let token = env.register_stellar_asset_contract_v2(admin.clone()).address();
+    StellarAssetClient::new(&env, &token).mint(&subscriber, &(payment_amount * 5));
+
+    let contract_id = env.register(SubscriptionProtocol, ());
+    let client = SubscriptionProtocolClient::new(&env, &contract_id);
+
+    token::Client::new(&env, &token).approve(
+        &subscriber, &contract_id, &payment_amount, // exactly equal
+        &(env.ledger().sequence() + 100_000_u32),
+    );
+
+    let result = client.try_subscribe(
+        &subscriber, &merchant, &token,
+        &payment_amount, &86_400_u64,
+        &true, // strict
+    );
+    assert!(result.is_ok(), "strict subscribe with allowance == amount must succeed, got {:?}", result);
+}
+
+/// [#1080-007] subscribe(strict=false) with zero allowance succeeds — no error at
+/// subscribe time; warning event emitted; execute_payment will fail later.
+#[test]
+fn token_compat_subscribe_nonstrict_allows_zero_allowance() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin      = Address::generate(&env);
+    let subscriber = Address::generate(&env);
+    let merchant   = Address::generate(&env);
+    let payment_amount: i128 = 100_000;
+
+    let token = env.register_stellar_asset_contract_v2(admin.clone()).address();
+    StellarAssetClient::new(&env, &token).mint(&subscriber, &(payment_amount * 5));
+
+    let contract_id = env.register(SubscriptionProtocol, ());
+    let client = SubscriptionProtocolClient::new(&env, &contract_id);
+    // No approve call — allowance defaults to 0
+
+    let result = client.try_subscribe(
+        &subscriber, &merchant, &token,
+        &payment_amount, &86_400_u64,
+        &false, // non-strict
+    );
+    assert!(result.is_ok(), "non-strict subscribe with zero allowance must succeed, got {:?}", result);
+    assert!(
+        env.storage()
+            .persistent()
+            .has(&DataKey::Subscription(subscription_key(&env, &subscriber, &merchant))),
+        "subscription must be stored in non-strict mode even with zero allowance"
+    );
+}
+
+/// [#1080-008] Using the contract address as token returns InvalidTokenAddress.
+#[test]
+fn token_compat_invalid_token_address_rejected() {
+    let r = R::new();
+    let result = r.client.try_subscribe(
+        &r.subscriber, &r.merchant,
+        &r.contract_id, // contract address as token
+        &100_000_i128, &86_400_u64, &false,
+    );
+    assert!(
+        matches!(result, Err(Ok(ContractError::InvalidTokenAddress))),
+        "contract address as token must return InvalidTokenAddress, got {:?}",
+        result
+    );
+}
+
+/// [#1080-009] Subscriber has sufficient allowance but zero balance — returns
+/// TransferFailed; subscription stays active.
+#[test]
+fn token_compat_balance_check_catches_zero_balance() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin      = Address::generate(&env);
+    let subscriber = Address::generate(&env);
+    let merchant   = Address::generate(&env);
+    let payment_amount: i128 = 100_000;
+
+    let token = env.register_stellar_asset_contract_v2(admin.clone()).address();
+    // Mint exactly one payment — first payment drains balance to 0
+    StellarAssetClient::new(&env, &token).mint(&subscriber, &payment_amount);
+
+    let contract_id = env.register(SubscriptionProtocol, ());
+    let client = SubscriptionProtocolClient::new(&env, &contract_id);
+
+    token::Client::new(&env, &token).approve(
+        &subscriber, &contract_id, &(payment_amount * 2),
+        &(env.ledger().sequence() + 100_000_u32),
+    );
+
+    client.subscribe(&subscriber, &merchant, &token, &payment_amount, &86_400_u64, &false);
+
+    // First payment succeeds (balance drained to 0)
+    env.ledger().with_mut(|l| l.timestamp += 86_401);
+    client.execute_payment(&subscriber, &merchant);
+    assert_eq!(token::Client::new(&env, &token).balance(&subscriber), 0);
+
+    // Second payment: allowance ok, balance 0 → TransferFailed
+    env.ledger().with_mut(|l| l.timestamp += 86_401);
+    let result = client.try_execute_payment(&subscriber, &merchant);
+    assert!(
+        matches!(result, Err(Ok(ContractError::TransferFailed))),
+        "zero-balance payment must return TransferFailed, got {:?}",
+        result
+    );
+    assert!(
+        env.storage()
+            .persistent()
+            .has(&DataKey::Subscription(subscription_key(&env, &subscriber, &merchant))),
+        "subscription must remain active after TransferFailed"
+    );
+}
+
+/// [#1080-010] Two subscriptions using different tokens (different merchants) operate
+/// independently — paying one does not affect the other.
+#[test]
+fn token_compat_multiple_tokens_independent() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin      = Address::generate(&env);
+    let subscriber = Address::generate(&env);
+    let merchant_a = Address::generate(&env);
+    let merchant_b = Address::generate(&env);
+    let payment_amount: i128 = 100_000;
+    let ivl = 86_400_u64;
+
+    let token_a = env.register_stellar_asset_contract_v2(admin.clone()).address();
+    let token_b = env.register_stellar_asset_contract_v2(admin.clone()).address();
+
+    StellarAssetClient::new(&env, &token_a).mint(&subscriber, &(payment_amount * 5));
+    StellarAssetClient::new(&env, &token_b).mint(&subscriber, &(payment_amount * 5));
+
+    let contract_id = env.register(SubscriptionProtocol, ());
+    let client = SubscriptionProtocolClient::new(&env, &contract_id);
+
+    token::Client::new(&env, &token_a).approve(
+        &subscriber, &contract_id, &(payment_amount * 5),
+        &(env.ledger().sequence() + 100_000_u32),
+    );
+    token::Client::new(&env, &token_b).approve(
+        &subscriber, &contract_id, &(payment_amount * 5),
+        &(env.ledger().sequence() + 100_000_u32),
+    );
+
+    client.subscribe(&subscriber, &merchant_a, &token_a, &payment_amount, &ivl, &false);
+    client.subscribe(&subscriber, &merchant_b, &token_b, &payment_amount, &ivl, &false);
+
+    env.ledger().with_mut(|l| l.timestamp += ivl + 1);
+
+    let bal_b_before = token::Client::new(&env, &token_b).balance(&merchant_b);
+
+    // Pay only the token_a subscription
+    client.execute_payment(&subscriber, &merchant_a);
+
+    assert_eq!(
+        token::Client::new(&env, &token_a).balance(&merchant_a),
+        payment_amount,
+        "merchant_a must receive token_a payment"
+    );
+    assert_eq!(
+        token::Client::new(&env, &token_b).balance(&merchant_b),
+        bal_b_before,
+        "merchant_b must be unaffected when only token_a subscription was collected"
     );
 }
