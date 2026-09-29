@@ -86,7 +86,7 @@ export function HelpTooltip({
           aria-label="Help tooltip"
           className={`absolute z-50 w-64 rounded-xl border border-gray-700 bg-slate-800 p-3 shadow-2xl text-xs text-gray-200 ${positionClasses[position]}`}
         >
-          <p className="leading-relaxed">{content}</p>
+          <p className="leading-relaxed whitespace-pre-line">{content}</p>
           {articleId && onOpenArticle && (
             <button
               type="button"
