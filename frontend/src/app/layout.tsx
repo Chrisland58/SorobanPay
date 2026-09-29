@@ -4,10 +4,13 @@ import { NextIntlClientProvider } from 'next-intl';
 import { getMessages } from 'next-intl/server';
 import { WalletProvider } from '@/context/WalletContext';
 import { NotificationProvider } from '@/context/NotificationContext';
+import { ThemeProvider, ThemeScript } from '@/context/ThemeContext';
 import { ErrorBoundary } from '@/components/ErrorBoundary';
 import { LanguageSelector } from '@/components/LanguageSelector';
 import { DarkModeToggle } from '@/components/DarkModeToggle';
 import { ToastProvider } from '@/components/Toast';
+import { NetworkWarningBanner } from '@/components/NetworkWarningBanner';
+import { PageHeader } from '@/components/PageHeader';
 import './globals.css';
 
 /**
@@ -87,6 +90,12 @@ export default async function RootLayout({
             <NextIntlClientProvider messages={messages}>
               <WalletProvider>
                 <ToastProvider>
+                  {/* Network warning banner - persistent on mainnet */}
+                  <NetworkWarningBanner />
+                  
+                  {/* Page header with branding, network, and wallet state */}
+                  <PageHeader />
+                  
                   {/* Top-right header area: dark mode toggle + language switcher */}
                   <div className="fixed top-4 right-4 z-50 flex items-center gap-2">
                     <DarkModeToggle />

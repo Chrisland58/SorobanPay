@@ -314,7 +314,7 @@ export class EventIndexer {
       });
 
       // Post-store: update state machine
-      await applyEvent(subscriber, merchant, eventType as any, { amount: amount ?? '0' });
+      await applyEvent(subscriber, merchant, eventType as any, { amount: amount ?? '0', token: token ?? '' });
 
       // Post-store: bust Redis cache keys for the affected merchant/subscriber
       await Promise.all([
@@ -361,9 +361,9 @@ export class EventIndexer {
           (err) => console.error('[email] Failed to send payment failure email:', err),
         );
 
-        // Schedule automated payment retries (BE-retry)
-        enqueueRetries(subscriber, merchant, amount ?? '0', token ?? '').catch(
-          (err) => console.error('[retryQueue] Failed to enqueue retries:', err),
+        // Schedule automated payment retries via BullMQ
+        await enqueueRetries(subscriber, merchant, amount ?? '0', token ?? '').catch(
+          (err) => console.error('[retry] Failed to schedule payment retries:', err),
         );
       }
 
@@ -375,7 +375,8 @@ export class EventIndexer {
 
       console.log(`Stored event: ${eventType} for merchant ${merchant}`);
     } catch (error) {
-      console.error('Error processing event:', error);
+      console.error('Error parsing event:', error);
+      return null;
     }
   }
 }

@@ -1,4 +1,5 @@
 import { Router, Request, Response } from 'express';
+import { z } from 'zod';
 import prisma from '../lib/prisma';
 import { getSubscriptionStatus } from '../services/subscriptionStateService';
 import { getRawRetries, cancelRetries } from '../services/retryQueue';
@@ -8,54 +9,123 @@ import {
   CacheKey,
   CACHE_TTL,
 } from '../lib/redis';
+import { validateQuery } from '../middleware/validation';
 
 const router = Router();
 
-// ─── BE-52: GET /v1/subscriptions?merchant={address} ─────────────────────────
-// List all active subscriptions for a merchant via query param.
-// This mirrors /merchant/:merchantAddress but follows the ?merchant= convention
-// specified in the BE-52 OpenAPI spec.
-router.get('/', async (req: Request, res: Response) => {
-  const merchantAddress = req.query.merchant as string | undefined;
+// ─── Shared schema fragments ──────────────────────────────────────────────────
+
+/** Valid subscription status values. */
+const SUBSCRIPTION_STATUSES = ['ACTIVE', 'PAUSED', 'OVERDUE', 'CANCELLED'] as const;
+
+/** ISO 8601 date/datetime or YYYY-MM-DD string. */
+const isoDate = z
+  .string()
+  .refine(
+    (v) => !isNaN(Date.parse(v)),
+    { message: 'Must be a valid ISO 8601 date or datetime string' },
+  );
+
+// ─── Route-specific Zod schemas ───────────────────────────────────────────────
+
+/**
+ * GET /  — list subscriptions for the authenticated merchant.
+ * Unknown fields are rejected via .strict().
+ */
+const listSubscriptionsSchema = z
+  .object({
+    page: z.coerce.number().int().min(1).default(1),
+    limit: z.coerce.number().int().min(1).max(100).default(20),
+    status: z.enum(SUBSCRIPTION_STATUSES).optional(),
+  })
+  .strict();
+
+/**
+ * GET /payments  — payment history with optional date-range filtering.
+ * Unknown fields are rejected via .strict().
+ */
+const listPaymentsSchema = z
+  .object({
+    merchant: z.string().min(1, 'merchant is required'),
+    from: isoDate.optional(),
+    to: isoDate.optional(),
+    limit: z.coerce.number().int().min(1).max(200).default(50),
+    offset: z.coerce.number().int().min(0).default(0),
+  })
+  .strict();
+
+/**
+ * GET /merchant/:merchantAddress  — subscriptions for a given merchant address.
+ * Unknown fields are rejected via .strict().
+ */
+const merchantSubscriptionsQuerySchema = z
+  .object({
+    token: z.string().min(1).optional(),
+  })
+  .strict();
+
+/**
+ * GET /merchant/:merchantAddress/payments  — executed events for a merchant.
+ * Unknown fields are rejected via .strict().
+ */
+const merchantPaymentsQuerySchema = z
+  .object({
+    limit: z.coerce.number().int().min(1).max(500).default(50),
+    offset: z.coerce.number().int().min(0).default(0),
+  })
+  .strict();
+
+// ─── Issue #825: GET /api/v1/subscriptions ────────────────────────────────────
+// List Subscription records for the authenticated merchant.
+//
+// This is backed directly by the `Subscription` table (authoritative status,
+// updated by the indexer) rather than reconstructed from raw Event history —
+// the merchant dashboard previously had to do that itself, which was slow
+// and left fields like status/amount stale or incomplete.
+//
+// Auth: the merchant address is taken from the verified JWT (res.locals.merchantAddress,
+// set by the `requireMerchant` middleware mounted ahead of this router in index.ts) —
+// never from a client-supplied query param, so one merchant cannot read another's data
+// by passing a different address.
+//
+// Query params:
+//   page   {number} — 1-indexed page number, default 1
+//   limit  {number} — page size, default 20, capped at 100
+//   status {string} — optional filter: ACTIVE | PAUSED | OVERDUE | CANCELLED
+//
+// Response 200: { data: Subscription[], total: number, page: number }
+// Response 400: invalid or unknown query parameters
+// Response 401: no authenticated merchant on the request
+
+router.get('/', validateQuery(listSubscriptionsSchema), async (req: Request, res: Response) => {
+  // Defensive check: this router is also mounted at the unauthenticated
+  // legacy alias /api/subscriptions (see index.ts), which does not apply
+  // requireMerchant. Refuse to serve data rather than rely solely on that
+  // mount ordering for authorization.
+  const merchantAddress = res.locals.merchantAddress as string | undefined;
   if (!merchantAddress) {
-    return res.status(400).json({ error: 'merchant query parameter is required' });
+    return res.status(401).json({ error: 'Missing or invalid Authorization header' });
   }
 
+  const { page, limit, status: statusParam } = (req as any).validatedQuery as z.infer<typeof listSubscriptionsSchema>;
+
   try {
-    const subscribeEvents = await prisma.event.findMany({
-      where: { merchant: merchantAddress, type: 'subscribe' },
-      orderBy: { ledgerTimestamp: 'desc' },
-    });
+    const where = {
+      merchant: merchantAddress,
+      ...(statusParam ? { status: statusParam } : {}),
+    };
 
-    const seen = new Map<string, (typeof subscribeEvents)[0]>();
-    for (const event of subscribeEvents) {
-      const key = `${event.subscriber}:${event.token}`;
-      if (!seen.has(key)) seen.set(key, event);
-    }
-
-    const subscriptions = await Promise.all(
-      Array.from(seen.values()).map(async (sub) => {
-        const [lastExecuted, status] = await Promise.all([
-          prisma.event.findFirst({
-            where: { merchant: merchantAddress, subscriber: sub.subscriber, token: sub.token, type: 'executed' },
-            orderBy: { ledgerTimestamp: 'desc' },
-          }),
-          getSubscriptionStatus(sub.subscriber, merchantAddress),
-        ]);
-        return {
-          subscriber: sub.subscriber,
-          merchant: sub.merchant,
-          token: sub.token,
-          amount: sub.amount,
-          status: status ?? 'ACTIVE',
-          interval: null,
-          nextPaymentDue: null,
-          lastPaymentAt: lastExecuted?.ledgerTimestamp?.toString() ?? null,
-        };
+    const [data, total] = await prisma.$transaction([
+      prisma.subscription.findMany({
+        where,
+        orderBy: { createdAt: 'desc' },
+        skip: (page - 1) * limit,
+        take: limit,
       }),
-    );
+      prisma.subscription.count({ where }),
+    ]);
 
-    return res.json(subscriptions);
+    return res.json({ data, total, page });
   } catch {
     return res.status(500).json({ error: 'Failed to fetch subscriptions' });
   }
@@ -70,6 +140,12 @@ router.get('/:subscriber/:merchant', async (req: Request, res: Response) => {
   }
 
   const { subscriber, merchant } = req.params;
+
+  // Validate non-empty path parameters
+  if (!subscriber || !merchant) {
+    return res.status(400).json({ error: 'subscriber and merchant path parameters are required' });
+  }
+
   try {
     const [subEvent, lastExecuted, status] = await Promise.all([
       prisma.event.findFirst({
@@ -111,31 +187,22 @@ router.get('/:subscriber/:merchant', async (req: Request, res: Response) => {
 //   to       {string}  — ISO 8601 date, optional upper bound (inclusive)
 //   limit    {number}  — default 50
 //   offset   {number}  — default 0
-router.get('/payments', async (req: Request, res: Response) => {
-  const merchantAddress = req.query.merchant as string | undefined;
-  if (!merchantAddress) {
-    return res.status(400).json({ error: 'merchant query parameter is required' });
-  }
+router.get('/payments', validateQuery(listPaymentsSchema), async (req: Request, res: Response) => {
+  const {
+    merchant: merchantAddress,
+    from: fromParam,
+    to: toParam,
+    limit,
+    offset,
+  } = (req as any).validatedQuery as z.infer<typeof listPaymentsSchema>;
 
-  const fromParam = req.query.from as string | undefined;
-  const toParam = req.query.to as string | undefined;
-  const limit = Math.min(parseInt((req.query.limit as string) ?? '50', 10), 200);
-  const offset = Math.max(parseInt((req.query.offset as string) ?? '0', 10), 0);
-
-  // Build ledger timestamp filter from ISO date strings
+  // Build ledger timestamp filter from validated ISO date strings
   const ledgerFilter: Record<string, bigint> = {};
   if (fromParam) {
-    const fromDate = new Date(fromParam);
-    if (isNaN(fromDate.getTime())) {
-      return res.status(400).json({ error: 'from must be a valid ISO 8601 date' });
-    }
-    ledgerFilter.gte = BigInt(Math.floor(fromDate.getTime() / 1000));
+    ledgerFilter.gte = BigInt(Math.floor(new Date(fromParam).getTime() / 1000));
   }
   if (toParam) {
     const toDate = new Date(toParam);
-    if (isNaN(toDate.getTime())) {
-      return res.status(400).json({ error: 'to must be a valid ISO 8601 date' });
-    }
     toDate.setHours(23, 59, 59, 999);
     ledgerFilter.lte = BigInt(Math.floor(toDate.getTime() / 1000));
   }
@@ -180,106 +247,112 @@ router.get('/payments', async (req: Request, res: Response) => {
 //
 // Cache: subscriptions:merchant:{address}  TTL = CACHE_TTL.subscriptions (60 s)
 // Header: X-Cache: HIT | MISS
-router.get('/merchant/:merchantAddress', async (req: Request, res: Response) => {
-  try {
-    const merchantAddress = req.params.merchantAddress as string;
-    const tokenFilter = req.query.token;
-    const token = Array.isArray(tokenFilter) ? tokenFilter[0] : (tokenFilter as string | undefined);
+router.get(
+  '/merchant/:merchantAddress',
+  validateQuery(merchantSubscriptionsQuerySchema),
+  async (req: Request, res: Response) => {
+    try {
+      const merchantAddress = req.params.merchantAddress as string;
+      const { token } = (req as any).validatedQuery as z.infer<typeof merchantSubscriptionsQuerySchema>;
 
-    // Build a deterministic cache key that includes any query parameters
-    const cacheKey = token
-      ? `${CacheKey.merchantSubscriptions(merchantAddress)}:token:${token}`
-      : CacheKey.merchantSubscriptions(merchantAddress);
+      // Build a deterministic cache key that includes any query parameters
+      const cacheKey = token
+        ? `${CacheKey.merchantSubscriptions(merchantAddress)}:token:${token}`
+        : CacheKey.merchantSubscriptions(merchantAddress);
 
-    // ── Cache-aside: try Redis first ──────────────────────────────────────
-    const cached = await cacheGet<object[]>(cacheKey);
-    if (cached !== null) {
-      res.setHeader('X-Cache', 'HIT');
-      res.json(cached);
-      return;
-    }
-
-    // ── Cache miss: query PostgreSQL ──────────────────────────────────────
-    const where: Record<string, unknown> = { merchant: merchantAddress, type: 'subscribe' };
-    if (token) {
-      where.token = token;
-    }
-
-    // Fetch all subscribe events for this merchant, latest first
-    const subscribeEvents = await prisma.event.findMany({
-      where,
-      orderBy: { ledgerTimestamp: 'desc' },
-    });
-
-    // Deduplicate by (subscriber, token): keep the latest subscribe event per pair
-    const seen = new Map<string, (typeof subscribeEvents)[0]>();
-    for (const event of subscribeEvents) {
-      const key = `${event.subscriber}:${event.token}`;
-      if (!seen.has(key)) {
-        seen.set(key, event);
+      // ── Cache-aside: try Redis first ──────────────────────────────────────
+      const cached = await cacheGet<object[]>(cacheKey);
+      if (cached !== null) {
+        res.setHeader('X-Cache', 'HIT');
+        res.json(cached);
+        return;
       }
+
+      // ── Cache miss: query PostgreSQL ──────────────────────────────────────
+      const where: Record<string, unknown> = { merchant: merchantAddress, type: 'subscribe' };
+      if (token) {
+        where.token = token;
+      }
+
+      // Fetch all subscribe events for this merchant, latest first
+      const subscribeEvents = await prisma.event.findMany({
+        where,
+        orderBy: { ledgerTimestamp: 'desc' },
+      });
+
+      // Deduplicate by (subscriber, token): keep the latest subscribe event per pair
+      const seen = new Map<string, (typeof subscribeEvents)[0]>();
+      for (const event of subscribeEvents) {
+        const key = `${event.subscriber}:${event.token}`;
+        if (!seen.has(key)) {
+          seen.set(key, event);
+        }
+      }
+
+      // For each unique pair, find the latest executed event and current status
+      const subscriptions = await Promise.all(
+        Array.from(seen.values()).map(async (sub) => {
+          const [lastExecuted, status] = await Promise.all([
+            prisma.event.findFirst({
+              where: {
+                merchant: merchantAddress,
+                subscriber: sub.subscriber,
+                token: sub.token,
+                type: 'executed',
+              },
+              orderBy: { ledgerTimestamp: 'desc' },
+            }),
+            getSubscriptionStatus(sub.subscriber, merchantAddress),
+          ]);
+
+          return {
+            subscriber: sub.subscriber,
+            merchant: sub.merchant,
+            token: sub.token,
+            amount: sub.amount,
+            status: status ?? 'ACTIVE',   // BE-67: lifecycle state
+            interval: null,               // not stored in Event table; retrieve from on-chain state
+            nextPaymentDue: null,         // not computable from Event table alone
+            lastPaymentAt: lastExecuted?.ledgerTimestamp ?? null,
+          };
+        })
+      );
+
+      // ── Write result to cache ─────────────────────────────────────────────
+      await cacheSet(cacheKey, subscriptions, CACHE_TTL.subscriptions);
+
+      res.setHeader('X-Cache', 'MISS');
+      res.json(subscriptions);
+    } catch (error) {
+      res.status(500).json({ error: 'Failed to fetch subscriptions' });
     }
-
-    // For each unique pair, find the latest executed event and current status
-    const subscriptions = await Promise.all(
-      Array.from(seen.values()).map(async (sub) => {
-        const [lastExecuted, status] = await Promise.all([
-          prisma.event.findFirst({
-            where: {
-              merchant: merchantAddress,
-              subscriber: sub.subscriber,
-              token: sub.token,
-              type: 'executed',
-            },
-            orderBy: { ledgerTimestamp: 'desc' },
-          }),
-          getSubscriptionStatus(sub.subscriber, merchantAddress),
-        ]);
-
-        return {
-          subscriber: sub.subscriber,
-          merchant: sub.merchant,
-          token: sub.token,
-          amount: sub.amount,
-          status: status ?? 'ACTIVE',   // BE-67: lifecycle state
-          interval: null,               // not stored in Event table; retrieve from on-chain state
-          nextPaymentDue: null,         // not computable from Event table alone
-          lastPaymentAt: lastExecuted?.ledgerTimestamp ?? null,
-        };
-      })
-    );
-
-    // ── Write result to cache ─────────────────────────────────────────────
-    await cacheSet(cacheKey, subscriptions, CACHE_TTL.subscriptions);
-
-    res.setHeader('X-Cache', 'MISS');
-    res.json(subscriptions);
-  } catch (error) {
-    res.status(500).json({ error: 'Failed to fetch subscriptions' });
-  }
-});
+  },
+);
 
 // GET /merchant/:merchantAddress/payments
 // Returns all executed (payment) events for the merchant, newest first.
 // Supports ?limit= and ?offset= for pagination (default limit 50).
-router.get('/merchant/:merchantAddress/payments', async (req: Request, res: Response) => {
-  try {
-    const merchantAddress = req.params.merchantAddress as string;
-    const limit = parseInt(req.query.limit as string) || 50;
-    const offset = parseInt(req.query.offset as string) || 0;
+router.get(
+  '/merchant/:merchantAddress/payments',
+  validateQuery(merchantPaymentsQuerySchema),
+  async (req: Request, res: Response) => {
+    try {
+      const merchantAddress = req.params.merchantAddress as string;
+      const { limit, offset } = (req as any).validatedQuery as z.infer<typeof merchantPaymentsQuerySchema>;
 
-    const payments = await prisma.event.findMany({
-      where: { merchant: merchantAddress, type: 'executed' },
-      orderBy: { ledgerTimestamp: 'desc' },
-      take: limit,
-      skip: offset,
-    });
+      const payments = await prisma.event.findMany({
+        where: { merchant: merchantAddress, type: 'executed' },
+        orderBy: { ledgerTimestamp: 'desc' },
+        take: limit,
+        skip: offset,
+      });
 
-    res.json(payments);
-  } catch (error) {
-    res.status(500).json({ error: 'Failed to fetch payments' });
-  }
-});
+      res.json(payments);
+    } catch (error) {
+      res.status(500).json({ error: 'Failed to fetch payments' });
+    }
+  },
+);
 
 // ─── Retry endpoints ──────────────────────────────────────────────────────────
 
