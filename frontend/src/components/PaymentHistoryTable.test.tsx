@@ -340,4 +340,48 @@ describe('PaymentHistoryTable', () => {
       ).toBeInTheDocument();
     });
   });
+
+  // ── Keyboard navigation ──────────────────────────────────────────────────
+
+  describe('keyboard navigation', () => {
+    it('supports arrow key and home/end navigation across rows', () => {
+      const event1 = makeEvent({ id: 'evt-001' });
+      const event2 = makeEvent({ id: 'evt-002' });
+      const event3 = makeEvent({ id: 'evt-003' });
+
+      render(
+        <PaymentHistoryTable
+          {...defaultProps({ events: [event1, event2, event3] })}
+        />,
+      );
+
+      const tbody = screen.getAllByRole('rowgroup')[1]; // the tbody
+      const rows = screen.getAllByRole('row').slice(1); // skip table head row
+      expect(rows).toHaveLength(3);
+
+      // Initial state: first row has tabIndex 0
+      expect(rows[0]).toHaveAttribute('tabIndex', '0');
+      expect(rows[1]).toHaveAttribute('tabIndex', '-1');
+
+      // ArrowDown
+      fireEvent.keyDown(tbody, { key: 'ArrowDown' });
+      expect(rows[1]).toHaveAttribute('tabIndex', '0');
+
+      // ArrowDown again
+      fireEvent.keyDown(tbody, { key: 'ArrowDown' });
+      expect(rows[2]).toHaveAttribute('tabIndex', '0');
+
+      // ArrowUp
+      fireEvent.keyDown(tbody, { key: 'ArrowUp' });
+      expect(rows[1]).toHaveAttribute('tabIndex', '0');
+
+      // Home
+      fireEvent.keyDown(tbody, { key: 'Home' });
+      expect(rows[0]).toHaveAttribute('tabIndex', '0');
+
+      // End
+      fireEvent.keyDown(tbody, { key: 'End' });
+      expect(rows[2]).toHaveAttribute('tabIndex', '0');
+    });
+  });
 });
