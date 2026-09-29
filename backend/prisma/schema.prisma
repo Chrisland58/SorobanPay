@@ -228,3 +228,25 @@ model PaymentRetry {
   @@index([nextRetryAt])
   @@index([status])
 }
+
+// #1073: Indexer checkpoint recovery
+// Replayable sequence checkpoints with SHA-256 checksums for tamper detection.
+model IndexerCheckpoint {
+  id         Int      @id @default(autoincrement())
+  sequence   Int      @unique
+  cursor     String
+  ledger     Int
+  eventCount Int      @default(0)
+  checksum   String
+  createdAt  DateTime @default(now())
+}
+
+// #1073: Processed event tracking for idempotent deduplication.
+model ProcessedEvent {
+  id        Int      @id @default(autoincrement())
+  eventId   String   @unique
+  ledger    Int
+  createdAt DateTime @default(now())
+
+  @@index([ledger])
+}

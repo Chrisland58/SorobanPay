@@ -125,10 +125,14 @@ export class InMemoryPrismaClient {
   private webhookEndpoints: StoredWebhookEndpoint[] = [];
   private webhookDeliveries: StoredWebhookDelivery[] = [];
   private indexerStates: StoredIndexerState[] = [];
+  private indexerCheckpoints: any[] = [];
+  private processedEvents: any[] = [];
   private nextEventId = 1;
   private nextSummaryId = 1;
   private nextEndpointId = 1;
   private nextDeliveryId = 1;
+  private nextCheckpointId = 1;
+  private nextProcessedEventId = 1;
 
   event = {
     findFirst: async (args: { where: Partial<StoredEvent> }) => {
@@ -315,6 +319,64 @@ export class InMemoryPrismaClient {
     }
   }
 
+  indexerCheckpoint = {
+    findUnique: async (args: { where: { sequence: number } }) => {
+      return this.indexerCheckpoints.find((c) => c.sequence === args.where.sequence) ?? null;
+    },
+    findFirst: async (args?: { orderBy?: { sequence?: 'asc' | 'desc' } }) => {
+      if (!this.indexerCheckpoints.length) return null;
+      const sorted = [...this.indexerCheckpoints].sort((a, b) =>
+        args?.orderBy?.sequence === 'desc' ? b.sequence - a.sequence : a.sequence - b.sequence,
+      );
+      return sorted[0];
+    },
+    findMany: async (args?: { orderBy?: { sequence?: 'asc' | 'desc' }; take?: number }) => {
+      const sorted = [...this.indexerCheckpoints].sort((a, b) =>
+        args?.orderBy?.sequence === 'desc' ? b.sequence - a.sequence : a.sequence - b.sequence,
+      );
+      return args?.take !== undefined ? sorted.slice(0, args.take) : sorted;
+    },
+    upsert: async (args: {
+      where: { sequence: number };
+      create: any;
+      update: any;
+    }) => {
+      const idx = this.indexerCheckpoints.findIndex((c) => c.sequence === args.where.sequence);
+      if (idx >= 0) {
+        this.indexerCheckpoints[idx] = { ...this.indexerCheckpoints[idx], ...args.update };
+        return this.indexerCheckpoints[idx];
+      }
+      const record = { id: this.nextCheckpointId++, createdAt: new Date(), ...args.create };
+      this.indexerCheckpoints.push(record);
+      return record;
+    },
+    deleteMany: async (args: { where: { sequence: { lt: number } } }) => {
+      const before = this.indexerCheckpoints.length;
+      this.indexerCheckpoints = this.indexerCheckpoints.filter(
+        (c) => c.sequence >= args.where.sequence.lt,
+      );
+      return { count: before - this.indexerCheckpoints.length };
+    },
+    count: async () => this.indexerCheckpoints.length,
+  };
+
+  processedEvent = {
+    findUnique: async (args: { where: { eventId: string } }) => {
+      return this.processedEvents.find((e) => e.eventId === args.where.eventId) ?? null;
+    },
+    upsert: async (args: {
+      where: { eventId: string };
+      create: { eventId: string; ledger: number };
+      update: Record<string, never>;
+    }) => {
+      const existing = this.processedEvents.find((e) => e.eventId === args.where.eventId);
+      if (existing) return existing;
+      const record = { id: this.nextProcessedEventId++, createdAt: new Date(), ...args.create };
+      this.processedEvents.push(record);
+      return record;
+    },
+  };
+
   reset(): void {
     this.events = [];
     this.summaries = [];
@@ -324,9 +386,13 @@ export class InMemoryPrismaClient {
     this.webhookEndpoints = [];
     this.webhookDeliveries = [];
     this.indexerStates = [];
+    this.indexerCheckpoints = [];
+    this.processedEvents = [];
     this.nextEventId = 1;
     this.nextSummaryId = 1;
     this.nextEndpointId = 1;
     this.nextDeliveryId = 1;
+    this.nextCheckpointId = 1;
+    this.nextProcessedEventId = 1;
   }
 }
