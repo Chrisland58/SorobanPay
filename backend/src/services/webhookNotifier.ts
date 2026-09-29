@@ -1,4 +1,4 @@
-import { createHash, createHmac, randomUUID } from 'crypto';
+import { createHash, createHmac, randomUUID, timingSafeEqual } from 'crypto';
 import prisma from '../lib/prisma';
 import { getTracer, withSpan, SpanKind } from '../lib/tracing';
 import { enqueueWebhookDelivery, getWebhookQueue } from './webhookQueue'; // BE-53
@@ -47,10 +47,7 @@ export function deriveEventId(txHash: string, eventIndex: number): string {
  *
  * Signature format: "sha256=<hex_digest>"
  */
-export function signPayload(body: string, secret: string): string {
-  const hmac = createHmac('sha256', secret).update(body).digest('hex');
-  return `sha256=${hmac}`;
-}
+export { signPayload, verifyWebhookSignature } from './webhookSignature';
 
 /**
  * BE-53: Check whether an endpoint's event filter list includes the given
