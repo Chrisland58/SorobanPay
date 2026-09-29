@@ -6,22 +6,22 @@
  * Satisfies the SubscriptionDB interface from reconciler.ts.
  */
 
-import type { SubscriptionDB, StoredSubscription } from '../../reconciler';
+import type { SubscriptionDB, StoredSubscription as ReconcilerStoredSubscription } from '../../reconciler';
 
 // ── In-memory subscription store ──────────────────────────────────────────────
 
 export class InMemorySubscriptionDB implements SubscriptionDB {
-  private store = new Map<string, StoredSubscription>();
+  private store = new Map<string, ReconcilerStoredSubscription>();
 
   private key(subscriber: string, merchant: string, token: string) {
     return `${subscriber}:${merchant}:${token}`;
   }
 
-  get(subscriber: string, merchant: string, token: string): StoredSubscription | undefined {
+  get(subscriber: string, merchant: string, token: string): ReconcilerStoredSubscription | undefined {
     return this.store.get(this.key(subscriber, merchant, token));
   }
 
-  upsert(record: StoredSubscription): void {
+  upsert(record: ReconcilerStoredSubscription): void {
     this.store.set(this.key(record.subscriber, record.merchant, record.token), record);
   }
 
@@ -29,7 +29,7 @@ export class InMemorySubscriptionDB implements SubscriptionDB {
     this.store.delete(this.key(subscriber, merchant, token));
   }
 
-  all(): StoredSubscription[] {
+  all(): ReconcilerStoredSubscription[] {
     return Array.from(this.store.values());
   }
 
@@ -67,12 +67,68 @@ export interface StoredSummary {
   createdAt: Date;
 }
 
+interface StoredAuditLog {
+  transactionHash: string;
+  eventType: string;
+  subscriber: string;
+  merchant: string;
+  token: string;
+  amount: string;
+  ledger: bigint;
+}
+
+interface StoredNotificationPreference {
+  subscriber: string;
+  email?: string;
+}
+
+export interface StoredWebhookEndpoint {
+  id: number;
+  merchant: string;
+  url: string;
+  active: boolean;
+  createdAt: Date;
+}
+
+export interface StoredWebhookDelivery {
+  id: number;
+  endpointId?: number;
+  eventId?: string;
+  event?: string;
+  merchant?: string;
+  statusCode?: number;
+  success?: boolean;
+  createdAt: Date;
+}
+
+export interface StoredIndexerState {
+  id: number;
+  lastCursor: string | null;
+  updatedAt: Date;
+}
+
+type InMemoryStoredSubscription = {
+  subscriber: string;
+  merchant: string;
+  token: string;
+  amount: string;
+  status: string;
+}
+
 /** Minimal Prisma-compatible client for use in integration tests. */
 export class InMemoryPrismaClient {
   private events: StoredEvent[] = [];
   private summaries: StoredSummary[] = [];
+  private subscriptions: InMemoryStoredSubscription[] = [];
+  private auditLogs: StoredAuditLog[] = [];
+  private notificationPreferences: StoredNotificationPreference[] = [];
+  private webhookEndpoints: StoredWebhookEndpoint[] = [];
+  private webhookDeliveries: StoredWebhookDelivery[] = [];
+  private indexerStates: StoredIndexerState[] = [];
   private nextEventId = 1;
   private nextSummaryId = 1;
+  private nextEndpointId = 1;
+  private nextDeliveryId = 1;
 
   event = {
     findFirst: async (args: { where: Partial<StoredEvent> }) => {
@@ -96,6 +152,41 @@ export class InMemoryPrismaClient {
       };
       this.events.push(record);
       return record;
+    },
+  };
+
+  subscription = {
+    findUnique: async (args: { where: { subscriber_merchant: { subscriber: string; merchant: string } } }) => {
+      return this.subscriptions.find((s) => s.subscriber === args.where.subscriber_merchant.subscriber && s.merchant === args.where.subscriber_merchant.merchant) ?? null;
+    },
+    upsert: async (args: { where: { subscriber_merchant: { subscriber: string; merchant: string } }; create: InMemoryStoredSubscription; update: Partial<InMemoryStoredSubscription> }) => {
+      const existingIndex = this.subscriptions.findIndex((s) => s.subscriber === args.where.subscriber_merchant.subscriber && s.merchant === args.where.subscriber_merchant.merchant);
+      if (existingIndex >= 0) {
+        this.subscriptions[existingIndex] = { ...this.subscriptions[existingIndex], ...args.update } as InMemoryStoredSubscription;
+        return this.subscriptions[existingIndex];
+      }
+      const created = { ...args.create };
+      this.subscriptions.push(created);
+      return created;
+    },
+  };
+
+  auditLog = {
+    upsert: async (args: { where: { transactionHash: string }; create: StoredAuditLog; update: Partial<StoredAuditLog> }) => {
+      const existingIndex = this.auditLogs.findIndex((entry) => entry.transactionHash === args.where.transactionHash);
+      if (existingIndex >= 0) {
+        this.auditLogs[existingIndex] = { ...this.auditLogs[existingIndex], ...args.update } as StoredAuditLog;
+        return this.auditLogs[existingIndex];
+      }
+      const created = { ...args.create };
+      this.auditLogs.push(created);
+      return created;
+    },
+  };
+
+  notificationPreference = {
+    findFirst: async (args: { where: { subscriber: string } }) => {
+      return this.notificationPreferences.find((pref) => pref.subscriber === args.where.subscriber) ?? null;
     },
   };
 
@@ -127,6 +218,75 @@ export class InMemoryPrismaClient {
     },
   };
 
+  indexerState = {
+    findUnique: async (args: { where: { id: number } }) => {
+      return this.indexerStates.find((s) => s.id === args.where.id) ?? null;
+    },
+    upsert: async (args: {
+      where: { id: number };
+      create: { id: number; lastCursor: string | null };
+      update: { lastCursor: string | null };
+    }) => {
+      const idx = this.indexerStates.findIndex((s) => s.id === args.where.id);
+      if (idx === -1) {
+        const record: StoredIndexerState = {
+          ...args.create,
+          updatedAt: new Date(),
+        };
+        this.indexerStates.push(record);
+        return record;
+      } else {
+        this.indexerStates[idx] = { ...this.indexerStates[idx], ...args.update, updatedAt: new Date() };
+        return this.indexerStates[idx];
+      }
+    },
+  };
+
+  webhookEndpoint = {
+    findMany: async (args?: { where?: Partial<StoredWebhookEndpoint> }) => {
+      if (!args?.where) return [...this.webhookEndpoints];
+      return this.webhookEndpoints.filter((ep) =>
+        Object.entries(args.where!).every(([k, v]) => (ep as any)[k] === v),
+      );
+    },
+    create: async (args: { data: Omit<StoredWebhookEndpoint, 'id' | 'createdAt'> }) => {
+      const record: StoredWebhookEndpoint = {
+        ...args.data,
+        id: this.nextEndpointId++,
+        createdAt: new Date(),
+      };
+      this.webhookEndpoints.push(record);
+      return record;
+    },
+  };
+
+  webhookDelivery = {
+    create: async (args: { data: Omit<StoredWebhookDelivery, 'id' | 'createdAt'> }) => {
+      const record: StoredWebhookDelivery = {
+        ...args.data,
+        id: this.nextDeliveryId++,
+        createdAt: new Date(),
+      };
+      this.webhookDeliveries.push(record);
+      return record;
+    },
+    findMany: async (args?: { where?: Partial<StoredWebhookDelivery> }) => {
+      if (!args?.where) return [...this.webhookDeliveries];
+      return this.webhookDeliveries.filter((d) =>
+        Object.entries(args.where!).every(([k, v]) => (d as any)[k] === v),
+      );
+    },
+  };
+
+  /**
+   * Minimal $transaction implementation that runs callbacks sequentially.
+   * Passes a proxy of this client as the tx argument so service code that
+   * calls tx.event.create(...) etc. operates on the same in-memory store.
+   */
+  async $transaction<T>(fn: (tx: InMemoryPrismaClient) => Promise<T>): Promise<T> {
+    return fn(this);
+  }
+
   private matchesEvent(record: StoredEvent, where: Record<string, any>): boolean {
     return Object.entries(where).every(([k, v]) => {
       if (v === undefined) return true;
@@ -148,10 +308,25 @@ export class InMemoryPrismaClient {
     }
   }
 
+  /** Seed webhook endpoints directly for test setup. */
+  seedEndpoints(endpoints: Omit<StoredWebhookEndpoint, 'id' | 'createdAt'>[]): void {
+    for (const ep of endpoints) {
+      this.webhookEndpoints.push({ ...ep, id: this.nextEndpointId++, createdAt: new Date() });
+    }
+  }
+
   reset(): void {
     this.events = [];
     this.summaries = [];
+    this.subscriptions = [];
+    this.auditLogs = [];
+    this.notificationPreferences = [];
+    this.webhookEndpoints = [];
+    this.webhookDeliveries = [];
+    this.indexerStates = [];
     this.nextEventId = 1;
     this.nextSummaryId = 1;
+    this.nextEndpointId = 1;
+    this.nextDeliveryId = 1;
   }
 }
