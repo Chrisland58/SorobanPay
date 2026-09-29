@@ -1070,10 +1070,325 @@ If `GABC...SUBSCRIBER` does not have an active subscription with your merchant a
 
 ---
 
+---
+
+## API Authentication and Tenant Isolation
+
+This section provides a complete reference for authentication flows, tenant header requirements, authorization failure codes, key rotation, and cross-tenant rejection behavior.
+
+---
+
+### Authentication overview
+
+Every non-read-only API endpoint requires a valid JWT obtained through the SEP-10 challenge-response flow (see [Recipe 1](#recipe-1--authenticate-as-a-merchant-sep-10-challenge-response)). The JWT encodes the merchant's Stellar G-address as both the `sub` (subject) and `merchant_id` claims.
+
+```
+JWT payload (decoded):
+{
+  "sub":         "GMERCHANT...",
+  "merchant_id": "GMERCHANT...",
+  "iat":         1753660800,
+  "exp":         1753747200
+}
+```
+
+Token lifetime: **24 hours** by default. The `expires_at` field in the `/auth/token` response gives the exact expiry timestamp in ISO 8601.
+
+---
+
+### Tenant header — `X-Merchant-Id`
+
+Protected endpoints also require the `X-Merchant-Id` header to be set to the merchant's Stellar G-address. The server validates that this header matches the `merchant_id` claim in the JWT — a mismatch is rejected with `403 Forbidden` before any database query runs.
+
+**Required on every protected request:**
+
+```bash
+curl -X GET "https://api.sorobanpay.example.com/subscriptions" \
+  -H "Authorization: Bearer <token>" \
+  -H "X-Merchant-Id: GMERCHANT..."
+```
+
+**JavaScript — attach both headers via a shared helper:**
+
+```javascript
+// lib/apiClient.js
+const BASE_URL = "https://api.sorobanpay.example.com";
+
+/**
+ * Authenticated API request helper.
+ * @param {string} path    - API path, e.g. "/subscriptions"
+ * @param {object} options - fetch options (method, body, …)
+ * @param {string} token   - JWT obtained from /auth/token
+ * @param {string} merchantId - Merchant Stellar G-address
+ */
+export async function apiRequest(path, options = {}, token, merchantId) {
+  const res = await fetch(`${BASE_URL}${path}`, {
+    ...options,
+    headers: {
+      "Authorization":  `Bearer ${token}`,
+      "X-Merchant-Id":  merchantId,
+      "Content-Type":   "application/json",
+      ...(options.headers ?? {}),
+    },
+  });
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: { message: res.statusText } }));
+    throw Object.assign(
+      new Error(err.error?.message ?? "API error"),
+      { status: res.status, code: err.error?.code }
+    );
+  }
+
+  return res.json();
+}
+```
+
+**Expected result — both headers present and valid (HTTP 200):**
+
+```json
+{
+  "subscriptions": [...],
+  "pagination": { "page": 1, "limit": 50, "total": 3, "total_pages": 1 }
+}
+```
+
+---
+
+### Authorization failure codes
+
+| Scenario | HTTP status | Error code | Message example |
+|----------|------------|------------|-----------------|
+| `Authorization` header missing | `401` | `unauthorized` | `"No Authorization header provided."` |
+| JWT malformed (bad base64 / invalid JSON) | `401` | `unauthorized` | `"Token is malformed."` |
+| JWT signature invalid (wrong secret / tampered) | `401` | `unauthorized` | `"Token signature verification failed."` |
+| JWT expired | `401` | `unauthorized` | `"JWT has expired. Please reauthenticate."` |
+| `X-Merchant-Id` header missing | `400` | `bad_request` | `"X-Merchant-Id header is required."` |
+| `X-Merchant-Id` does not match JWT `merchant_id` | `403` | `forbidden` | `"Tenant mismatch: header merchant does not match token claims."` |
+| Path merchant param does not match JWT `merchant_id` | `403` | `forbidden` | `"Tenant mismatch: path merchant does not match token claims."` |
+| Requesting another merchant's resource by address | `403` | `forbidden` | `"Access denied: resource belongs to a different tenant."` |
+
+**Detecting and handling auth failures in code:**
+
+```javascript
+import { apiRequest } from "./lib/apiClient.js";
+
+async function listSubscriptions(token, merchantId) {
+  try {
+    return await apiRequest("/subscriptions?status=active", {}, token, merchantId);
+  } catch (err) {
+    if (err.status === 401) {
+      // Token expired or invalid — re-run the SEP-10 challenge flow
+      console.warn("Token invalid or expired. Re-authenticating...");
+      const newToken = await authenticateViaSEP10(merchantId);
+      return apiRequest("/subscriptions?status=active", {}, newToken, merchantId);
+    }
+
+    if (err.status === 403) {
+      // Misconfigured client: merchantId in call does not match JWT
+      console.error("Tenant mismatch — check that token and merchantId are for the same account.");
+      throw err;
+    }
+
+    throw err; // propagate unexpected errors
+  }
+}
+```
+
+**Detailed error body:**
+
+```json
+{
+  "error": {
+    "code":    "forbidden",
+    "message": "Tenant mismatch: header merchant does not match token claims.",
+    "status":  403
+  }
+}
+```
+
+---
+
+### Cross-tenant rejection examples
+
+The backend enforces **merchant-scoped tenant isolation** at the middleware layer. Every query is filtered to `merchant_id = jwt.merchant_id` before execution. The following examples demonstrate how cross-tenant access is rejected or silently scoped.
+
+#### Scenario 1 — mismatched header and token
+
+Merchant A has a valid JWT for `GMERCHANT_A...` but sets `X-Merchant-Id` to `GMERCHANT_B...`:
+
+```bash
+curl -X GET "https://api.sorobanpay.example.com/subscriptions" \
+  -H "Authorization: Bearer <token-for-GMERCHANT_A>" \
+  -H "X-Merchant-Id: GMERCHANT_B..."
+```
+
+**Expected response (HTTP 403):**
+
+```json
+{
+  "error": {
+    "code":    "forbidden",
+    "message": "Tenant mismatch: header merchant does not match token claims.",
+    "status":  403
+  }
+}
+```
+
+The request is rejected before any DB query runs.
+
+#### Scenario 2 — querying by subscriber address across tenants
+
+Merchant A queries a subscriber who has a subscription with Merchant B only:
+
+```bash
+curl -X GET \
+  "https://api.sorobanpay.example.com/subscriptions?subscriber=GSUBSCRIBER_OF_B&status=active" \
+  -H "Authorization: Bearer <token-for-GMERCHANT_A>" \
+  -H "X-Merchant-Id: GMERCHANT_A..."
+```
+
+**Expected response (HTTP 200, empty result set):**
+
+```json
+{
+  "subscriptions": [],
+  "pagination": { "page": 1, "limit": 50, "total": 0, "total_pages": 0 }
+}
+```
+
+The query silently returns empty — `GSUBSCRIBER_OF_B`'s subscription with Merchant B is invisible to Merchant A. This prevents merchant address enumeration via error messages.
+
+#### Scenario 3 — path parameter mismatch
+
+```bash
+curl -X GET \
+  "https://api.sorobanpay.example.com/merchants/GMERCHANT_B.../payments" \
+  -H "Authorization: Bearer <token-for-GMERCHANT_A>" \
+  -H "X-Merchant-Id: GMERCHANT_A..."
+```
+
+**Expected response (HTTP 403):**
+
+```json
+{
+  "error": {
+    "code":    "forbidden",
+    "message": "Access denied: resource belongs to a different tenant.",
+    "status":  403
+  }
+}
+```
+
+---
+
+### Token rotation and key management
+
+#### Proactive rotation (before expiry)
+
+Tokens expire after 24 hours. Rotate proactively by re-running the SEP-10 challenge flow before expiry:
+
+```javascript
+// Track expiry and refresh 5 minutes before it elapses
+const REFRESH_MARGIN_MS = 5 * 60 * 1000; // 5 minutes
+
+let tokenCache = { token: null, expiresAt: 0 };
+
+async function getValidToken(merchantPublicKey) {
+  const now = Date.now();
+  if (tokenCache.token && tokenCache.expiresAt - now > REFRESH_MARGIN_MS) {
+    return tokenCache.token;
+  }
+
+  // Re-run SEP-10 flow
+  const { transaction, network_passphrase } = await fetchChallenge(merchantPublicKey);
+  const signedXdr = await signWithFreighter(transaction, network_passphrase);
+  const { token, expires_at } = await exchangeForJWT(signedXdr);
+
+  tokenCache = {
+    token,
+    expiresAt: new Date(expires_at).getTime(),
+  };
+
+  return token;
+}
+```
+
+#### Forced rotation (compromised key)
+
+If a JWT or the underlying Stellar signing key is suspected compromised:
+
+1. **Revoke the JWT immediately** — contact your SorobanPay operator to add the `jti` (token ID) to the server-side revocation list, or redeploy with a new `ADMIN_JWT_SECRET`.
+2. **Generate a new Stellar keypair** — use `stellar keys generate` and fund the new account.
+3. **Transfer subscriptions** — call `transfer_subscription(subscriber, old_merchant, new_merchant)` for each active subscription to reassign them to the new keypair. Both old and new merchant must sign.
+4. **Re-register webhooks** — webhook endpoints are associated with the merchant address; re-create them under the new address via `POST /webhooks`.
+5. **Notify subscribers** — subscribers' SEP-41 allowances are granted to the contract address (not the merchant key), so no subscriber action is needed for allowances.
+
+```bash
+# Generate new identity
+stellar keys generate new-merchant --network mainnet
+
+# Print the new address
+stellar keys address new-merchant
+
+# Transfer each subscription (both old and new merchant must sign)
+stellar contract invoke \
+  --id $CONTRACT_ID --source old-merchant --network mainnet \
+  -- transfer_subscription \
+  --subscriber GABC...SUBSCRIBER \
+  --old-merchant GOLD...MERCHANT \
+  --new-merchant GNEW...MERCHANT
+```
+
+Expected result: subscription is atomically reassigned — `next_payment`, `amount`, and `interval` are preserved. A `subscription_transferred` event is emitted.
+
+#### JWT rotation in CI/CD pipelines
+
+For automated merchant-side services (e.g., a backend that calls `execute_payment` via the REST API), store the Stellar signing key in your secret manager and re-authenticate on startup and on 401 responses:
+
+```javascript
+// Pseudocode — adapt to your secret manager (AWS Secrets Manager, Vault, etc.)
+const signingKey = await secretManager.getSecret("MERCHANT_SIGNING_KEY");
+
+async function authenticateAutomated() {
+  const { transaction, network_passphrase } = await fetchChallenge(signingKey.publicKey);
+  const signed = signWithSecretKey(transaction, signingKey.secretKey); // NOT Freighter
+  const { token, expires_at } = await exchangeForJWT(signed);
+  return { token, expires_at };
+}
+```
+
+**Security guidance:**
+- Never log or print the JWT value in CI/CD output. Treat it as a secret.
+- Store `MERCHANT_SIGNING_KEY` (the Stellar secret key starting with `S`) exclusively in a secret manager. Do not commit it to source control or embed it in environment variable files tracked by git.
+- Rotate the JWT by re-running the SEP-10 flow; rotate the Stellar keypair via `transfer_subscription` as described above.
+
+---
+
+### Middleware enforcement summary
+
+The tenant isolation middleware (`backend/src/middleware/tenantAuth.ts`) applies the following checks on every protected request, in order:
+
+| Step | Check | Failure response |
+|------|-------|-----------------|
+| 1 | `Authorization: Bearer <token>` header present | `401 unauthorized` |
+| 2 | JWT signature valid and not expired | `401 unauthorized` |
+| 3 | `X-Merchant-Id` header present | `400 bad_request` |
+| 4 | `X-Merchant-Id == jwt.merchant_id` | `403 forbidden` |
+| 5 | Path params (if any) match `jwt.merchant_id` | `403 forbidden` |
+| 6 | Inject `merchant_id` into request context | — |
+| 7 | All DB queries use `WHERE merchant_id = context.merchant_id` | Transparent scoping |
+
+Step 7 means that even if a bug in route logic omits a WHERE clause, the service layer always re-injects the tenant filter — providing defense-in-depth against accidental cross-tenant leakage.
+
+---
+
 ## See Also
 
 - [Storage TTL Management Guide](./operations.md) — TTL concepts, detection scripts, alert thresholds
 - [Network Configuration Guide](./networks.md) — testnet vs. mainnet RPC and passphrase values
+- [Backend Tenant Isolation Design](./backend-tenant-isolation.md) — Row-level security, scoped API design, storage isolation
+- [Security Model](./security.md) — full authorization audit, circuit breaker runbook, secrets management
 - Swagger UI: `https://api.sorobanpay.example.com/docs`
 - GraphQL Playground: `https://api.sorobanpay.example.com/graphql` (disabled in production)
 - SEP-10 Spec: https://github.com/stellar/stellar-protocol/blob/master/ecosystem/sep-0010.md
