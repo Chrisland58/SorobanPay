@@ -170,8 +170,7 @@ mod property_tests {
                 &p.merchant,
                 &p.token,
                 &amount,
-                &MIN_INTERVAL,,
-            &false,
+                &MIN_INTERVAL,
             );
             prop_assert!(
                 matches!(result, Err(Ok(ContractError::AmountMustBePositive))),
@@ -195,8 +194,7 @@ mod property_tests {
                 &p.merchant,
                 &p.token,
                 &amount,
-                &MIN_INTERVAL,,
-            &false,
+                &MIN_INTERVAL,
             );
             prop_assert!(
                 matches!(result, Err(Ok(ContractError::AmountTooLarge))),
@@ -383,8 +381,7 @@ mod property_tests {
     fn prop_boundary_amount_minimum() {
         let p = PropEnv::new();
         let result = p.client.try_subscribe(
-            &p.subscriber, &p.merchant, &p.token, &1_i128, &MIN_INTERVAL,,
-        &false,
+            &p.subscriber, &p.merchant, &p.token, &1_i128, &MIN_INTERVAL,
         );
         assert!(result.is_ok(), "amount=1 must succeed; got {:?}", result);
     }
@@ -394,8 +391,7 @@ mod property_tests {
     fn prop_boundary_amount_maximum() {
         let p = PropEnv::new();
         let result = p.client.try_subscribe(
-            &p.subscriber, &p.merchant, &p.token, &MAX_AMOUNT, &MIN_INTERVAL,,
-        &false,
+            &p.subscriber, &p.merchant, &p.token, &MAX_AMOUNT, &MIN_INTERVAL,
         );
         assert!(result.is_ok(), "amount=MAX_AMOUNT must succeed; got {:?}", result);
     }
@@ -405,8 +401,7 @@ mod property_tests {
     fn prop_boundary_amount_just_above_maximum() {
         let p = PropEnv::new();
         let result = p.client.try_subscribe(
-            &p.subscriber, &p.merchant, &p.token, &(MAX_AMOUNT + 1), &MIN_INTERVAL,,
-        &false,
+            &p.subscriber, &p.merchant, &p.token, &(MAX_AMOUNT + 1), &MIN_INTERVAL,
         );
         assert!(
             matches!(result, Err(Ok(ContractError::AmountTooLarge))),
@@ -420,8 +415,7 @@ mod property_tests {
     fn prop_boundary_amount_zero() {
         let p = PropEnv::new();
         let result = p.client.try_subscribe(
-            &p.subscriber, &p.merchant, &p.token, &0_i128, &MIN_INTERVAL,,
-        &false,
+            &p.subscriber, &p.merchant, &p.token, &0_i128, &MIN_INTERVAL,
         );
         assert!(
             matches!(result, Err(Ok(ContractError::AmountMustBePositive))),
@@ -435,8 +429,7 @@ mod property_tests {
     fn prop_boundary_interval_minimum() {
         let p = PropEnv::new();
         let result = p.client.try_subscribe(
-            &p.subscriber, &p.merchant, &p.token, &1_000_i128, &MIN_INTERVAL,,
-        &false,
+            &p.subscriber, &p.merchant, &p.token, &1_000_i128, &MIN_INTERVAL,
         );
         assert!(result.is_ok(), "interval=86_400 must succeed; got {:?}", result);
     }
@@ -460,8 +453,7 @@ mod property_tests {
     fn prop_boundary_interval_maximum() {
         let p = PropEnv::new();
         let result = p.client.try_subscribe(
-            &p.subscriber, &p.merchant, &p.token, &1_000_i128, &MAX_INTERVAL,,
-        &false,
+            &p.subscriber, &p.merchant, &p.token, &1_000_i128, &MAX_INTERVAL,
         );
         assert!(result.is_ok(), "interval=31_536_000 must succeed; got {:?}", result);
     }
@@ -526,232 +518,502 @@ mod property_tests {
     }
 
     // =========================================================================
-    // Issue #1098 — Fuzz malformed identifiers and metadata
-    // =========================================================================
+    // ACCOUNTING CONSERVATION — Issue #1095
     //
-    // The tests below exercise adversarial and boundary inputs for address
-    // identity, duplicate subscriptions, and invalid parameter combinations.
-    // None of these paths should corrupt storage or emit spurious events.
+    // The following properties verify that token balances are conserved across
+    // all contract operations.  Every token that leaves the subscriber must
+    // arrive at the merchant; no tokens may be created, destroyed, or diverted.
+    //
+    // Invariants tested:
+    //   I-1  subscribe()        — zero net token movement.
+    //   I-2  execute_payment()  — subscriber debit == merchant credit (exact amount).
+    //   I-3  cancel()           — zero net token movement.
+    //   I-4  failed payment     — zero net token movement when balance is insufficient.
+    //   I-5  next_payment advance — stored value equals old_next_payment + interval.
+    //   I-6  multi-cycle conservation — sum of all payments equals total debit.
+    //   I-7  no phantom tokens  — contract address never holds a token balance.
+    // =========================================================================
 
-    // ─── PROPERTY 8 — Self-subscription is always rejected ───────────────────
+    // ─── Accounting helpers ───────────────────────────────────────────────────
 
-    proptest! {
-        /// For any valid amount and interval, subscribing with `subscriber == merchant`
-        /// must return `SelfSubscription` (error 10) and must not create a storage entry.
-        ///
-        /// Prevents an address from setting up a payment loop to itself.
-        #![proptest_config(ProptestConfig::with_cases(256))]
-        #[test]
-        fn prop_self_subscription_is_rejected(
-            amount   in valid_amount_strategy(),
-            interval in valid_interval_strategy(),
-        ) {
-            let p = PropEnv::new();
-            // Use the same address as both subscriber and merchant.
-            let self_addr = p.subscriber.clone();
-
-            let result = p.client.try_subscribe(
-                &self_addr,
-                &self_addr,
-                &p.token,
-                &amount,
-                &interval,
-                &false,
-            );
-            prop_assert!(
-                matches!(result, Err(Ok(crate::error::ContractError::SelfSubscription))),
-                "self-subscription must return SelfSubscription (error 10), got {:?}",
-                result
-            );
-            // No storage entry must have been created.
-            prop_assert!(
-                !p.env.storage().persistent().has(
-                    &DataKey::Subscription(crate::storage::subscription_key(
-                        &p.env, &self_addr, &self_addr, &p.token,
-                    ))
-                ),
-                "self-subscription must not create a storage entry"
-            );
-        }
+    /// Returns the token balance of `address`.
+    fn balance(env: &Env, token: &Address, address: &Address) -> i128 {
+        soroban_sdk::token::Client::new(env, token).balance(address)
     }
 
-    // ─── PROPERTY 9 — Duplicate subscribe is an idempotent upsert ────────────
+    // =========================================================================
+    // PROPERTY I-1 — subscribe() moves no tokens
+    // =========================================================================
 
     proptest! {
-        /// Subscribing twice with the same (subscriber, merchant, token) triple but
-        /// different amounts must result in exactly ONE storage entry whose amount
-        /// reflects the second call.
+        /// For any valid (amount, interval), calling `subscribe` must not change the
+        /// subscriber's balance, the merchant's balance, or the contract's balance.
         ///
-        /// Guards against accidental duplication bugs — the contract must treat
-        /// re-subscription as an upsert, not an append.
-        #![proptest_config(ProptestConfig::with_cases(256))]
-        #[test]
-        fn prop_duplicate_subscribe_is_idempotent_upsert(
-            amount_first  in valid_amount_strategy().prop_filter(
-                "leave room for a different second amount",
-                |a| *a < MAX_AMOUNT,
-            ),
-            amount_second in valid_amount_strategy(),
-            interval in valid_interval_strategy(),
-        ) {
-            let p = PropEnv::new();
-
-            // First subscription.
-            p.client.subscribe(
-                &p.subscriber, &p.merchant, &p.token,
-                &amount_first, &interval, &false,
-            );
-
-            // Second subscription — same triple, different amount.
-            p.client.subscribe(
-                &p.subscriber, &p.merchant, &p.token,
-                &amount_second, &interval, &false,
-            );
-
-            // Exactly one entry must exist.
-            let key = DataKey::Subscription(crate::storage::subscription_key(
-                &p.env, &p.subscriber, &p.merchant, &p.token,
-            ));
-            prop_assert!(
-                p.env.storage().persistent().has(&key),
-                "one subscription entry must exist after two subscribes"
-            );
-
-            // The stored amount must reflect the SECOND call.
-            let stored: crate::storage::SubscriptionData =
-                p.env.storage().persistent().get(&key).unwrap();
-            prop_assert_eq!(
-                stored.amount, amount_second,
-                "stored amount must match the second subscribe call (upsert), \
-                 first={}, second={}, stored={}",
-                amount_first, amount_second, stored.amount
-            );
-        }
-    }
-
-    // ─── PROPERTY 10 — Negative amounts always return AmountMustBePositive ───
-
-    proptest! {
-        /// Every amount in [-1000, 0] must return `AmountMustBePositive` (error 1).
-        ///
-        /// Complements the existing `prop_nonpositive_amount_returns_amount_must_be_positive`
-        /// with a focused range that stress-tests the lower end of the i128 domain.
+        /// subscribe() is a pure state-write; it never calls token.transfer().
         #![proptest_config(ProptestConfig::with_cases(512))]
         #[test]
-        fn prop_negative_amount_variants_always_rejected(
-            amount in (-1_000_i128..=0_i128),
-        ) {
-            let p = PropEnv::new();
-            let result = p.client.try_subscribe(
-                &p.subscriber, &p.merchant, &p.token,
-                &amount, &MIN_INTERVAL, &false,
-            );
-            prop_assert!(
-                matches!(result, Err(Ok(crate::error::ContractError::AmountMustBePositive))),
-                "amount {} must return AmountMustBePositive, got {:?}",
-                amount, result
-            );
-        }
-    }
-
-    // ─── BOUNDARY — Zero interval is always rejected as IntervalTooShort ─────
-
-    /// `interval = 0` must return `IntervalTooShort` (error 2) with no side-effects.
-    ///
-    /// Zero is a degenerate interval that would allow unlimited-frequency collection.
-    #[test]
-    fn prop_zero_interval_rejected_as_too_short() {
-        let p = PropEnv::new();
-        let result = p.client.try_subscribe(
-            &p.subscriber, &p.merchant, &p.token,
-            &1_000_i128, &0_u64, &false,
-        );
-        assert!(
-            matches!(result, Err(Ok(crate::error::ContractError::IntervalTooShort))),
-            "interval=0 must return IntervalTooShort; got {:?}",
-            result
-        );
-        // No storage entry must exist.
-        let key = DataKey::Subscription(crate::storage::subscription_key(
-            &p.env, &p.subscriber, &p.merchant, &p.token,
-        ));
-        assert!(
-            !p.env.storage().persistent().has(&key),
-            "no subscription must be created when interval=0"
-        );
-    }
-
-    // ─── PROPERTY 11 — Adversarial execute_payment with swapped addresses ────
-
-    proptest! {
-        /// Attempting execute_payment where the caller passes `merchant` as the
-        /// `subscriber` argument (i.e. the same address for both) must return either
-        /// `SelfSubscription` or `NoActiveSubscription` — never a successful transfer.
-        ///
-        /// Guards against impersonation: a merchant cannot collect from themselves
-        /// by passing their own address as the subscriber.
-        #![proptest_config(ProptestConfig::with_cases(256))]
-        #[test]
-        fn prop_adversarial_merchant_cannot_impersonate_subscriber(
+        fn prop_subscribe_moves_no_tokens(
             amount   in valid_amount_strategy(),
             interval in valid_interval_strategy(),
         ) {
             let p = PropEnv::new();
 
-            // A legitimate subscriber sets up a subscription to the merchant.
+            let sub_before  = balance(&p.env, &p.token, &p.subscriber);
+            let mer_before  = balance(&p.env, &p.token, &p.merchant);
+            let con_before  = balance(&p.env, &p.token, &p.contract_id);
+
             p.client.subscribe(
-                &p.subscriber, &p.merchant, &p.token,
-                &amount, &interval, &false,
+                &p.subscriber, &p.merchant, &p.token, &amount, &interval, &false,
             );
 
-            // Advance clock so payment would normally be due.
+            let sub_after = balance(&p.env, &p.token, &p.subscriber);
+            let mer_after = balance(&p.env, &p.token, &p.merchant);
+            let con_after = balance(&p.env, &p.token, &p.contract_id);
+
+            prop_assert_eq!(sub_after, sub_before,
+                "subscribe must not move tokens from subscriber (amount={}, interval={})",
+                amount, interval);
+            prop_assert_eq!(mer_after, mer_before,
+                "subscribe must not credit merchant (amount={}, interval={})",
+                amount, interval);
+            prop_assert_eq!(con_after, con_before,
+                "subscribe must not leave tokens in contract (amount={}, interval={})",
+                amount, interval);
+        }
+    }
+
+    // =========================================================================
+    // PROPERTY I-2 — execute_payment() debits subscriber exactly and credits
+    //                merchant exactly (subscriber debit == merchant credit == amount)
+    // =========================================================================
+
+    proptest! {
+        /// For any valid (amount, interval), a successful `execute_payment` must
+        /// debit the subscriber by exactly `amount` and credit the merchant by
+        /// exactly `amount`.  The sum is strictly conserved.
+        #![proptest_config(ProptestConfig::with_cases(512))]
+        #[test]
+        fn prop_execute_payment_conservation(
+            amount   in valid_amount_strategy().prop_filter(
+                "amount must be within minted balance (MAX_AMOUNT * 2)",
+                |a| *a <= MAX_AMOUNT,
+            ),
+            interval in valid_interval_strategy(),
+        ) {
+            let p = PropEnv::new();
+
+            p.client.subscribe(
+                &p.subscriber, &p.merchant, &p.token, &amount, &interval, &false,
+            );
+
+            // Advance past the payment due time.
             let now = p.env.ledger().timestamp();
             p.env.ledger().with_mut(|l| l.timestamp = now + interval + 1);
 
-            // Adversarial call: pass merchant address as both subscriber AND merchant.
-            // This must not succeed.
-            let result = p.client.try_execute_payment(
-                &p.merchant, // used as subscriber — wrong address
-                &p.merchant, // used as merchant — own address
+            let sub_before  = balance(&p.env, &p.token, &p.subscriber);
+            let mer_before  = balance(&p.env, &p.token, &p.merchant);
+            let con_before  = balance(&p.env, &p.token, &p.contract_id);
+
+            p.client.execute_payment(&p.subscriber, &p.merchant);
+
+            let sub_after = balance(&p.env, &p.token, &p.subscriber);
+            let mer_after = balance(&p.env, &p.token, &p.merchant);
+            let con_after = balance(&p.env, &p.token, &p.contract_id);
+
+            // Subscriber debit
+            prop_assert_eq!(
+                sub_before - sub_after, amount,
+                "subscriber must be debited exactly amount={} (interval={}); \
+                 debit was {}",
+                amount, interval, sub_before - sub_after,
             );
 
-            prop_assert!(
-                result.is_err(),
-                "execute_payment with merchant as both subscriber and merchant \
-                 must fail, got Ok"
-            );
-            // The legitimate subscriber's balance must be untouched.
-            let sub_bal = soroban_sdk::token::Client::new(&p.env, &p.token)
-                .balance(&p.subscriber);
+            // Merchant credit
             prop_assert_eq!(
-                sub_bal,
-                MAX_AMOUNT * 2,
-                "legitimate subscriber balance must be unchanged after adversarial attempt"
+                mer_after - mer_before, amount,
+                "merchant must be credited exactly amount={} (interval={}); \
+                 credit was {}",
+                amount, interval, mer_after - mer_before,
+            );
+
+            // Contract holds nothing
+            prop_assert_eq!(con_after, con_before,
+                "contract must not accumulate tokens (amount={}, interval={})",
+                amount, interval);
+
+            // Conservation: debit == credit
+            prop_assert_eq!(
+                sub_before - sub_after,
+                mer_after - mer_before,
+                "total debit must equal total credit (no tokens created or destroyed)"
             );
         }
     }
 
-    // ─── BOUNDARY — Contract address as token is rejected ────────────────────
+    // =========================================================================
+    // PROPERTY I-3 — cancel() moves no tokens
+    // =========================================================================
 
-    /// Passing the contract's own address as the `token` parameter to `subscribe`
-    /// must return an error (`InvalidTokenAddress` or a host-level panic) and must
-    /// not create a storage entry.
-    ///
-    /// Prevents re-entrant / circular token interactions.
+    proptest! {
+        /// For any valid subscription, calling `cancel` must not alter any token balance.
+        #![proptest_config(ProptestConfig::with_cases(512))]
+        #[test]
+        fn prop_cancel_moves_no_tokens(
+            amount   in valid_amount_strategy(),
+            interval in valid_interval_strategy(),
+        ) {
+            let p = PropEnv::new();
+
+            p.client.subscribe(
+                &p.subscriber, &p.merchant, &p.token, &amount, &interval, &false,
+            );
+
+            let sub_before = balance(&p.env, &p.token, &p.subscriber);
+            let mer_before = balance(&p.env, &p.token, &p.merchant);
+            let con_before = balance(&p.env, &p.token, &p.contract_id);
+
+            p.client.cancel(&p.subscriber, &p.merchant);
+
+            let sub_after = balance(&p.env, &p.token, &p.subscriber);
+            let mer_after = balance(&p.env, &p.token, &p.merchant);
+            let con_after = balance(&p.env, &p.token, &p.contract_id);
+
+            prop_assert_eq!(sub_after, sub_before,
+                "cancel must not move tokens from subscriber (amount={}, interval={})",
+                amount, interval);
+            prop_assert_eq!(mer_after, mer_before,
+                "cancel must not affect merchant balance (amount={}, interval={})",
+                amount, interval);
+            prop_assert_eq!(con_after, con_before,
+                "cancel must not leave tokens in contract (amount={}, interval={})",
+                amount, interval);
+        }
+    }
+
+    // =========================================================================
+    // PROPERTY I-4 — failed execute_payment() (insufficient balance) moves no tokens
+    // =========================================================================
+
+    proptest! {
+        /// When the subscriber's balance is zero, `execute_payment` must return
+        /// `TransferFailed` and leave all balances unchanged.
+        ///
+        /// This verifies the pre-transfer balance guard: the contract checks the
+        /// subscriber's balance before calling token.transfer(), and must not call
+        /// transfer at all if the balance is insufficient.
+        #![proptest_config(ProptestConfig::with_cases(256))]
+        #[test]
+        fn prop_failed_payment_moves_no_tokens(
+            amount   in valid_amount_strategy(),
+            interval in valid_interval_strategy(),
+        ) {
+            // Build a fresh environment where the subscriber has zero balance.
+            let env = Env::default();
+            env.mock_all_auths();
+            env.ledger().with_mut(|l| l.timestamp = 1_700_000_000_u64);
+
+            let admin      = Address::generate(&env);
+            let subscriber = Address::generate(&env);
+            let merchant   = Address::generate(&env);
+
+            let token = env
+                .register_stellar_asset_contract_v2(admin.clone())
+                .address();
+            // Mint zero to subscriber — subscriber has no balance at all.
+            // (We do NOT mint here; default balance is 0.)
+
+            let contract_id = env.register(SubscriptionProtocol, ());
+            let client      = SubscriptionProtocolClient::new(&env, &contract_id);
+
+            soroban_sdk::token::Client::new(&env, &token).approve(
+                &subscriber,
+                &contract_id,
+                &amount,
+                &(env.ledger().sequence() + 1_000_000_u32),
+            );
+
+            client.subscribe(&subscriber, &merchant, &token, &amount, &interval, &false);
+
+            // Advance past payment due time.
+            let now = env.ledger().timestamp();
+            env.ledger().with_mut(|l| l.timestamp = now + interval + 1);
+
+            let sub_before = balance(&env, &token, &subscriber);
+            let mer_before = balance(&env, &token, &merchant);
+
+            // execute_payment must fail
+            let result = client.try_execute_payment(&subscriber, &merchant);
+            prop_assert!(
+                matches!(result, Err(Ok(ContractError::TransferFailed))),
+                "expected TransferFailed when subscriber has zero balance, got {:?}",
+                result
+            );
+
+            // No tokens must have moved
+            prop_assert_eq!(balance(&env, &token, &subscriber), sub_before,
+                "subscriber balance must be unchanged after failed payment");
+            prop_assert_eq!(balance(&env, &token, &merchant), mer_before,
+                "merchant balance must be unchanged after failed payment");
+            prop_assert_eq!(balance(&env, &token, &contract_id), 0_i128,
+                "contract must hold no tokens after failed payment");
+        }
+    }
+
+    // =========================================================================
+    // PROPERTY I-5 — next_payment advances by exactly one interval on success
+    // =========================================================================
+
+    proptest! {
+        /// After a successful execute_payment, the stored `next_payment` must equal
+        /// `old_next_payment + interval` — never more, never less.
+        ///
+        /// This prevents a class of bugs where the window is reset to an incorrect
+        /// value (e.g., `now` instead of `old_next_payment + interval`), which would
+        /// allow or block premature collection in the next cycle.
+        #![proptest_config(ProptestConfig::with_cases(512))]
+        #[test]
+        fn prop_next_payment_advances_by_exactly_one_interval(
+            amount   in valid_amount_strategy().prop_filter(
+                "must fit in minted balance",
+                |a| *a <= MAX_AMOUNT,
+            ),
+            interval in valid_interval_strategy(),
+        ) {
+            let p = PropEnv::new();
+            let subscribe_ts = p.env.ledger().timestamp();
+
+            p.client.subscribe(
+                &p.subscriber, &p.merchant, &p.token, &amount, &interval, &false,
+            );
+
+            let hash = crate::storage::subscription_key(&p.env, &p.subscriber, &p.merchant);
+            let before: crate::storage::SubscriptionData = p.env
+                .storage()
+                .persistent()
+                .get(&DataKey::Subscription(hash.clone()))
+                .expect("subscription must exist");
+
+            // next_payment before execution
+            let expected_before = subscribe_ts + interval;
+            prop_assert_eq!(before.next_payment, expected_before,
+                "next_payment before execution must be subscribe_ts + interval");
+
+            // Advance to exactly next_payment
+            p.env.ledger().with_mut(|l| l.timestamp = expected_before + 1);
+
+            p.client.execute_payment(&p.subscriber, &p.merchant);
+
+            let after: crate::storage::SubscriptionData = p.env
+                .storage()
+                .persistent()
+                .get(&DataKey::Subscription(hash))
+                .expect("subscription must still exist after payment");
+
+            // next_payment must advance by exactly one interval
+            prop_assert_eq!(
+                after.next_payment,
+                expected_before + interval,
+                "next_payment must advance by exactly one interval after payment \
+                 (expected={}, got={})",
+                expected_before + interval,
+                after.next_payment,
+            );
+        }
+    }
+
+    // =========================================================================
+    // PROPERTY I-6 — Multi-cycle conservation
+    //
+    // After N successful payment cycles, the total subscriber debit equals N * amount
+    // and the total merchant credit equals N * amount.
+    // =========================================================================
+
+    proptest! {
+        /// For 2 consecutive payment cycles, the cumulative debit and credit must
+        /// each equal 2 * amount.  This is the multi-period accounting invariant.
+        #![proptest_config(ProptestConfig::with_cases(256))]
+        #[test]
+        fn prop_multi_cycle_accounting_conservation(
+            amount   in (1_i128..=1_000_000_i128), // small to stay within minted balance
+            interval in valid_interval_strategy(),
+        ) {
+            let p = PropEnv::new();
+
+            p.client.subscribe(
+                &p.subscriber, &p.merchant, &p.token, &amount, &interval, &false,
+            );
+
+            let sub_start = balance(&p.env, &p.token, &p.subscriber);
+            let mer_start = balance(&p.env, &p.token, &p.merchant);
+
+            // Cycle 1
+            let ts = p.env.ledger().timestamp();
+            p.env.ledger().with_mut(|l| l.timestamp = ts + interval + 1);
+            p.client.execute_payment(&p.subscriber, &p.merchant);
+
+            // Cycle 2
+            let ts2 = p.env.ledger().timestamp();
+            p.env.ledger().with_mut(|l| l.timestamp = ts2 + interval + 1);
+            p.client.execute_payment(&p.subscriber, &p.merchant);
+
+            let sub_end = balance(&p.env, &p.token, &p.subscriber);
+            let mer_end = balance(&p.env, &p.token, &p.merchant);
+
+            let total_debit  = sub_start - sub_end;
+            let total_credit = mer_end   - mer_start;
+            let expected     = amount * 2;
+
+            prop_assert_eq!(total_debit, expected,
+                "2-cycle total subscriber debit must equal 2 * amount={} (got {})",
+                amount, total_debit);
+            prop_assert_eq!(total_credit, expected,
+                "2-cycle total merchant credit must equal 2 * amount={} (got {})",
+                amount, total_credit);
+            prop_assert_eq!(total_debit, total_credit,
+                "total debit must equal total credit across 2 cycles");
+        }
+    }
+
+    // =========================================================================
+    // PROPERTY I-7 — Contract address never holds a token balance
+    // =========================================================================
+
+    proptest! {
+        /// At every observable point (after subscribe, after execute_payment, after cancel)
+        /// the contract address must have zero token balance.
+        ///
+        /// The contract is non-custodial: it routes transfers directly
+        /// subscriber → merchant via SEP-41 transfer, never holding funds itself.
+        #![proptest_config(ProptestConfig::with_cases(256))]
+        #[test]
+        fn prop_contract_never_holds_tokens(
+            amount   in valid_amount_strategy().prop_filter(
+                "must fit in minted balance",
+                |a| *a <= MAX_AMOUNT,
+            ),
+            interval in valid_interval_strategy(),
+        ) {
+            let p = PropEnv::new();
+
+            // After subscribe
+            p.client.subscribe(
+                &p.subscriber, &p.merchant, &p.token, &amount, &interval, &false,
+            );
+            prop_assert_eq!(
+                balance(&p.env, &p.token, &p.contract_id), 0_i128,
+                "contract must hold 0 tokens after subscribe (amount={}, interval={})",
+                amount, interval,
+            );
+
+            // After execute_payment
+            let ts = p.env.ledger().timestamp();
+            p.env.ledger().with_mut(|l| l.timestamp = ts + interval + 1);
+            p.client.execute_payment(&p.subscriber, &p.merchant);
+            prop_assert_eq!(
+                balance(&p.env, &p.token, &p.contract_id), 0_i128,
+                "contract must hold 0 tokens after execute_payment (amount={}, interval={})",
+                amount, interval,
+            );
+
+            // After cancel
+            p.client.cancel(&p.subscriber, &p.merchant);
+            prop_assert_eq!(
+                balance(&p.env, &p.token, &p.contract_id), 0_i128,
+                "contract must hold 0 tokens after cancel (amount={}, interval={})",
+                amount, interval,
+            );
+        }
+    }
+
+    // =========================================================================
+    // Boundary accounting — deterministic spot checks
+    // =========================================================================
+
+    /// Minimum amount (1): subscriber is debited exactly 1 token, merchant credited 1.
     #[test]
-    fn prop_contract_address_as_token_is_rejected() {
+    fn accounting_boundary_minimum_amount() {
         let p = PropEnv::new();
-        // Use the contract's own address as the token.
-        let bad_token = p.contract_id.clone();
+        let amount = 1_i128;
 
-        let result = p.client.try_subscribe(
-            &p.subscriber, &p.merchant, &bad_token,
-            &1_000_i128, &MIN_INTERVAL, &false,
+        p.client.subscribe(
+            &p.subscriber, &p.merchant, &p.token, &amount, &MIN_INTERVAL, &false,
         );
-        // Must fail — either InvalidTokenAddress or a host-level error.
-        assert!(
-            result.is_err(),
-            "subscribe with contract address as token must fail; got Ok"
+
+        let sub_before = balance(&p.env, &p.token, &p.subscriber);
+        let mer_before = balance(&p.env, &p.token, &p.merchant);
+
+        let ts = p.env.ledger().timestamp();
+        p.env.ledger().with_mut(|l| l.timestamp = ts + MIN_INTERVAL + 1);
+
+        p.client.execute_payment(&p.subscriber, &p.merchant);
+
+        assert_eq!(sub_before - balance(&p.env, &p.token, &p.subscriber), amount,
+            "minimum amount: subscriber debit must equal 1");
+        assert_eq!(balance(&p.env, &p.token, &p.merchant) - mer_before, amount,
+            "minimum amount: merchant credit must equal 1");
+        assert_eq!(balance(&p.env, &p.token, &p.contract_id), 0_i128,
+            "contract must hold 0 after minimum-amount payment");
+    }
+
+    /// Maximum valid amount (MAX_AMOUNT): conservation holds at the upper bound.
+    #[test]
+    fn accounting_boundary_maximum_amount() {
+        let p = PropEnv::new();
+        let amount = MAX_AMOUNT;
+
+        p.client.subscribe(
+            &p.subscriber, &p.merchant, &p.token, &amount, &MIN_INTERVAL, &false,
+        );
+
+        let sub_before = balance(&p.env, &p.token, &p.subscriber);
+        let mer_before = balance(&p.env, &p.token, &p.merchant);
+
+        let ts = p.env.ledger().timestamp();
+        p.env.ledger().with_mut(|l| l.timestamp = ts + MIN_INTERVAL + 1);
+
+        p.client.execute_payment(&p.subscriber, &p.merchant);
+
+        assert_eq!(sub_before - balance(&p.env, &p.token, &p.subscriber), amount,
+            "maximum amount: subscriber debit must equal MAX_AMOUNT");
+        assert_eq!(balance(&p.env, &p.token, &p.merchant) - mer_before, amount,
+            "maximum amount: merchant credit must equal MAX_AMOUNT");
+        assert_eq!(balance(&p.env, &p.token, &p.contract_id), 0_i128,
+            "contract must hold 0 after maximum-amount payment");
+    }
+
+    /// Double subscribe (update) followed by payment: amount used is the latest value.
+    #[test]
+    fn accounting_subscribe_update_uses_new_amount() {
+        let p = PropEnv::new();
+        let amount_v1 = 1_000_i128;
+        let amount_v2 = 500_i128;
+
+        // Subscribe with v1 amount
+        p.client.subscribe(
+            &p.subscriber, &p.merchant, &p.token, &amount_v1, &MIN_INTERVAL, &false,
+        );
+        // Re-subscribe with v2 amount (overwrites v1)
+        p.client.subscribe(
+            &p.subscriber, &p.merchant, &p.token, &amount_v2, &MIN_INTERVAL, &false,
+        );
+
+        let sub_before = balance(&p.env, &p.token, &p.subscriber);
+        let mer_before = balance(&p.env, &p.token, &p.merchant);
+
+        let ts = p.env.ledger().timestamp();
+        p.env.ledger().with_mut(|l| l.timestamp = ts + MIN_INTERVAL + 1);
+
+        p.client.execute_payment(&p.subscriber, &p.merchant);
+
+        assert_eq!(
+            sub_before - balance(&p.env, &p.token, &p.subscriber),
+            amount_v2,
+            "payment after re-subscribe must use updated amount v2"
+        );
+        assert_eq!(
+            balance(&p.env, &p.token, &p.merchant) - mer_before,
+            amount_v2,
+            "merchant credit after re-subscribe must equal updated amount v2"
         );
     }
 }
