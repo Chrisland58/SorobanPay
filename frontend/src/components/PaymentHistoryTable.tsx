@@ -86,7 +86,7 @@ function SkeletonRow() {
       {[60, 44, 36, 28, 28, 20].map((w, i) => (
         <td key={i} className="px-4 py-3">
           <div
-            className={`h-3.5 w-${w} animate-pulse rounded bg-gray-700`}
+            className={`h-3.5 w-${w} motion-safe:animate-pulse rounded bg-gray-700`}
             style={{ width: `${w * 4}px` }}
           />
         </td>
