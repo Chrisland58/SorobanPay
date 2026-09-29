@@ -1,14 +1,17 @@
 'use client';
 
 /**
- * NotificationCenter — bell icon + dropdown panel (UX-119 / #454).
+ * NotificationCenter — bell icon + dropdown panel (UX-119 / #454 / FE-1058).
  *
  * Features:
  *   - Bell icon with unread count badge
- *   - Dropdown panel listing recent notifications
+ *   - Dropdown panel listing paginated notifications
+ *   - Pagination with load more button
  *   - Mark individual or all as read
  *   - Dismiss individual notifications
  *   - Close on click-outside and Escape key
+ *   - Cross-tab synchronization of read state
+ *   - Optimistic updates with error rollback
  *   - ARIA: role="dialog", aria-live for count, aria-expanded on trigger
  *   - Keyboard navigable (Tab through notifications, Enter/Space to mark read)
  */
@@ -20,7 +23,7 @@ import {
   useRef,
   useState,
 } from 'react';
-import { useNotifications } from '@/context/NotificationContext';
+import { useNotificationsPaginated } from '@/hooks/useNotificationsPaginated';
 import type { NotificationType, Notification } from '@/types/notifications';
 
 // ─── Relative time formatter ──────────────────────────────────────────────────
@@ -52,10 +55,20 @@ function NotificationRow({
   onDismiss,
 }: {
   notification: Notification;
-  onMarkRead: (id: string) => void;
+  onMarkRead: (id: string) => Promise<void>;
   onDismiss: (id: string) => void;
 }) {
   const { id, type, title, message, timestamp, read } = notification;
+  const [isMarking, setIsMarking] = useState(false);
+
+  const handleMarkRead = useCallback(async () => {
+    setIsMarking(true);
+    try {
+      await onMarkRead(id);
+    } finally {
+      setIsMarking(false);
+    }
+  }, [id, onMarkRead]);
 
   return (
     <li
@@ -80,8 +93,9 @@ function NotificationRow({
       {/* Content — click to mark read */}
       <button
         type="button"
-        className="flex-1 text-left focus:outline-none focus-visible:ring-1 focus-visible:ring-blue-400 rounded"
-        onClick={() => onMarkRead(id)}
+        disabled={isMarking}
+        className="flex-1 text-left focus:outline-none focus-visible:ring-1 focus-visible:ring-blue-400 rounded disabled:opacity-60 disabled:cursor-not-allowed"
+        onClick={handleMarkRead}
         aria-label={`${read ? '' : 'Unread: '}${title} — ${message}. Click to mark as read.`}
       >
         <p
@@ -110,10 +124,21 @@ function NotificationRow({
 
 // ─── Notification Center ──────────────────────────────────────────────────────
 export default function NotificationCenter() {
-  const { notifications, unreadCount, markRead, markAllRead, dismissNotification } =
-    useNotifications();
+  const {
+    notifications,
+    unreadCount,
+    isLoading,
+    error,
+    hasMore,
+    loadMore,
+    refresh,
+    markRead,
+    markAllRead,
+    dismissNotification,
+  } = useNotificationsPaginated({ pageSize: 20, autoFetch: true });
 
   const [open, setOpen] = useState(false);
+  const [isMarkingAll, setIsMarkingAll] = useState(false);
   const buttonRef = useRef<HTMLButtonElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
   const panelId = useId();
@@ -154,6 +179,15 @@ export default function NotificationCenter() {
     document.addEventListener('keydown', handleKeyDown, true);
     return () => document.removeEventListener('keydown', handleKeyDown, true);
   }, [open, close]);
+
+  const handleMarkAllRead = useCallback(async () => {
+    setIsMarkingAll(true);
+    try {
+      await markAllRead();
+    } finally {
+      setIsMarkingAll(false);
+    }
+  }, [markAllRead]);
 
   return (
     <div className="relative">
@@ -224,22 +258,37 @@ export default function NotificationCenter() {
             {unreadCount > 0 && (
               <button
                 type="button"
-                onClick={markAllRead}
-                className="text-xs text-blue-400 hover:text-blue-300 transition-colors focus:outline-none focus-visible:ring-1 focus-visible:ring-blue-400 rounded"
+                disabled={isMarkingAll}
+                onClick={handleMarkAllRead}
+                className="text-xs text-blue-400 hover:text-blue-300 disabled:opacity-60 disabled:cursor-not-allowed transition-colors focus:outline-none focus-visible:ring-1 focus-visible:ring-blue-400 rounded"
               >
-                Mark all as read
+                {isMarkingAll ? 'Marking...' : 'Mark all as read'}
               </button>
             )}
           </div>
+
+          {/* Error message if present */}
+          {error && (
+            <div
+              role="alert"
+              className="border-b border-gray-800 bg-red-950/20 px-4 py-2 text-xs text-red-400"
+            >
+              {error}
+            </div>
+          )}
 
           {/* Notification list */}
           <div className="max-h-96 overflow-y-auto" role="region" aria-label="Notification list">
             {notifications.length === 0 ? (
               <div className="flex flex-col items-center justify-center gap-2 px-4 py-10 text-center">
-                <span className="text-2xl" aria-hidden="true">🔔</span>
-                <p className="text-sm text-gray-400">No notifications yet</p>
+                <span className="text-2xl" aria-hidden="true">{isLoading ? '⏳' : '🔔'}</span>
+                <p className="text-sm text-gray-400">
+                  {isLoading ? 'Loading notifications...' : 'No notifications yet'}
+                </p>
                 <p className="text-xs text-gray-600">
-                  Payment events and subscription alerts will appear here.
+                  {isLoading
+                    ? 'Please wait...'
+                    : 'Payment events and subscription alerts will appear here.'}
                 </p>
               </div>
             ) : (
@@ -256,11 +305,31 @@ export default function NotificationCenter() {
             )}
           </div>
 
+          {/* Load more button */}
+          {hasMore && !isLoading && (
+            <div className="border-t border-gray-800 p-2 text-center">
+              <button
+                type="button"
+                onClick={loadMore}
+                className="inline-block rounded px-3 py-1.5 text-xs font-medium text-blue-400 hover:text-blue-300 hover:bg-gray-800/50 transition-colors focus:outline-none focus-visible:ring-1 focus-visible:ring-blue-400"
+              >
+                Load more
+              </button>
+            </div>
+          )}
+
+          {/* Loading indicator for pagination */}
+          {hasMore && isLoading && (
+            <div className="border-t border-gray-800 px-4 py-2 text-center">
+              <p className="text-xs text-gray-500">Loading more...</p>
+            </div>
+          )}
+
           {/* Footer */}
           {notifications.length > 0 && (
             <div className="border-t border-gray-800 px-4 py-2 text-center">
               <p className="text-xs text-gray-600">
-                {notifications.length} notification{notifications.length === 1 ? '' : 's'} · stored in your browser
+                {notifications.length} notification{notifications.length === 1 ? '' : 's'} · synced across tabs
               </p>
             </div>
           )}
