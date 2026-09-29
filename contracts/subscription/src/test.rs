@@ -1772,3 +1772,826 @@ fn test_execute_payment_before_due_does_not_mutate_subscription() {
     assert_eq!(before.next_payment, after.next_payment);
     assert_eq!(before.amount, after.amount);
 }
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Issue #1085 — State-Transition Event Matrix
+//
+// Every observable state transition must emit exactly the right events.
+// Matrix rows: create, update (re-subscribe), pause (not implemented → verified
+// absent), resume (not implemented → verified absent), cancel, charge (success),
+// charge (failure), expiry (TTL behaviour tested via next_payment semantics).
+//
+// Each test verifies:
+//   1. Event is emitted (or not emitted).
+//   2. Event topics are exactly correct.
+//   3. Event data is exactly correct.
+//   4. No extra events leak from adjacent transitions.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// ─── Helpers shared by the matrix tests ───────────────────────────────────────
+
+/// Count contract events emitted by `contract_id` in `env`.
+fn contract_event_count(t: &T) -> usize {
+    t.env
+        .events()
+        .all()
+        .iter()
+        .filter(|e| e.0 == t.contract_id)
+        .count()
+}
+
+// ─── Matrix row: CREATE ───────────────────────────────────────────────────────
+
+/// CREATE transition emits exactly one `subscribe` event with the correct
+/// topics `(symbol("subscribe"), subscriber, merchant, token)` and data `amount`.
+#[test]
+fn matrix_create_emits_subscribe_event() {
+    let t = T::new();
+    let amount = 250_000_i128;
+    let interval = 86_400_u64;
+
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &amount, &interval);
+
+    let events: Vec<_> = t.env.events().all().iter().filter(|e| e.0 == t.contract_id).collect();
+    assert_eq!(events.len(), 1, "CREATE must emit exactly 1 event");
+
+    let (_, topics, data) = &events[0];
+
+    let expected_topics = (
+        Symbol::new(&t.env, "subscribe"),
+        t.subscriber.clone(),
+        t.merchant.clone(),
+        t.token.clone(),
+    )
+    .into_val(&t.env);
+    assert_eq!(*topics, expected_topics, "CREATE: topics must be (subscribe, subscriber, merchant, token)");
+
+    let expected_data = amount.into_val(&t.env);
+    assert_eq!(*data, expected_data, "CREATE: data must be amount as i128");
+}
+
+/// CREATE with an invalid amount must emit zero events.
+#[test]
+fn matrix_create_invalid_amount_emits_no_event() {
+    let t = T::new();
+    let _ = t.client.try_subscribe(&t.subscriber, &t.merchant, &t.token, &0_i128, &86_400_u64);
+    assert_eq!(contract_event_count(&t), 0, "failed CREATE must emit 0 events");
+}
+
+/// CREATE with an invalid interval must emit zero events.
+#[test]
+fn matrix_create_invalid_interval_emits_no_event() {
+    let t = T::new();
+    let _ = t.client.try_subscribe(&t.subscriber, &t.merchant, &t.token, &100_i128, &1_u64);
+    assert_eq!(contract_event_count(&t), 0, "failed CREATE (bad interval) must emit 0 events");
+}
+
+/// CREATE with a self-subscription must emit zero events.
+#[test]
+fn matrix_create_self_subscription_emits_no_event() {
+    let t = T::new();
+    let _ = t.client.try_subscribe(&t.subscriber, &t.subscriber, &t.token, &100_i128, &86_400_u64);
+    assert_eq!(contract_event_count(&t), 0, "self-subscription must emit 0 events");
+}
+
+// ─── Matrix row: UPDATE (re-subscribe) ────────────────────────────────────────
+
+/// UPDATE (calling subscribe a second time on the same pair) must emit exactly
+/// one new `subscribe` event with updated amount/interval.
+#[test]
+fn matrix_update_emits_subscribe_event_with_new_amount() {
+    let t = T::new();
+    let old_amount = 100_000_i128;
+    let new_amount = 200_000_i128;
+    let interval = 86_400_u64;
+
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &old_amount, &interval);
+    let count_after_create = contract_event_count(&t);
+    assert_eq!(count_after_create, 1, "initial subscribe must emit 1 event");
+
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &new_amount, &interval);
+    let events: Vec<_> = t.env.events().all().iter().filter(|e| e.0 == t.contract_id).collect();
+    assert_eq!(events.len(), 2, "UPDATE must emit a second subscribe event");
+
+    let (_, topics, data) = &events[1];
+    let expected_topics = (
+        Symbol::new(&t.env, "subscribe"),
+        t.subscriber.clone(),
+        t.merchant.clone(),
+        t.token.clone(),
+    )
+    .into_val(&t.env);
+    assert_eq!(*topics, expected_topics, "UPDATE: topics must match subscribe schema");
+    assert_eq!(*data, new_amount.into_val(&t.env), "UPDATE: data must be the NEW amount");
+}
+
+/// UPDATE must not change the event schema — topics are identical to CREATE.
+#[test]
+fn matrix_update_event_schema_matches_create() {
+    let t = T::new();
+
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &100_i128, &86_400_u64);
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &200_i128, &172_800_u64);
+
+    let events: Vec<_> = t.env.events().all().iter().filter(|e| e.0 == t.contract_id).collect();
+    assert_eq!(events.len(), 2);
+
+    let schema = (
+        Symbol::new(&t.env, "subscribe"),
+        t.subscriber.clone(),
+        t.merchant.clone(),
+        t.token.clone(),
+    )
+    .into_val(&t.env);
+    assert_eq!(events[0].1, schema, "CREATE event schema");
+    assert_eq!(events[1].1, schema, "UPDATE event schema must match CREATE");
+}
+
+// ─── Matrix row: PAUSE (not implemented — no pause event) ─────────────────────
+
+/// The contract has no `pause` entry point. Verify no `pause` event symbol is
+/// ever emitted across a full lifecycle.
+#[test]
+fn matrix_no_pause_event_ever_emitted() {
+    let t = T::new();
+
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &100_000_i128, &86_400_u64);
+    t.advance(86_401);
+    t.client.execute_payment(&t.subscriber, &t.merchant);
+    t.client.cancel(&t.subscriber, &t.merchant);
+
+    let all = t.env.events().all();
+    let pause_sym = Symbol::new(&t.env, "pause").into_val(&t.env);
+    for event in all.iter() {
+        if event.1.len() >= 1 {
+            assert_ne!(
+                event.1.get(0).unwrap(),
+                pause_sym,
+                "no pause event must ever be emitted"
+            );
+        }
+    }
+}
+
+// ─── Matrix row: RESUME (not implemented — no resume event) ──────────────────
+
+/// The contract has no `resume` entry point. Verify no `resume` event is emitted
+/// during a full lifecycle.
+#[test]
+fn matrix_no_resume_event_ever_emitted() {
+    let t = T::new();
+
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &100_000_i128, &86_400_u64);
+    t.advance(86_401);
+    t.client.execute_payment(&t.subscriber, &t.merchant);
+    t.client.cancel(&t.subscriber, &t.merchant);
+
+    let all = t.env.events().all();
+    let resume_sym = Symbol::new(&t.env, "resume").into_val(&t.env);
+    for event in all.iter() {
+        if event.1.len() >= 1 {
+            assert_ne!(
+                event.1.get(0).unwrap(),
+                resume_sym,
+                "no resume event must ever be emitted"
+            );
+        }
+    }
+}
+
+// ─── Matrix row: CANCEL ───────────────────────────────────────────────────────
+
+/// CANCEL must emit exactly one `cancel` event with topics
+/// `(symbol("cancel"), subscriber, merchant)` and data `()`.
+#[test]
+fn matrix_cancel_emits_cancel_event() {
+    let t = T::new();
+
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &100_000_i128, &86_400_u64);
+    let count_after_sub = contract_event_count(&t);
+
+    t.client.cancel(&t.subscriber, &t.merchant);
+
+    let events: Vec<_> = t.env.events().all().iter().filter(|e| e.0 == t.contract_id).collect();
+    assert_eq!(events.len(), count_after_sub + 1, "CANCEL must emit exactly 1 additional event");
+
+    let cancel_event = &events[count_after_sub];
+    let expected_topics = (
+        Symbol::new(&t.env, "cancel"),
+        t.subscriber.clone(),
+        t.merchant.clone(),
+    )
+    .into_val(&t.env);
+    assert_eq!(cancel_event.1, expected_topics, "CANCEL: topics must be (cancel, subscriber, merchant)");
+
+    let expected_data = ().into_val(&t.env);
+    assert_eq!(cancel_event.2, expected_data, "CANCEL: data must be unit ()");
+}
+
+/// CANCEL on a non-existent subscription must emit zero events.
+#[test]
+fn matrix_cancel_nonexistent_emits_no_event() {
+    let t = T::new();
+    let _ = t.client.try_cancel(&t.subscriber, &t.merchant);
+    assert_eq!(contract_event_count(&t), 0, "failed CANCEL must emit 0 events");
+}
+
+/// CANCEL after a payment must produce exactly one cancel event.
+#[test]
+fn matrix_cancel_after_payment_emits_one_cancel_event() {
+    let t = T::new();
+
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &1_000_i128, &86_400_u64);
+    t.advance(86_401);
+    t.client.execute_payment(&t.subscriber, &t.merchant);
+
+    let count_before_cancel = contract_event_count(&t);
+    t.client.cancel(&t.subscriber, &t.merchant);
+    let count_after_cancel = contract_event_count(&t);
+
+    assert_eq!(count_after_cancel, count_before_cancel + 1,
+        "CANCEL must add exactly 1 event even after a prior payment");
+
+    let events: Vec<_> = t.env.events().all().iter().filter(|e| e.0 == t.contract_id).collect();
+    let cancel_event = &events[count_after_cancel - 1];
+    let expected_topics = (
+        Symbol::new(&t.env, "cancel"),
+        t.subscriber.clone(),
+        t.merchant.clone(),
+    )
+    .into_val(&t.env);
+    assert_eq!(cancel_event.1, expected_topics);
+}
+
+// ─── Matrix row: CHARGE (success) ─────────────────────────────────────────────
+
+/// Successful CHARGE must emit exactly one `executed` event with topics
+/// `(symbol("executed"), subscriber, merchant, token)` and data `amount`.
+#[test]
+fn matrix_charge_success_emits_executed_event() {
+    let t = T::new();
+    let amount = 150_000_i128;
+    let interval = 86_400_u64;
+
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &amount, &interval);
+    t.advance(interval + 1);
+
+    let count_before = contract_event_count(&t);
+    t.client.execute_payment(&t.subscriber, &t.merchant);
+
+    let events: Vec<_> = t.env.events().all().iter().filter(|e| e.0 == t.contract_id).collect();
+    assert_eq!(events.len(), count_before + 1, "successful CHARGE must emit exactly 1 event");
+
+    let executed_event = &events[count_before];
+    let expected_topics = (
+        Symbol::new(&t.env, "executed"),
+        t.subscriber.clone(),
+        t.merchant.clone(),
+        t.token.clone(),
+    )
+    .into_val(&t.env);
+    assert_eq!(executed_event.1, expected_topics,
+        "CHARGE success: topics must be (executed, subscriber, merchant, token)");
+    assert_eq!(executed_event.2, amount.into_val(&t.env),
+        "CHARGE success: data must be amount as i128");
+}
+
+/// After a successful CHARGE the contract must not emit a failure event.
+#[test]
+fn matrix_charge_success_emits_no_failure_event() {
+    let t = T::new();
+
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &100_i128, &86_400_u64);
+    t.advance(86_401);
+    t.client.execute_payment(&t.subscriber, &t.merchant);
+
+    let failure_sym = Symbol::new(&t.env, "payment_transfer_failure").into_val(&t.env);
+    let evs: Vec<_> = t.env.events().all().iter().filter(|e| e.0 == t.contract_id).collect();
+    for event in evs.iter() {
+        if event.1.len() >= 1 {
+            assert_ne!(event.1.get(0).unwrap(), failure_sym,
+                "successful CHARGE must not emit payment_transfer_failure");
+        }
+    }
+}
+
+/// Successful CHARGE transfers funds (accounting invariant).
+#[test]
+fn matrix_charge_success_accounting_invariant() {
+    let t = T::new();
+    let amount = 500_000_i128;
+
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &amount, &86_400_u64);
+    t.advance(86_401);
+
+    let sub_before = t.sub_bal();
+    let mer_before = t.mer_bal();
+
+    t.client.execute_payment(&t.subscriber, &t.merchant);
+
+    assert_eq!(t.sub_bal(), sub_before - amount, "subscriber must be debited amount");
+    assert_eq!(t.mer_bal(), mer_before + amount, "merchant must be credited amount");
+    assert_eq!(
+        token::Client::new(&t.env, &t.token).balance(&t.contract_id),
+        0_i128, "contract must hold 0 balance"
+    );
+}
+
+// ─── Matrix row: CHARGE (failure) ─────────────────────────────────────────────
+
+/// Failed CHARGE (insufficient balance) must emit exactly one
+/// `payment_transfer_failure` event and zero `executed` events.
+#[test]
+fn matrix_charge_failure_emits_payment_transfer_failure_event() {
+    let t = T::new();
+    let high_amount = 15_000_000_i128;
+
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &high_amount, &86_400_u64);
+    t.advance(86_401);
+
+    let count_before = contract_event_count(&t);
+    let _ = t.client.try_execute_payment(&t.subscriber, &t.merchant);
+
+    let events: Vec<_> = t.env.events().all().iter().filter(|e| e.0 == t.contract_id).collect();
+    assert_eq!(events.len(), count_before + 1, "failed CHARGE must emit exactly 1 event");
+
+    let failure_event = &events[count_before];
+    let expected_topics = (
+        Symbol::new(&t.env, "payment_transfer_failure"),
+        t.subscriber.clone(),
+        t.merchant.clone(),
+    )
+    .into_val(&t.env);
+    assert_eq!(failure_event.1, expected_topics,
+        "CHARGE failure: topics must be (payment_transfer_failure, subscriber, merchant)");
+    assert_eq!(failure_event.2, high_amount.into_val(&t.env),
+        "CHARGE failure: data must be the attempted amount");
+}
+
+/// Failed CHARGE must not emit an `executed` event.
+#[test]
+fn matrix_charge_failure_does_not_emit_executed_event() {
+    let t = T::new();
+    let high_amount = 15_000_000_i128;
+
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &high_amount, &86_400_u64);
+    t.advance(86_401);
+    let _ = t.client.try_execute_payment(&t.subscriber, &t.merchant);
+
+    let executed_sym = Symbol::new(&t.env, "executed").into_val(&t.env);
+    let evs: Vec<_> = t.env.events().all().iter().filter(|e| e.0 == t.contract_id).collect();
+    for event in evs.iter() {
+        if event.1.len() >= 1 {
+            assert_ne!(event.1.get(0).unwrap(), executed_sym,
+                "failed CHARGE must not emit executed event");
+        }
+    }
+}
+
+/// Failed CHARGE must not transfer any funds (accounting invariant).
+#[test]
+fn matrix_charge_failure_accounting_invariant() {
+    let t = T::new();
+    let high_amount = 15_000_000_i128;
+
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &high_amount, &86_400_u64);
+    t.advance(86_401);
+
+    let sub_before = t.sub_bal();
+    let mer_before = t.mer_bal();
+
+    let _ = t.client.try_execute_payment(&t.subscriber, &t.merchant);
+
+    assert_eq!(t.sub_bal(), sub_before, "subscriber balance must not change on failed CHARGE");
+    assert_eq!(t.mer_bal(), mer_before, "merchant balance must not change on failed CHARGE");
+}
+
+/// Failed CHARGE must leave subscription state unchanged (next_payment not advanced).
+#[test]
+fn matrix_charge_failure_state_unchanged() {
+    let t = T::new();
+    let high_amount = 15_000_000_i128;
+
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &high_amount, &86_400_u64);
+    let before = t.get_sub();
+    t.advance(86_401);
+
+    let _ = t.client.try_execute_payment(&t.subscriber, &t.merchant);
+
+    let after = t.get_sub();
+    assert_eq!(after.next_payment, before.next_payment,
+        "next_payment must not advance on failed CHARGE");
+    assert_eq!(after.amount, before.amount);
+    assert_eq!(after.interval, before.interval);
+}
+
+// ─── Matrix row: EXPIRY (TTL semantics) ──────────────────────────────────────
+
+/// After cancel the subscription key is removed; a subsequent execute_payment
+/// must return NoActiveSubscription — models the "expiry" state.
+#[test]
+fn matrix_expiry_after_cancel_execute_returns_no_active() {
+    let t = T::new();
+
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &100_000_i128, &86_400_u64);
+    t.client.cancel(&t.subscriber, &t.merchant);
+    t.advance(86_401);
+
+    let r = t.client.try_execute_payment(&t.subscriber, &t.merchant);
+    assert!(matches!(r, Err(Ok(ContractError::NoActiveSubscription))),
+        "post-cancel execute_payment must return NoActiveSubscription");
+}
+
+/// After cancel no further events are emitted by execute_payment.
+#[test]
+fn matrix_expiry_after_cancel_no_extra_events() {
+    let t = T::new();
+
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &100_000_i128, &86_400_u64);
+    t.client.cancel(&t.subscriber, &t.merchant);
+    t.advance(86_401);
+
+    let count_before = contract_event_count(&t);
+    let _ = t.client.try_execute_payment(&t.subscriber, &t.merchant);
+    let count_after = contract_event_count(&t);
+
+    assert_eq!(count_before, count_after, "no extra events on post-cancel execute_payment");
+}
+
+// ─── Full matrix sequence ─────────────────────────────────────────────────────
+
+/// Full sequence [subscribe] → [executed] → [cancel] must produce exactly 3 events
+/// in the correct order.
+#[test]
+fn matrix_full_sequence_event_order() {
+    let t = T::new();
+    let amount = 1_000_i128;
+    let interval = 86_400_u64;
+
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &amount, &interval);
+    t.advance(interval + 1);
+    t.client.execute_payment(&t.subscriber, &t.merchant);
+    t.client.cancel(&t.subscriber, &t.merchant);
+
+    let events: Vec<_> = t.env.events().all().iter().filter(|e| e.0 == t.contract_id).collect();
+    assert_eq!(events.len(), 3, "full sequence must produce exactly 3 events");
+
+    let sub_sym    = Symbol::new(&t.env, "subscribe").into_val(&t.env);
+    let exec_sym   = Symbol::new(&t.env, "executed").into_val(&t.env);
+    let cancel_sym = Symbol::new(&t.env, "cancel").into_val(&t.env);
+
+    assert_eq!(events[0].1.get(0).unwrap(), sub_sym,    "event[0] must be subscribe");
+    assert_eq!(events[1].1.get(0).unwrap(), exec_sym,   "event[1] must be executed");
+    assert_eq!(events[2].1.get(0).unwrap(), cancel_sym, "event[2] must be cancel");
+}
+
+/// Full sequence with a failed charge:
+///   [subscribe] → [payment_transfer_failure] → [subscribe(update)] → [executed] → [cancel]
+#[test]
+fn matrix_full_sequence_with_failure_and_update() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin      = Address::generate(&env);
+    let subscriber = Address::generate(&env);
+    let merchant   = Address::generate(&env);
+
+    let token = env.register_stellar_asset_contract_v2(admin.clone()).address();
+    // Mint only 5_000 initially so the first payment attempt fails
+    StellarAssetClient::new(&env, &token).mint(&subscriber, &5_000_i128);
+
+    let contract_id = env.register(SubscriptionProtocol, ());
+    let client      = SubscriptionProtocolClient::new(&env, &contract_id);
+
+    token::Client::new(&env, &token).approve(
+        &subscriber,
+        &contract_id,
+        &5_000_000_i128,
+        &(env.ledger().sequence() + 100_000_u32),
+    );
+
+    let high_amount   = 10_000_i128; // exceeds initial 5_000 balance
+    let normal_amount = 1_000_i128;  // fits after top-up
+    let interval      = 86_400_u64;
+
+    // CREATE with high amount
+    client.subscribe(&subscriber, &merchant, &token, &high_amount, &interval);
+
+    // CHARGE (failure)
+    let now = env.ledger().timestamp();
+    env.ledger().with_mut(|l| l.timestamp = now + interval + 1);
+    let _ = client.try_execute_payment(&subscriber, &merchant);
+
+    // UPDATE + top-up
+    StellarAssetClient::new(&env, &token).mint(&subscriber, &5_000_i128);
+    client.subscribe(&subscriber, &merchant, &token, &normal_amount, &interval);
+
+    // CHARGE (success)
+    let now2 = env.ledger().timestamp();
+    env.ledger().with_mut(|l| l.timestamp = now2 + interval + 1);
+    client.execute_payment(&subscriber, &merchant);
+
+    // CANCEL
+    client.cancel(&subscriber, &merchant);
+
+    let all_events: Vec<_> = env.events().all().iter().filter(|e| e.0 == contract_id).collect();
+    assert_eq!(all_events.len(), 5, "full sequence must produce 5 events");
+
+    let sym_subscribe = Symbol::new(&env, "subscribe").into_val(&env);
+    let sym_failure   = Symbol::new(&env, "payment_transfer_failure").into_val(&env);
+    let sym_executed  = Symbol::new(&env, "executed").into_val(&env);
+    let sym_cancel    = Symbol::new(&env, "cancel").into_val(&env);
+
+    assert_eq!(all_events[0].1.get(0).unwrap(), sym_subscribe, "event[0] must be subscribe");
+    assert_eq!(all_events[1].1.get(0).unwrap(), sym_failure,   "event[1] must be payment_transfer_failure");
+    assert_eq!(all_events[2].1.get(0).unwrap(), sym_subscribe, "event[2] must be subscribe (UPDATE)");
+    assert_eq!(all_events[3].1.get(0).unwrap(), sym_executed,  "event[3] must be executed");
+    assert_eq!(all_events[4].1.get(0).unwrap(), sym_cancel,    "event[4] must be cancel");
+}
+
+// ─── Issue #1094 — Deterministic batch semantics ──────────────────────────────
+//
+// Specifies size limits and per-item (non-atomic) failure behavior for
+// batch_execute_payment:
+//
+// • Empty batch → EmptyBatch (error 13)
+// • Batch > BATCH_MAX_SIZE (50) → BatchTooLarge (error 14)
+// • Batch of exactly BATCH_MAX_SIZE → accepted (off-by-one boundary)
+// • Batch of size 1 → identical result to a direct execute_payment call
+// • Per-item failure → insufficient-balance item does not block other items
+// • All-success → merchant receives amt × N total
+// • Failed item → next_payment not advanced for the failed subscriber
+
+/// Empty batch returns EmptyBatch (error 13).
+#[test]
+fn test_batch_empty_returns_empty_batch_error() {
+    let t = T::new();
+    let empty: soroban_sdk::Vec<Address> = soroban_sdk::Vec::new(&t.env);
+    let r = t.client().try_batch_execute_payment(&t.merchant, &t.token, &empty);
+    assert!(
+        matches!(r, Err(Ok(ContractError::EmptyBatch))),
+        "empty batch must return EmptyBatch (error 13), got {:?}",
+        r
+    );
+}
+
+/// Batch with BATCH_MAX_SIZE + 1 entries returns BatchTooLarge (error 14).
+#[test]
+fn test_batch_too_large_returns_batch_too_large_error() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+    env.ledger().with_mut(|l| l.timestamp = 1_700_000_000_u64);
+
+    let admin    = Address::generate(&env);
+    let token    = env.register_stellar_asset_contract_v2(admin.clone()).address();
+    let merchant = Address::generate(&env);
+
+    let contract_id = env.register(SubscriptionProtocol, ());
+    let client = SubscriptionProtocolClient::new(&env, &contract_id);
+
+    // Build a vector of BATCH_MAX_SIZE + 1 = 51 addresses.
+    let mut subscribers = soroban_sdk::Vec::new(&env);
+    for _ in 0..=crate::BATCH_MAX_SIZE {
+        subscribers.push_back(Address::generate(&env));
+    }
+
+    let r = client.try_batch_execute_payment(&merchant, &token, &subscribers);
+    assert!(
+        matches!(r, Err(Ok(ContractError::BatchTooLarge))),
+        "batch of 51 must return BatchTooLarge (error 14), got {:?}",
+        r
+    );
+}
+
+/// Batch of exactly BATCH_MAX_SIZE (50) is not rejected with BatchTooLarge.
+///
+/// Off-by-one regression guard: the limit check must be `> BATCH_MAX_SIZE`,
+/// not `>= BATCH_MAX_SIZE`.
+#[test]
+fn test_batch_exactly_max_size_not_rejected() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+    env.ledger().with_mut(|l| l.timestamp = 1_700_000_000_u64);
+
+    let admin    = Address::generate(&env);
+    let token    = env.register_stellar_asset_contract_v2(admin.clone()).address();
+    let merchant = Address::generate(&env);
+
+    let contract_id = env.register(SubscriptionProtocol, ());
+    let client = SubscriptionProtocolClient::new(&env, &contract_id);
+
+    let amt = 100_i128;
+    let ivl = 86_400_u64;
+
+    let mut subscribers = soroban_sdk::Vec::new(&env);
+    for _ in 0..crate::BATCH_MAX_SIZE {
+        let sub = Address::generate(&env);
+        StellarAssetClient::new(&env, &token).mint(&sub, &10_000_i128);
+        token::Client::new(&env, &token).approve(
+            &sub,
+            &contract_id,
+            &5_000_i128,
+            &(env.ledger().sequence() + 100_000_u32),
+        );
+        client.subscribe(&sub, &merchant, &token, &amt, &ivl, &false);
+        subscribers.push_back(sub);
+    }
+
+    // Advance past the payment window.
+    let now = env.ledger().timestamp();
+    env.ledger().with_mut(|l| l.timestamp = now + ivl + 1);
+
+    let r = client.try_batch_execute_payment(&merchant, &token, &subscribers);
+    assert!(
+        !matches!(r, Err(Ok(ContractError::BatchTooLarge))),
+        "batch of exactly BATCH_MAX_SIZE must not return BatchTooLarge"
+    );
+}
+
+/// Batch of size 1 produces the same balance delta and `next_payment` advance
+/// as a direct `execute_payment` call — the two paths must be equivalent.
+#[test]
+fn test_batch_size_one_identical_to_direct_execute_payment() {
+    let t   = T::new();
+    let amt = 1_000_i128;
+    let ivl = 86_400_u64;
+
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &amt, &ivl, &false);
+    t.advance(ivl + 1);
+
+    let sub_bal_before  = t.sub_bal();
+    let mer_bal_before  = t.mer_bal();
+    let next_before     = t.get_sub().next_payment;
+
+    let mut subs = soroban_sdk::Vec::new(&t.env);
+    subs.push_back(t.subscriber.clone());
+
+    let r = t.client().try_batch_execute_payment(&t.merchant, &t.token, &subs);
+    assert!(r.is_ok(), "batch of size 1 must succeed, got {:?}", r);
+
+    assert_eq!(t.sub_bal(), sub_bal_before - amt,
+        "subscriber balance must decrease by amount");
+    assert_eq!(t.mer_bal(), mer_bal_before + amt,
+        "merchant balance must increase by amount");
+    assert!(t.get_sub().next_payment > next_before,
+        "next_payment must advance after a successful batch payment");
+}
+
+/// Per-item failure semantics: a subscriber with zero balance does not prevent
+/// collection from a solvent subscriber in the same batch.
+///
+/// The batch is processed item-by-item; a failure for one entry is silently
+/// skipped and the rest of the batch continues.
+#[test]
+fn test_batch_per_item_failure_does_not_block_solvent_items() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+    env.ledger().with_mut(|l| l.timestamp = 1_700_000_000_u64);
+
+    let admin    = Address::generate(&env);
+    let token    = env.register_stellar_asset_contract_v2(admin.clone()).address();
+    let merchant = Address::generate(&env);
+
+    let contract_id = env.register(SubscriptionProtocol, ());
+    let client = SubscriptionProtocolClient::new(&env, &contract_id);
+
+    let amt = 1_000_i128;
+    let ivl = 86_400_u64;
+
+    // sub_solvent has enough balance and allowance.
+    let sub_solvent = Address::generate(&env);
+    StellarAssetClient::new(&env, &token).mint(&sub_solvent, &10_000_i128);
+    token::Client::new(&env, &token).approve(
+        &sub_solvent, &contract_id, &5_000_i128,
+        &(env.ledger().sequence() + 100_000_u32),
+    );
+    client.subscribe(&sub_solvent, &merchant, &token, &amt, &ivl, &false);
+
+    // sub_broke has no balance at all — only an allowance.
+    let sub_broke = Address::generate(&env);
+    token::Client::new(&env, &token).approve(
+        &sub_broke, &contract_id, &5_000_i128,
+        &(env.ledger().sequence() + 100_000_u32),
+    );
+    client.subscribe(&sub_broke, &merchant, &token, &amt, &ivl, &false);
+
+    // Advance past the payment window.
+    let now = env.ledger().timestamp();
+    env.ledger().with_mut(|l| l.timestamp = now + ivl + 1);
+
+    let solvent_bal_before = token::Client::new(&env, &token).balance(&sub_solvent);
+    let broke_bal_before   = token::Client::new(&env, &token).balance(&sub_broke);
+    let mer_bal_before     = token::Client::new(&env, &token).balance(&merchant);
+
+    let mut subs = soroban_sdk::Vec::new(&env);
+    subs.push_back(sub_solvent.clone());
+    subs.push_back(sub_broke.clone());
+
+    // The overall batch call must return Ok (per-item failures are absorbed).
+    let r = client.try_batch_execute_payment(&merchant, &token, &subs);
+    assert!(r.is_ok(), "batch with one failing item must still return Ok, got {:?}", r);
+
+    // The solvent subscriber must have been charged.
+    assert_eq!(
+        token::Client::new(&env, &token).balance(&sub_solvent),
+        solvent_bal_before - amt,
+        "solvent subscriber must be charged despite broke subscriber in same batch"
+    );
+    // The broke subscriber must not have been charged.
+    assert_eq!(
+        token::Client::new(&env, &token).balance(&sub_broke),
+        broke_bal_before,
+        "broke subscriber must not be debited"
+    );
+    // Merchant receives exactly the solvent subscriber's payment.
+    assert_eq!(
+        token::Client::new(&env, &token).balance(&merchant),
+        mer_bal_before + amt,
+        "merchant must receive only the solvent subscriber's payment"
+    );
+}
+
+/// All-success batch: total funds collected equals the sum of all individual payments.
+///
+/// Accounting invariant: merchant_balance_after − merchant_balance_before = amt × N.
+#[test]
+fn test_batch_all_success_correct_total_transferred() {
+    const N: usize = 5;
+
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+    env.ledger().with_mut(|l| l.timestamp = 1_700_000_000_u64);
+
+    let admin    = Address::generate(&env);
+    let token    = env.register_stellar_asset_contract_v2(admin.clone()).address();
+    let merchant = Address::generate(&env);
+
+    let contract_id = env.register(SubscriptionProtocol, ());
+    let client = SubscriptionProtocolClient::new(&env, &contract_id);
+
+    let amt = 500_i128;
+    let ivl = 86_400_u64;
+
+    let mut subs_vec = soroban_sdk::Vec::new(&env);
+    for _ in 0..N {
+        let sub = Address::generate(&env);
+        StellarAssetClient::new(&env, &token).mint(&sub, &10_000_i128);
+        token::Client::new(&env, &token).approve(
+            &sub, &contract_id, &5_000_i128,
+            &(env.ledger().sequence() + 100_000_u32),
+        );
+        client.subscribe(&sub, &merchant, &token, &amt, &ivl, &false);
+        subs_vec.push_back(sub);
+    }
+
+    let now = env.ledger().timestamp();
+    env.ledger().with_mut(|l| l.timestamp = now + ivl + 1);
+
+    let mer_bal_before = token::Client::new(&env, &token).balance(&merchant);
+
+    let r = client.try_batch_execute_payment(&merchant, &token, &subs_vec);
+    assert!(r.is_ok(), "all-success batch must return Ok, got {:?}", r);
+
+    let mer_bal_after = token::Client::new(&env, &token).balance(&merchant);
+    assert_eq!(
+        mer_bal_after - mer_bal_before, amt * N as i128,
+        "merchant balance delta must equal amt × N for an all-success batch"
+    );
+}
+
+/// A failed batch item (insufficient balance) must not advance `next_payment`
+/// for that subscriber — the subscription remains collectable on a future retry.
+#[test]
+fn test_batch_failed_item_next_payment_not_advanced() {
+    let t   = T::new();
+    let amt = 20_000_000_i128; // exceeds the 10_000_000 minted to subscriber
+    let ivl = 86_400_u64;
+
+    // Approve a large allowance so the failure is balance-driven.
+    token::Client::new(&t.env, &t.token).approve(
+        &t.subscriber, &t.contract_id, &amt,
+        &(t.env.ledger().sequence() + 100_000_u32),
+    );
+
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &amt, &ivl, &false);
+    let next_before = t.get_sub().next_payment;
+
+    t.advance(ivl + 1);
+
+    let mut subs = soroban_sdk::Vec::new(&t.env);
+    subs.push_back(t.subscriber.clone());
+
+    // Batch processes the item; balance is insufficient so it is skipped.
+    let _ = t.client().try_batch_execute_payment(&t.merchant, &t.token, &subs);
+
+    // `next_payment` must NOT have advanced — the subscriber can be retried later.
+    assert_eq!(
+        t.get_sub().next_payment, next_before,
+        "next_payment must not advance when the batch item fails due to insufficient balance"
+    );
+    // No funds must have moved.
+    assert_eq!(t.sub_bal(), 10_000_000_i128,
+        "subscriber balance must be unchanged after a failed batch item");
+    assert_eq!(t.mer_bal(), 0_i128,
+        "merchant balance must be unchanged after a failed batch item");
+}
