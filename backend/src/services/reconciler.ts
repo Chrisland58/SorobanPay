@@ -8,6 +8,10 @@
  * on-chain history and uses an in-process Map as the mutable DB surface —
  * reconcile() writes to the Map, and the adapter flushes inserts/updates/deletes
  * back to Prisma after the run completes.
+ *
+ * #1068 — Dry-run mode:
+ *   dryRun() runs reconcile() against a read-only copy of the DB so no
+ *   mutations occur.  Supports bounded results and opaque continuation cursors.
  */
 
 export {
@@ -21,7 +25,8 @@ export {
 } from '../../reconciler';
 
 import prisma from '../lib/prisma';
-import type { ChainEvent, StoredSubscription, SubscriptionDB } from '../../reconciler';
+import type { ChainEvent, StoredSubscription, SubscriptionDB, ReconcileResult } from '../../reconciler';
+import { reconcile } from '../../reconciler';
 
 // ─── Prisma-backed DB adapter ─────────────────────────────────────────────────
 
@@ -114,4 +119,117 @@ export async function fetchChainEventsFromDB(): Promise<ChainEvent[]> {
     amount: BigInt(row.amount),
     timestamp: Number(row.ledgerTimestamp),
   }));
+}
+
+// ─── Dry-run mode (#1068) ─────────────────────────────────────────────────────
+
+/**
+ * Options for a dry-run reconciliation pass.
+ */
+export interface DryRunOptions {
+  /**
+   * Maximum number of repairs to return in one page.
+   * Defaults to 50, capped at 500.
+   */
+  limit?: number;
+  /**
+   * Opaque continuation cursor returned by a previous dry-run call.
+   * When provided, the page starts at the repair immediately after the
+   * cursor position.
+   */
+  cursor?: string;
+}
+
+/**
+ * Result of a dry-run reconciliation pass.
+ */
+export interface DryRunResult {
+  /** Repairs on this page. */
+  repairs: ReconcileResult['repairs'];
+  /** All error strings from the reconciliation (not paginated). */
+  errors: ReconcileResult['errors'];
+  /** Total number of repairs found (across all pages). */
+  total: number;
+  /**
+   * Opaque cursor for the next page.  `null` when this is the last page.
+   * Pass as `cursor` in the next call to retrieve the following page.
+   */
+  nextCursor: string | null;
+}
+
+/** Encode an integer offset as a base64 cursor. */
+function encodeCursor(offset: number): string {
+  return Buffer.from(String(offset), 'utf8').toString('base64url');
+}
+
+/** Decode a base64 cursor to an integer offset.  Returns 0 on invalid input. */
+function decodeCursor(cursor: string): number {
+  try {
+    const raw = Buffer.from(cursor, 'base64url').toString('utf8');
+    const n = parseInt(raw, 10);
+    return Number.isFinite(n) && n >= 0 ? n : 0;
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * Read-only SubscriptionDB wrapper.
+ *
+ * Wraps an existing SubscriptionDB and silently discards any upsert/delete
+ * calls so the underlying store is never mutated during a dry run.
+ */
+class ReadOnlySubscriptionDB implements SubscriptionDB {
+  constructor(private readonly inner: SubscriptionDB) {}
+
+  get(subscriber: string, merchant: string, token: string): StoredSubscription | undefined {
+    return this.inner.get(subscriber, merchant, token);
+  }
+
+  /** No-op: dry run must not mutate the DB. */
+  upsert(_record: StoredSubscription): void {}
+
+  /** No-op: dry run must not mutate the DB. */
+  delete(_subscriber: string, _merchant: string, _token: string): void {}
+
+  all(): StoredSubscription[] {
+    return this.inner.all();
+  }
+}
+
+/**
+ * Run a non-destructive reconciliation pass and return a bounded page of results.
+ *
+ * Unlike reconcile(), dryRun() wraps the DB in a read-only adapter so no
+ * inserts, updates, or deletes are ever written.  Results are sliced by
+ * `limit` and `cursor` so callers can page through large repair lists without
+ * loading everything at once.
+ *
+ * @param events  On-chain events (oldest-first), e.g. from fetchChainEventsFromDB().
+ * @param db      A SubscriptionDB instance (will NOT be mutated).
+ * @param options Pagination options.
+ */
+export function dryRun(
+  events: ChainEvent[],
+  db: SubscriptionDB,
+  options: DryRunOptions = {},
+): DryRunResult {
+  const limit = Math.min(Math.max(1, options.limit ?? 50), 500);
+  const offset = options.cursor ? decodeCursor(options.cursor) : 0;
+
+  // Run reconcile against a read-only copy so writes are discarded.
+  const readOnlyDb = new ReadOnlySubscriptionDB(db);
+  const result = reconcile(events, readOnlyDb);
+
+  const total = result.repairs.length;
+  const page = result.repairs.slice(offset, offset + limit);
+  const nextOffset = offset + limit;
+  const nextCursor = nextOffset < total ? encodeCursor(nextOffset) : null;
+
+  return {
+    repairs: page,
+    errors: result.errors,
+    total,
+    nextCursor,
+  };
 }
