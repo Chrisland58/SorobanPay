@@ -222,6 +222,17 @@ describe('DashboardPage – subscriptions list', () => {
     expect(screen.getByText('Active')).toBeInTheDocument();
   });
 
+  it('keeps the last successful list visible with an accessible refresh error', () => {
+    mockSubscriptions.error = 'Failed to load the latest subscriptions after several attempts.';
+    render(<DashboardPage />);
+
+    expect(screen.getByRole('alert')).toHaveTextContent(/failed to load the latest subscriptions/i);
+    expect(screen.getByText('Active')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /try again/i })).toBeInTheDocument();
+
+    mockSubscriptions.error = null;
+  });
+
   it('uses plural "subscriptions" for 2+ items', () => {
     mockSubscriptions.subscriptions = [
       makeSub({ key: `${SUBSCRIBER}:${MERCHANT}` }),
