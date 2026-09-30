@@ -571,3 +571,334 @@ If a subscription entry's TTL reaches zero:
 - `contracts/subscription/src/storage.rs` — TTL constant definitions
 - [Soroban RPC getLedgerEntries spec](https://developers.stellar.org/docs/data/rpc/api-reference/methods/getLedgerEntries)
 - [Soroban Storage and TTL](https://developers.stellar.org/docs/build/smart-contracts/storage/ttl)
+## 8. Reconciliation Operations
+
+The reconciler (`backend/reconciler.ts`) compares the canonical on-chain event log
+with stored subscription records and repairs any divergence. This section explains
+how to run it safely, how to interpret the `RepairReport`, and how to handle each
+discrepancy category.
+
+---
+
+### 8.1 Overview
+
+On-chain events are the **source of truth**. The backend's database is a derived
+projection that must stay consistent with the event stream. Divergence can arise from:
+
+- A process crash mid-write after events were indexed but before the DB was updated.
+- Missed events during a temporary RPC outage.
+- Manual DB modifications by an operator.
+- Clock skew between event timestamp and the DB write time.
+
+The reconciler is designed to be **idempotent**: running it multiple times produces
+the same outcome. It never deletes data without first comparing it against the chain.
+
+---
+
+### 8.2 Dry-Run Mode
+
+Always run in dry-run mode first. A dry run replays the event log, computes the
+diff, and prints what would be done — without touching the database.
+
+```typescript
+// backend/reconciler.ts exports the reconcile() function.
+// Dry-run: pass a no-op DB implementation that never writes.
+
+import { reconcile } from './reconciler';
+import type { SubscriptionDB } from './reconciler';
+
+// Read-only stub — returns stored records but never applies changes
+const dryRunDB: SubscriptionDB = {
+  get:    (s, m, t) => liveDB.get(s, m, t),   // read from real DB
+  upsert: (_r) => { /* no-op */ },
+  delete: (_s, _m, _t) => { /* no-op */ },
+  all:    () => liveDB.all(),
+};
+
+const { repairs, errors } = reconcile(events, dryRunDB);
+
+console.log('Proposed repairs:', repairs.length);
+console.log('Errors:', errors);
+console.table(repairs);
+```
+
+Run from the backend directory:
+
+```bash
+cd backend
+# Print the repair plan to stdout without touching the DB
+npx ts-node scripts/reconcile-dry-run.ts \
+  --from-cursor 0 \
+  --to-ledger latest \
+  --dry-run
+```
+
+Expected output (no divergence):
+
+```
+Proposed repairs: 0
+Errors: []
+```
+
+Expected output (divergence found):
+
+```
+Proposed repairs: 3
+Errors: ["orphan record in DB for GAAA:GBBB:CTOK — no on-chain subscribe event found"]
+┌─────────┬──────────┬──────────────────────────────────────────────────────────┐
+│ (index) │ kind     │ details                                                  │
+├─────────┼──────────┼──────────────────────────────────────────────────────────┤
+│ 0       │ 'insert' │ subscriber: 'GAAA', merchant: 'GBBB', token: 'CTOK'     │
+│ 1       │ 'update' │ amount changed from 100000n to 200000n                   │
+│ 2       │ 'delete' │ subscriber: 'GXXX', merchant: 'GYYY'                     │
+└─────────┴──────────┴──────────────────────────────────────────────────────────┘
+```
+
+---
+
+### 8.3 Discrepancy Categories
+
+The `repairs` array returned by `reconcile()` contains actions of three kinds:
+
+#### `insert` — missing DB record
+
+**Cause:** A `subscribe` event exists on-chain but no corresponding row exists in
+the database.
+
+**Common triggers:**
+- The indexer was down when the event was emitted.
+- A database write failed after the event was consumed.
+
+**Repair action:** The reconciler calls `db.upsert(record)` with the full
+subscription state derived from the event log.
+
+**Audit evidence:** Every `insert` repair is recorded in the `repairs[]` array with
+the full `StoredSubscription` payload. Persist this to your audit log before
+applying repairs:
+
+```typescript
+for (const repair of repairs.filter(r => r.kind === 'insert')) {
+  auditLog.write({ action: 'reconcile:insert', record: repair.record, at: Date.now() });
+}
+```
+
+---
+
+#### `update` — stale or wrong DB record
+
+**Cause:** A DB record exists but one or more fields diverge from the chain state
+(e.g., `amount` differs after a re-subscribe, or `next_payment` was not advanced
+after an `executed` event).
+
+**Common triggers:**
+- A re-subscribe changed the amount but the DB was not updated.
+- A payment execution event was processed out of order.
+
+**Repair action:** The reconciler calls `db.upsert(want)` with the chain-derived
+state. The previous value is preserved in `repair.previous` for rollback if needed.
+
+```typescript
+for (const repair of repairs.filter(r => r.kind === 'update')) {
+  console.log('Field changed:', {
+    subscriber: repair.next.subscriber,
+    previousAmount: repair.previous.amount,
+    newAmount:      repair.next.amount,
+    previousNextPayment: repair.previous.next_payment,
+    newNextPayment:      repair.next.next_payment,
+  });
+}
+```
+
+---
+
+#### `delete` — DB record with no on-chain subscription
+
+**Cause:** A row in the database has no corresponding `subscribe` event (or was
+followed by a `cancel` event). The DB record is an orphan.
+
+**Common triggers:**
+- A `cancel` event was indexed but the DB delete failed.
+- A direct DB insert by a script that bypassed the indexer.
+
+**Repair action:** The reconciler calls `db.delete(subscriber, merchant, token)`.
+
+> **Warning:** Before approving a bulk delete repair, verify the event log cursor
+> covers the full history from ledger 0. A partial event window could cause valid
+> subscriptions to appear as orphans if their `subscribe` event falls before the
+> scan window.
+
+---
+
+#### `errors` — non-fatal anomalies
+
+The `errors` string array surfaces problems that cannot be auto-repaired:
+
+| Error pattern | Meaning | Action |
+|---|---|---|
+| `orphan record in DB for ... — no on-chain subscribe event found` | DB row has no chain history in the scanned window | Widen the event window; if still orphaned, escalate |
+| `executed event for ... has no preceding subscribe` | Payment recorded before subscription creation | Investigate cursor gap; re-index from an earlier ledger |
+
+Errors do not prevent repair actions from being applied. Log them and escalate
+if they persist after re-indexing.
+
+---
+
+### 8.4 Approval Workflow
+
+The recommended workflow before applying repairs to production:
+
+```
+1. Run dry-run  →  review repairs[] and errors[]
+2. Check event window coverage (ledger range)
+3. Verify each 'delete' repair against your event index
+4. Get a second reviewer to sign off on any bulk repair (> 10 rows)
+5. Apply repairs in a transaction-backed run
+6. Verify: re-run dry-run after apply — expected repairs: 0
+```
+
+For automated nightly reconciliation, configure approval gates:
+
+```bash
+# CI/CD gate: fail if unsupervised deletes exceed threshold
+if [ "$(node reconcile.js --count-deletes)" -gt 5 ]; then
+  echo "ERROR: Too many delete repairs — manual review required"
+  exit 1
+fi
+```
+
+---
+
+### 8.5 Applying Repairs
+
+Once dry-run output is approved, apply repairs by passing the live database
+implementation:
+
+```typescript
+import { reconcile } from './reconciler';
+import { db } from './src/lib/prisma';   // real Prisma-backed SubscriptionDB
+
+const { repairs, errors } = reconcile(events, db);
+
+// Emit a structured log line for every repair
+for (const repair of repairs) {
+  logger.info({ event: 'reconcile.repair', repair });
+}
+
+if (errors.length > 0) {
+  logger.warn({ event: 'reconcile.errors', errors });
+}
+```
+
+All repairs are applied synchronously in the order produced by the diff. The
+reconciler does not open its own database transaction — wrap the call in a
+transaction if atomicity is required:
+
+```typescript
+await prisma.$transaction(async (tx) => {
+  const txDB = wrapPrismaAsSubscriptionDB(tx);
+  const { repairs, errors } = reconcile(events, txDB);
+  logger.info({ event: 'reconcile.complete', repairs: repairs.length, errors: errors.length });
+});
+```
+
+---
+
+### 8.6 Audit Evidence
+
+Retain a full audit trail for every reconciliation run:
+
+```typescript
+interface ReconcileAuditRecord {
+  runId:          string;   // UUID for this reconcile run
+  startedAt:      string;   // ISO-8601
+  completedAt:    string;
+  ledgerFrom:     number;
+  ledgerTo:       number;
+  eventsScanned:  number;
+  repairsApplied: number;
+  repairDetails:  RepairAction[];
+  errors:         string[];
+  operator:       string;   // who triggered the run
+}
+```
+
+Persist the audit record to the `audit_logs` table
+(see `backend/migrations/20240101000002_create_audit_logs.js`) before the
+transaction commits:
+
+```typescript
+await auditLogs.create({
+  data: {
+    action:  'reconcile',
+    payload: JSON.stringify(auditRecord, (_k, v) =>
+      typeof v === 'bigint' ? v.toString() : v
+    ),
+  },
+});
+```
+
+> `bigint` values (`amount`) must be serialised to string before `JSON.stringify`.
+
+---
+
+### 8.7 Repair and Escalation Runbook
+
+#### Step 1 — Identify the scope
+
+```bash
+# Count divergences by kind
+node reconcile.js --dry-run --output json | jq 'group_by(.kind) | map({kind: .[0].kind, count: length})'
+```
+
+#### Step 2 — Widen the event window if orphans appear
+
+```bash
+# Re-index from ledger 0 (slow but conclusive)
+node reconcile.js --from-cursor 0 --to-ledger latest --dry-run
+```
+
+If orphans disappear after widening the window, the original scan missed early
+events. Extend the indexer's starting cursor.
+
+#### Step 3 — Apply inserts and updates
+
+```bash
+node reconcile.js --apply --kinds insert,update
+```
+
+#### Step 4 — Review deletes separately
+
+```bash
+node reconcile.js --dry-run --kinds delete
+# Manual review of each delete target before applying
+node reconcile.js --apply --kinds delete --confirm
+```
+
+#### Step 5 — Verify
+
+```bash
+# After apply, dry-run should show 0 repairs
+node reconcile.js --dry-run
+# Expected: "Proposed repairs: 0"
+```
+
+#### Escalation criteria
+
+Escalate to on-call engineering if:
+
+- Repair count exceeds 100 in a single run with no obvious cause (e.g., RPC outage).
+- Any `delete` repair appears for a subscription with recent `executed` events
+  (indicates potential event-log truncation).
+- `errors[]` contains more than 5 entries after re-indexing from ledger 0.
+- The dry-run → apply → verify cycle still shows remaining repairs after two runs.
+
+---
+
+### See Also
+
+- `backend/reconciler.ts` — reconcile function source
+- `backend/reconciler.test.ts` — 10 scenario test suite (dry-run behaviour, orphan
+  detection, full lifecycle)
+- `backend/migrations/20240101000002_create_audit_logs.js` — audit log table schema
+- `backend/migrations/20240101000006_create_indexer_state.js` — indexer cursor state
+- [Observability section (§7)](#7-observability-logs-metrics-traces-and-correlation-ids) — how to correlate reconcile logs
