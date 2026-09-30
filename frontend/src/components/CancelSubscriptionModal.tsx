@@ -10,6 +10,7 @@
 import { useState } from "react";
 import { getRuntimeConfig } from "@/lib/runtime_config";
 import { buildSignAndSubmitCancel } from "@/lib/transaction_builder";
+import { normalizeRpcError } from "@/lib/rpc_error_normalizer";
 import { useToast } from "@/components/Toast";
 import { useWallet } from "@/hooks/useWallet";
 
@@ -57,6 +58,11 @@ export function CancelSubscriptionModal({
       return;
     }
 
+    if (publicKey !== subscriberAddress) {
+      setError("Connected wallet does not match this subscription. Connect the subscriber wallet to continue.");
+      return;
+    }
+
     if (!confirmed) {
       setError("Please confirm you want to cancel this subscription");
       return;
@@ -92,11 +98,12 @@ export function CancelSubscriptionModal({
         onClose();
       }, 1000);
     } catch (err) {
-      const errorMessage = err instanceof Error ? err.message : "Unknown error";
+      const normalizedError = normalizeRpcError(err);
+      const errorMessage = `${normalizedError.summary} Your subscription is still active. ${normalizedError.action}`;
       setError(errorMessage);
       showToast({
         type: "error",
-        title: "Cancel Failed",
+        title: normalizedError.title,
         message: errorMessage,
         duration: 5000,
       });
@@ -113,6 +120,7 @@ export function CancelSubscriptionModal({
         role="alertdialog"
         aria-labelledby="cancel-title"
         aria-describedby="cancel-description"
+        aria-busy={isSubmitting}
       >
         {/* Header */}
         <div className="flex items-start justify-between mb-4">
@@ -135,6 +143,12 @@ export function CancelSubscriptionModal({
             </svg>
           </button>
         </div>
+
+        {isSubmitting && (
+          <p role="status" aria-live="polite" className="mb-4 text-sm text-blue-700 dark:text-blue-300">
+            Cancellation pending. Waiting for network confirmation.
+          </p>
+        )}
 
         {/* Description */}
         <div id="cancel-description" className="mb-6">
@@ -165,7 +179,7 @@ export function CancelSubscriptionModal({
 
           {/* Error Message */}
           {error && (
-            <div className="bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg p-3 mb-4">
+            <div role="alert" className="bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg p-3 mb-4">
               <p className="text-sm text-red-800 dark:text-red-200">
                 <span className="font-semibold">Error:</span> {error}
               </p>
