@@ -13,6 +13,28 @@ import {
 import { withBackoff, isRpcRetryable } from '../lib/backoff';
 import { indexerStateService } from './indexerStateService';
 
+// ─── Outbox types ──────────────────────────────────────────────────────────────
+
+export interface OutboxEventRecord {
+  id?: number;
+  aggregateType: string;
+  aggregateId: string;
+  eventType: string;
+  payload: string; // JSON
+  status: 'pending' | 'published' | 'failed';
+  deduplicationKey: string;
+  createdAt?: Date;
+  publishedAt?: Date | null;
+}
+
+/** Minimal subset of the Prisma client needed by OutboxRelay, for testability. */
+export interface OutboxPrismaClient {
+  outboxEvent: {
+    findMany(args: { where: { status: string }; orderBy: { createdAt: 'asc' } }): Promise<OutboxEventRecord[]>;
+    updateMany(args: { where: { id: number }; data: { status: string; publishedAt?: Date } }): Promise<unknown>;
+  };
+}
+
 const auditLogger = new AuditLogger();
 const SUPPORTED_EVENT_TYPES = new Set(['subscribe', 'executed', 'payment_transfer_failure', 'cancel']);
 const STORED_EVENT_TYPES = new Set(['subscribe', 'executed']);
@@ -275,14 +297,15 @@ export class EventIndexer {
 
       const ledgerTimestamp = BigInt(event.ledger);
 
-      // --- span: db.write_event ---
+      // --- span: db.write_event (transactional outbox) ---
       await withSpan(INDEXER_TRACER, 'db.write_event', async (dbSpan) => {
         dbSpan.setAttributes({
-          'db.operation': 'upsert',
-          'db.table': 'Event',
+          'db.operation': 'transaction',
+          'db.table': 'Event+OutboxEvent',
           'event.type': eventType!,
         });
 
+        // Check for duplicate event before opening transaction
         const existingEvent = await prisma.event.findFirst({
           where: {
             type: eventType!,
@@ -299,34 +322,50 @@ export class EventIndexer {
           return;
         }
 
-        await prisma.event.create({
-          data: {
-            type: eventType!,
-            subscriber: subscriber!,
-            merchant: merchant!,
-            token: token ?? '',
-            amount: amount ?? '',
-            ledgerTimestamp,
-          },
+        // Transactional outbox: write the domain event AND the outbox record atomically.
+        // The OutboxRelay (running separately) will dispatch side-effects from the outbox.
+        const outboxPayload = JSON.stringify({
+          eventType: eventType!,
+          subscriber: subscriber!,
+          merchant: merchant!,
+          token: token ?? '',
+          amount: amount ?? '',
+          ledger: event.ledger,
+          txHash: event.id,
         });
 
-        dbSpan.setAttributes({ 'db.rows_written': 1 });
+        await prisma.$transaction([
+          prisma.event.create({
+            data: {
+              type: eventType!,
+              subscriber: subscriber!,
+              merchant: merchant!,
+              token: token ?? '',
+              amount: amount ?? '',
+              ledgerTimestamp,
+            },
+          }),
+          (prisma as any).outboxEvent.upsert({
+            where: { deduplicationKey: event.id },
+            update: {},
+            create: {
+              aggregateType: 'subscription',
+              aggregateId: `${subscriber}:${merchant}`,
+              eventType: eventType!,
+              payload: outboxPayload,
+              status: 'pending',
+              deduplicationKey: event.id,
+            },
+          }),
+        ]);
+
+        dbSpan.setAttributes({ 'db.rows_written': 2, 'db.outbox': true });
       });
 
-      // Post-store: update state machine
+      // Post-store: update state machine (non-transactional, idempotent)
       await applyEvent(subscriber, merchant, eventType as any, { amount: amount ?? '0', token: token ?? '' });
 
-      // Post-store: bust Redis cache keys for the affected merchant/subscriber
-      await Promise.all([
-        cacheDeletePattern(CacheKey.merchantPattern(merchant)),
-        cacheDeletePattern(CacheKey.analyticsPattern(merchant)),
-        subscriber
-          ? cacheDeletePattern(CacheKey.subscriptionPattern(subscriber, merchant))
-          : Promise.resolve(),
-        publishCacheInvalidation({ merchant, subscriber: subscriber ?? undefined, eventType }),
-      ]);
-
-      // Post-store: audit log for executed payments
+      // Post-store: audit log for executed payments (non-transactional)
       if (eventType === 'executed') {
         await auditLogger.logPayment({
           eventType,
@@ -355,28 +394,144 @@ export class EventIndexer {
         });
       }
 
-      // Post-store: email notifications
-      if (eventType === 'payment_transfer_failure') {
-        await sendPaymentFailureEmail(subscriber, merchant, amount ?? '0', token ?? '').catch(
-          (err) => console.error('[email] Failed to send payment failure email:', err),
-        );
+      console.log(`Stored event: ${eventType} for merchant ${merchant}`);
+    } catch (error) {
+      console.error('Error parsing event:', error);
+      return null;
+    }
+  }
+}
 
-        // Schedule automated payment retries via BullMQ
-        await enqueueRetries(subscriber, merchant, amount ?? '0', token ?? '').catch(
-          (err) => console.error('[retry] Failed to schedule payment retries:', err),
+// ─── OutboxRelay ───────────────────────────────────────────────────────────────
+
+/**
+ * OutboxRelay — asynchronous domain-event publisher.
+ *
+ * Reads pending outbox events from the OutboxEvent table and dispatches
+ * the corresponding side-effects (cache invalidation, email notifications,
+ * retry scheduling). Marks each event published on success or failed on error.
+ *
+ * Designed to run on a separate timer (e.g. every 5 seconds) so the main
+ * indexer loop is not blocked by side-effect latency.
+ */
+export class OutboxRelay {
+  private _stopped = false;
+  private _timer: ReturnType<typeof setTimeout> | null = null;
+
+  /**
+   * Start the relay loop that processes pending outbox events every `intervalMs`
+   * milliseconds (default: 5 seconds).
+   */
+  startRelay(intervalMs = 5_000): void {
+    this._stopped = false;
+    console.log(`[outbox-relay] Starting relay loop (interval: ${intervalMs}ms)`);
+
+    const tick = async () => {
+      if (this._stopped) return;
+      try {
+        await this.processPendingEvents();
+      } catch (err) {
+        console.error('[outbox-relay] Relay cycle error:', err);
+      }
+      if (!this._stopped) {
+        this._timer = setTimeout(tick, intervalMs);
+      }
+    };
+
+    tick();
+  }
+
+  /** Stop the relay loop gracefully. */
+  stopRelay(): void {
+    this._stopped = true;
+    if (this._timer) {
+      clearTimeout(this._timer);
+      this._timer = null;
+    }
+    console.log('[outbox-relay] Relay stopped.');
+  }
+
+  /**
+   * Process all pending outbox events in insertion order.
+   * Each event is dispatched and marked published or failed atomically.
+   */
+  async processPendingEvents(): Promise<void> {
+    const pending: OutboxEventRecord[] = await (prisma as any).outboxEvent.findMany({
+      where: { status: 'pending' },
+      orderBy: { createdAt: 'asc' },
+    });
+
+    if (pending.length === 0) return;
+
+    console.log(`[outbox-relay] Processing ${pending.length} pending outbox event(s)`);
+
+    for (const outboxEvent of pending) {
+      await this._dispatchOutboxEvent(outboxEvent);
+    }
+  }
+
+  private async _dispatchOutboxEvent(outboxEvent: OutboxEventRecord): Promise<void> {
+    let payload: {
+      eventType: string;
+      subscriber: string;
+      merchant: string;
+      token: string;
+      amount: string;
+      ledger: string;
+      txHash: string;
+    };
+
+    try {
+      payload = JSON.parse(outboxEvent.payload);
+    } catch {
+      console.error(`[outbox-relay] Failed to parse payload for outbox event ${outboxEvent.id}`);
+      await (prisma as any).outboxEvent.updateMany({
+        where: { id: outboxEvent.id },
+        data: { status: 'failed' },
+      });
+      return;
+    }
+
+    try {
+      const { eventType, subscriber, merchant, token, amount } = payload;
+
+      // Cache invalidation
+      await Promise.all([
+        cacheDeletePattern(CacheKey.merchantPattern(merchant)),
+        cacheDeletePattern(CacheKey.analyticsPattern(merchant)),
+        cacheDeletePattern(CacheKey.subscriptionPattern(subscriber, merchant)),
+        publishCacheInvalidation({ merchant, subscriber, eventType }),
+      ]);
+
+      // Email notifications
+      if (eventType === 'payment_transfer_failure') {
+        await sendPaymentFailureEmail(subscriber, merchant, amount, token).catch(
+          (err) => console.error('[outbox-relay] Failed to send payment failure email:', err),
+        );
+        await enqueueRetries(subscriber, merchant, amount, token).catch(
+          (err) => console.error('[outbox-relay] Failed to schedule payment retries:', err),
         );
       }
 
       if (eventType === 'cancel') {
         await sendCancellationEmail(subscriber, merchant).catch(
-          (err) => console.error('[email] Failed to send cancellation email:', err),
+          (err) => console.error('[outbox-relay] Failed to send cancellation email:', err),
         );
       }
 
-      console.log(`Stored event: ${eventType} for merchant ${merchant}`);
-    } catch (error) {
-      console.error('Error parsing event:', error);
-      return null;
+      // Mark published
+      await (prisma as any).outboxEvent.updateMany({
+        where: { id: outboxEvent.id },
+        data: { status: 'published', publishedAt: new Date() },
+      });
+
+      console.log(`[outbox-relay] Published outbox event ${outboxEvent.id} (${eventType})`);
+    } catch (err) {
+      console.error(`[outbox-relay] Failed to dispatch outbox event ${outboxEvent.id}:`, err);
+      await (prisma as any).outboxEvent.updateMany({
+        where: { id: outboxEvent.id },
+        data: { status: 'failed' },
+      });
     }
   }
 }
