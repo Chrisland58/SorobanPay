@@ -564,6 +564,71 @@ If a subscription entry's TTL reaches zero:
 
 ---
 
+## 7. Stuck or Duplicate Payment Runbook
+
+Use this runbook when a payment request times out, remains pending, appears more than once, or a merchant reports a duplicate. A timeout is not proof that a transaction failed. Do not submit the same payment again until the first transaction has a definitive chain result.
+
+### Contain and preserve evidence
+
+1. Record the network, contract ID, merchant and subscriber public addresses, token, amount, approximate time, request/trace ID, and every known transaction hash. Keep the incident record access-controlled.
+2. If automated on-chain submissions are enabled, disable them through the deployment's normal configuration and restart procedure. `PaymentScheduler` and automatic payment retries require `OPERATOR_SECRET`; confirm the startup log reports that scheduling/retries are disabled. Do not print or paste the secret. Keep the indexer and database running so they can continue collecting evidence. Do not delete retry jobs or payment rows as a containment measure.
+3. Capture relevant application logs before rotating or changing log settings. In the repository's local Compose setup, inspect the backend/indexer service with:
+
+   ```bash
+   docker compose ps
+   docker compose logs --since=2h indexer
+   ```
+
+   Expected: service state and recent indexer, payment, retry, or reconciliation events. If the service is unavailable, preserve the output and container status, restore database/RPC connectivity, and do not retry payment submission while the result remains unknown.
+
+Never include signing keys, access tokens, webhook secrets, authorization headers, or unredacted request bodies in tickets or shared logs. Retain transaction hashes, ledger numbers, error codes, and correlation IDs; restrict access to raw logs and customer identifiers.
+
+### Establish the chain result
+
+Query the transaction by its hash through the configured Stellar RPC endpoint:
+
+```bash
+curl --fail-with-body --silent --show-error \
+  --request POST "$RPC_URL" \
+  --header 'Content-Type: application/json' \
+  --data '{"jsonrpc":"2.0","id":1,"method":"getTransaction","params":{"hash":"<TX_HASH>"}}'
+```
+
+Expected: a JSON result with a definitive `SUCCESS` or `FAILED` status and ledger when available. `NOT_FOUND`, a timeout, or an RPC error is inconclusive: retry the read after RPC service recovers and check a second trusted endpoint if configured. Do not interpret absence from the off-chain database as proof that the chain transaction did not execute.
+
+Check whether the backend has persisted a payment and its audit row. This query is read-only; supply the transaction hash locally and do not paste database connection details into incident notes:
+
+```bash
+psql "$DATABASE_URL" -X -v ON_ERROR_STOP=1 -c "BEGIN READ ONLY; SELECT id, \"txHash\", merchant, subscriber, amount, token, ledger, status, timestamp FROM \"Payment\" WHERE \"txHash\" = '<TX_HASH>'; SELECT id, \"transactionHash\", merchant, subscriber, amount, ledger, status, \"createdAt\" FROM \"AuditLog\" WHERE \"transactionHash\" = '<TX_HASH>'; COMMIT;"
+```
+
+Expected: at most one row per table for a transaction hash; the schema makes both transaction-hash columns unique. Zero rows means indexing/audit persistence may be behind, not that payment failed. A query error is not a reason to resubmit: preserve the error code, restore read access, and repeat the read.
+
+The backend reconciliation endpoint compares stored chain events with subscription read-model state; it does not query transaction status or repair `Payment`/`AuditLog` rows. Run its default dry-run only after confirming authorized API access:
+
+```bash
+curl --fail-with-body --silent --show-error "$API_URL/api/reconcile?dry_run=true"
+```
+
+Expected: JSON with `dry_run: true`, `repairs`, and `errors`. A non-empty `errors` array or HTTP failure needs operator review. Do not use `dry_run=false` as payment recovery; it mutates subscription state only. Do not put bearer tokens into shell history; use the deployment's approved authenticated request mechanism.
+
+### Recover by outcome
+
+| Evidence | Action | Stop condition / recovery |
+|---|---|---|
+| Transaction is pending, `NOT_FOUND`, or RPC is unavailable | Keep automated submissions paused. Re-query chain status and inspect the transaction's ledger/events after RPC recovers. | Resume only after the transaction is definitively resolved; if status remains ambiguous, escalate to the network/operator on call. |
+| Transaction is `SUCCESS` and the expected payment execution is present on-chain | Do not submit again. Let the indexer catch up; compare the transaction hash, ledger, amount, token, and parties in `Payment` and `AuditLog`. | If the indexer remains behind, restore RPC/database connectivity and inspect `docker compose logs --since=2h indexer`; reconcile subscription state separately. Escalate persistent missing payment records for controlled repair. |
+| Transaction is `FAILED`, with no successful payment execution | Record the failure and inspect its error/result. Correct the underlying cause before authorizing one retry through the normal payment flow. | If chain evidence conflicts or a payment transfer may have succeeded despite the reported failure, keep retries paused and escalate. |
+| Two successful payment transactions charged the same intended installment | Pause further submissions for that subscription, preserve both hashes/ledgers and matching event/audit rows, and notify the merchant through the incident channel. | Do not attempt an automatic reversal or call subscription cancellation a refund. Resolve customer remediation under the merchant's approved refund/credit process, then record the decision and verify no further duplicate is scheduled. |
+| Only the webhook was delivered more than once | Deduplicate at the receiver with the stable `X-SorobanPay-Event-ID`; delivery attempt IDs differ. Inspect `WebhookDelivery` by event ID and attempt. | Do not submit another payment. Correct receiver idempotency or endpoint delivery and verify retries stop after a successful response. |
+
+### Closeout checklist
+
+- Confirm the payment scheduler and retry processing are intentionally enabled or disabled, and monitor the next scheduled cycle before closing.
+- Reconcile the chain transaction, indexed event, `Payment`, `AuditLog`, and merchant-side receipt. Record unresolved differences with an owner and next review time.
+- Preserve the incident timeline, hashes, ledgers, sanitized error codes, and recovery action. Redact credentials, webhook signatures/secrets, and unnecessary personal data.
+- Identify the trigger (RPC outage, worker restart, timeout, duplicate job, receiver retry, or indexing lag), assign a corrective action, and verify it using the operational alert/log signal before closing.
+
 ## See Also
 
 - [Network Configuration Guide](./networks.md) — testnet vs. mainnet RPC and passphrase values
