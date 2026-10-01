@@ -50,7 +50,7 @@ export default function MerchantPage() {
     disconnect,
   } = useWallet();
 
-  const { subscriptions, isLoading, error, refresh } = useMerchantSubscriptions({
+  const { subscriptions, isLoading, error, hasMore, loadMore, refresh } = useMerchantSubscriptions({
     publicKey,
   });
 
@@ -365,6 +365,8 @@ export default function MerchantPage() {
             collectingRows={collectingRows}
             rowResults={rowResults}
             onRefresh={refresh}
+            hasMore={hasMore}
+            onLoadMore={loadMore}
           />
         </section>
       )}

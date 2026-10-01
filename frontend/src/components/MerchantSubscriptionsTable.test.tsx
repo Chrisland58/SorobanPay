@@ -42,6 +42,8 @@ function renderTable() {
       collectingRows={new Set()}
       rowResults={new Map()}
       onRefresh={jest.fn()}
+      hasMore={false}
+      onLoadMore={jest.fn()}
     />,
   );
 }
@@ -97,6 +99,8 @@ describe('MerchantSubscriptionsTable filters', () => {
         collectingRows={new Set()}
         rowResults={new Map()}
         onRefresh={jest.fn()}
+        hasMore={false}
+        onLoadMore={jest.fn()}
       />,
     );
 
@@ -107,5 +111,43 @@ describe('MerchantSubscriptionsTable filters', () => {
     fireEvent.click(screen.getByRole('button', { name: /collect 1 selected payment/i }));
 
     expect(onBatchCollect).toHaveBeenCalledWith([dueSubscriber]);
+  });
+
+  it('offers accessible pagination and announces the end of the list', () => {
+    const onLoadMore = jest.fn();
+    const { rerender } = render(
+      <MerchantSubscriptionsTable
+        subscriptions={subscriptions}
+        isLoading={false}
+        error={null}
+        onCollect={jest.fn()}
+        onBatchCollect={jest.fn()}
+        collectingRows={new Set()}
+        rowResults={new Map()}
+        onRefresh={jest.fn()}
+        hasMore
+        onLoadMore={onLoadMore}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: /load more merchant subscriptions/i }));
+    expect(onLoadMore).toHaveBeenCalledTimes(1);
+
+    rerender(
+      <MerchantSubscriptionsTable
+        subscriptions={subscriptions}
+        isLoading={false}
+        error={null}
+        onCollect={jest.fn()}
+        onBatchCollect={jest.fn()}
+        collectingRows={new Set()}
+        rowResults={new Map()}
+        onRefresh={jest.fn()}
+        hasMore={false}
+        onLoadMore={onLoadMore}
+      />,
+    );
+
+    expect(screen.getByRole('status', { name: /all subscriptions loaded/i })).toBeInTheDocument();
   });
 });
