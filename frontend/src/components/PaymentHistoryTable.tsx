@@ -27,8 +27,10 @@
  *   />
  */
 
+import { useState, useRef, type KeyboardEvent } from 'react';
 import { type PaymentEvent } from '@/hooks/usePaymentHistory';
 import { truncateAddress } from '@/lib/utils';
+import { AddressDisplay } from '@/components/AddressDisplay';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -43,6 +45,11 @@ export interface PaymentHistoryTableProps {
   isConnected: boolean;
   /** "Testnet" or "Mainnet" — used for Stellar Expert links */
   networkName?: string;
+  /**
+   * Address book label lookup function.
+   * When provided, merchant addresses are displayed with their saved label.
+   */
+  getLabel?: (address: string) => string | null;
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -79,7 +86,7 @@ function SkeletonRow() {
       {[60, 44, 36, 28, 28, 20].map((w, i) => (
         <td key={i} className="px-4 py-3">
           <div
-            className={`h-3.5 w-${w} animate-pulse rounded bg-gray-700`}
+            className={`h-3.5 w-${w} motion-safe:animate-pulse rounded bg-gray-700`}
             style={{ width: `${w * 4}px` }}
           />
         </td>
@@ -173,6 +180,7 @@ export default function PaymentHistoryTable({
   onRefresh,
   isConnected,
   networkName = 'Testnet',
+  getLabel = () => null,
 }: PaymentHistoryTableProps) {
   // 1. Disconnected
   if (!isConnected) {
@@ -215,6 +223,33 @@ export default function PaymentHistoryTable({
   }
 
   // 5. Table with events
+  const [focusedRowIndex, setFocusedRowIndex] = useState<number>(0);
+  const rowRefs = useRef<(HTMLTableRowElement | null)[]>([]);
+
+  const handleTableKeyDown = (e: KeyboardEvent<HTMLTableSectionElement>) => {
+    if (events.length === 0) return;
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      const next = Math.min(focusedRowIndex + 1, events.length - 1);
+      setFocusedRowIndex(next);
+      rowRefs.current[next]?.focus();
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      const prev = Math.max(focusedRowIndex - 1, 0);
+      setFocusedRowIndex(prev);
+      rowRefs.current[prev]?.focus();
+    } else if (e.key === 'Home') {
+      e.preventDefault();
+      setFocusedRowIndex(0);
+      rowRefs.current[0]?.focus();
+    } else if (e.key === 'End') {
+      e.preventDefault();
+      const last = events.length - 1;
+      setFocusedRowIndex(last);
+      rowRefs.current[last]?.focus();
+    }
+  };
+
   return (
     <div className="space-y-4">
       {/* Refresh / status row */}
@@ -242,6 +277,7 @@ export default function PaymentHistoryTable({
         className="overflow-x-auto rounded-2xl border border-gray-800"
         role="region"
         aria-label="Payment history table"
+        tabIndex={0}
       >
         <table
           className="w-full min-w-[640px] border-collapse text-sm"
@@ -252,13 +288,19 @@ export default function PaymentHistoryTable({
           <thead>
             <TableHead />
           </thead>
-          <tbody>
+          <tbody onKeyDown={handleTableKeyDown} role="rowgroup">
             {events.map((event, idx) => (
               <EventRow
                 key={event.id}
                 event={event}
                 rowIndex={idx + 1}
                 networkName={networkName}
+                getLabel={getLabel}
+                isFocused={focusedRowIndex === idx}
+                rowRef={(el) => {
+                  rowRefs.current[idx] = el;
+                }}
+                onRowFocus={() => setFocusedRowIndex(idx)}
               />
             ))}
 
@@ -343,23 +385,35 @@ function TableHead() {
   );
 }
 
-// ── Event row ─────────────────────────────────────────────────────────────────
-
 function EventRow({
   event,
   rowIndex,
   networkName,
+  getLabel,
+  isFocused = false,
+  rowRef,
+  onRowFocus,
 }: {
   event: PaymentEvent;
   rowIndex: number;
   networkName: string;
+  getLabel: (address: string) => string | null;
+  isFocused?: boolean;
+  rowRef?: (el: HTMLTableRowElement | null) => void;
+  onRowFocus?: () => void;
 }) {
   const txUrl = stellarExpertTxUrl(event.txHash, networkName);
 
   return (
     <tr
+      ref={rowRef}
+      tabIndex={isFocused ? 0 : -1}
+      onFocus={onRowFocus}
       aria-rowindex={rowIndex}
-      className="border-b border-gray-800/60 hover:bg-gray-800/30 transition-colors"
+      aria-selected={isFocused}
+      className={`border-b border-gray-800/60 hover:bg-gray-800/30 transition-colors focus:outline-none focus-visible:bg-gray-800/60 focus-visible:ring-1 focus-visible:ring-blue-400 ${
+        isFocused ? 'bg-gray-800/20' : ''
+      }`}
     >
       {/* Date */}
       <td className="px-4 py-3 text-gray-300 text-xs whitespace-nowrap">
@@ -367,13 +421,12 @@ function EventRow({
       </td>
 
       {/* Merchant */}
-      <td className="px-4 py-3 font-mono text-xs text-gray-300">
-        <span
-          title={event.merchant}
-          aria-label={`Merchant address: ${event.merchant}`}
-        >
-          {truncateAddress(event.merchant, 6)}
-        </span>
+      <td className="px-4 py-3 text-xs text-gray-300">
+        <AddressDisplay
+          address={event.merchant}
+          getLabel={getLabel}
+          truncateLen={6}
+        />
       </td>
 
       {/* Token */}

@@ -6,20 +6,189 @@ This document is the authoritative security reference for SorobanPay. It covers 
 
 ## Table of Contents
 
-1. [Contract Security Model](#1-contract-security-model)
-2. [Authorization Audit (SC-20)](#2-authorization-audit-sc-20)
-3. [Backend Secrets Management](#3-backend-secrets-management)
-   - [3a. Merchant Authentication — SEP-10 Challenge-Response (BE-55)](#3a-merchant-authentication--sep-10-challenge-response-be-55)
-4. [Circuit Breaker Runbook (SC-25)](#4-circuit-breaker-runbook-sc-25)
-5. [Frontend Security](#5-frontend-security)
-6. [Known Limitations and Mitigations](#6-known-limitations-and-mitigations)
-7. [Dependency Security](#7-dependency-security)
-8. [Security Disclosure Policy](#8-security-disclosure-policy)
-9. [Pause / Unpause Runbook (SC-30)](#9-pause--unpause-runbook-sc-30)
+1. [Trust Boundaries and Threat Model](#1-trust-boundaries-and-threat-model)
+2. [Contract Security Model](#2-contract-security-model)
+3. [Authorization Audit (SC-20)](#3-authorization-audit-sc-20)
+4. [Backend Secrets Management](#4-backend-secrets-management)
+5. [Circuit Breaker Runbook (SC-25)](#5-circuit-breaker-runbook-sc-25)
+6. [Frontend Security](#6-frontend-security)
+7. [Known Limitations and Mitigations](#7-known-limitations-and-mitigations)
+8. [Dependency Security](#8-dependency-security)
+9. [Security Disclosure Policy](#9-security-disclosure-policy)
 
 ---
 
-## 1. Contract Security Model
+## 1. Trust Boundaries and Threat Model
+
+This section maps every component in the SorobanPay architecture to a trust tier and catalogs the threats that can originate from — or cross — each boundary.
+
+### 1.1 System trust-boundary map
+
+```
+╔══════════════════════════════════════════════════════════════════════╗
+║  UNTRUSTED ZONE (public internet / user device)                      ║
+║                                                                      ║
+║  ┌──────────────────────┐   ┌─────────────────────────────────────┐ ║
+║  │  Browser (subscriber │   │  Browser (merchant portal / admin)  │ ║
+║  │  / end-user device)  │   │                                     │ ║
+║  │  • Next.js frontend  │   │  • Next.js frontend                 │ ║
+║  │  • Freighter wallet  │   │  • Freighter wallet                 │ ║
+║  └──────────┬───────────┘   └──────────────────┬──────────────────┘ ║
+║             │ HTTPS/XDR (signed transaction)    │ HTTPS/XDR          ║
+╠═════════════╪══════════════════════════════════╪════════════════════╣
+║  SEMI-TRUSTED ZONE (SorobanPay-operated, but exposed to internet)    ║
+║             │                                  │                    ║
+║  ┌──────────▼──────────────────────────────────▼──────────────────┐ ║
+║  │  Soroban RPC node (stellar.org / ValidationCloud / self-hosted) │ ║
+║  │  • getEvents(), simulateTransaction(), submitTransaction()      │ ║
+║  └──────────────────────────┬────────────────────────────────────-┘ ║
+║                             │ Soroban RPC protocol                  ║
+╠═════════════════════════════╪══════════════════════════════════════╣
+║  TRUSTED ZONE (on-chain — enforced by Stellar validators)            ║
+║                             │                                      ║
+║  ┌──────────────────────────▼───────────────────────────────────┐  ║
+║  │  Soroban Smart Contract (SubscriptionProtocol)               │  ║
+║  │  • Persistent storage (subscription entries)                 │  ║
+║  │  • SEP-41 token contract interactions                        │  ║
+║  └──────────────────────────────────────────────────────────────┘  ║
+╠════════════════════════════════════════════════════════════════════╣
+║  BACKEND ZONE (operator-controlled, private network preferred)      ║
+║                                                                    ║
+║  ┌───────────────────────────────────────────────────────────┐    ║
+║  │  Optional Backend services (Express API + workers)        │    ║
+║  │  • EventIndexer  • PaymentScheduler  • WebhookNotifier    │    ║
+║  │  • Reconciler    • PayoutSummaryGenerator                 │    ║
+║  └───────────────────────────┬───────────────────────────────┘    ║
+║                              │ TCP (Prisma ORM)                   ║
+║  ┌───────────────────────────▼───────────────────────────────┐    ║
+║  │  PostgreSQL database                                      │    ║
+║  └───────────────────────────────────────────────────────────┘    ║
+║                                                                    ║
+║  ┌────────────────────────────────────────────────────────────┐   ║
+║  │  Message queue (optional — BullMQ / Redis)                 │   ║
+║  │  • Webhook delivery queue  • Payment retry queue           │   ║
+║  └────────────────────────────────────────────────────────────┘   ║
+╠════════════════════════════════════════════════════════════════════╣
+║  OPERATOR ZONE (secrets, keys, CI/CD)                              ║
+║  • OPERATOR_SECRET (Stellar signing key)                           ║
+║  • DATABASE_URL, WEBHOOK_SECRET, RPC API keys                      ║
+║  • GitHub Actions, deployment pipelines                            ║
+╚════════════════════════════════════════════════════════════════════╝
+```
+
+### 1.2 Trust tiers
+
+| Tier | Components | Assumptions |
+|------|-----------|-------------|
+| **Untrusted** | Browser, Freighter, subscriber/merchant devices | Hostile environment; any input may be malicious |
+| **Semi-trusted** | Soroban RPC nodes | Correct behavior expected but not cryptographically guaranteed; could be censoring or returning stale data |
+| **On-chain / trusted** | Soroban contract, Stellar ledger, validators | Cryptographically enforced; cannot be tampered with outside of validator consensus |
+| **Backend zone** | Express API, workers, PostgreSQL, Redis | Operator-controlled; trust depends on deployment security posture |
+| **Operator zone** | Secret keys, CI/CD, deployment credentials | Highest privilege; compromise is catastrophic |
+
+### 1.3 Threat catalog
+
+#### Browser / wallet threats
+
+| Threat | Attack vector | Impact | Mitigation |
+|--------|--------------|--------|-----------|
+| **Malicious dApp** | Attacker serves a lookalike frontend | Subscriber signs a fraudulent transaction | Freighter displays exact transaction details before signing; CSP limits script injection |
+| **Wallet phishing** | Fake Freighter extension | Subscriber's secret key stolen | Warn users to install only from official browser stores; `manifest.json` extension ID pinning |
+| **XSS** | Injected script in frontend | Reads DOM state, exfiltrates form data, submits unauthorized transactions | CSP `script-src 'self'`; no `innerHTML` writes with user data; React's default escaping |
+| **Transaction parameter tampering** | Frontend manipulates amount/merchant before signing | Subscriber pays wrong amount or merchant | Transaction is shown verbatim in Freighter before signing; contract validates all parameters on-chain |
+| **Stale transaction replay** | Signed XDR replayed after user intent changed | Duplicate or delayed payment | `timebounds` set to 5 minutes on all constructed transactions |
+| **Supply-chain (npm)** | Malicious npm package in `frontend/` | Arbitrary code in browser | `npm audit`, `--audit-level=high` in CI; exact version pinning |
+
+#### Soroban RPC threats
+
+| Threat | Attack vector | Impact | Mitigation |
+|--------|--------------|--------|-----------|
+| **Stale data served** | RPC lags or returns outdated ledger state | Backend indexes wrong subscription state | Cross-check events against on-chain reads for critical state; use fallback RPC |
+| **Transaction censorship** | RPC drops submitted transactions | Payments or subscriptions not recorded | Retry with exponential backoff; use alternative RPC endpoint |
+| **Simulation manipulation** | RPC returns fake `minResourceFee` | Under-fee'd transaction rejected from ledger | Always add a 10–25% buffer; accept on-chain validation as authoritative |
+| **Man-in-the-middle** | Network-level HTTPS interception | Modified transaction data | Enforce TLS certificate pinning in backend HTTP clients; browser HTTPS |
+
+#### Smart contract threats
+
+| Threat | Attack vector | Impact | Mitigation |
+|--------|--------------|--------|-----------|
+| **Unauthorized subscription creation** | Attacker calls `subscribe` without subscriber's signature | Creates fraudulent subscription record | `require_auth(subscriber)` as first statement; enforced by Soroban host |
+| **Unauthorized payment collection** | Attacker calls `execute_payment` impersonating merchant | Collects payment to declared merchant (not attacker) | `require_auth(merchant)` as first statement; transfer always goes to declared merchant, not caller |
+| **Early / double payment** | Merchant calls `execute_payment` before interval elapses | Extra payment taken | `now >= next_payment` ledger-timestamp check before any transfer |
+| **Self-subscription** | `subscriber == merchant` | Funds circular loop | Explicit check in `subscribe`; returns `SelfSubscription` error |
+| **Token balance drain** | Attacker exploits reentrancy in token callback | Contract drained | Contract holds no balance; transfers go directly subscriber → merchant |
+| **Integer overflow** | Extreme amount values | Silent incorrect math | `overflow-checks = true` in release profile; `AmountTooLarge` guard |
+| **TTL expiry race** | Entry expires between `has()` check and subsequent operations | Stale read returns `None` | TTL extended on every write; `execute_payment` returns `NoActiveSubscription` for expired entries — safe failure mode |
+
+#### Queue / message broker threats
+
+| Threat | Attack vector | Impact | Mitigation |
+|--------|--------------|--------|-----------|
+| **Webhook replay** | Attacker replays a captured webhook delivery | Duplicate event processing | HMAC-SHA256 signature + timestamp tolerance check (±300 s); idempotency key per delivery |
+| **Queue poisoning** | Malformed job inserted into BullMQ | Worker crashes or processes bad data | Schema validation on job dequeue; DLQ for failed jobs; worker sandbox |
+| **Redis credential theft** | `REDIS_URL` leaked | Queue contents exposed; jobs injected | Secrets management (see §4); Redis `requirepass`; TLS in transit |
+| **Webhook SSRF** | Merchant registers internal URL as webhook target | Attacker uses backend to probe internal network | Allowlist/denylist for webhook URLs; block RFC-1918 ranges and loopback addresses |
+
+#### Database threats
+
+| Threat | Attack vector | Impact | Mitigation |
+|--------|--------------|--------|-----------|
+| **SQL injection** | Malicious input in query parameters | Data exfiltration or corruption | All queries use Prisma parameterized ORM; no raw string interpolation |
+| **Credential theft** | `DATABASE_URL` leaked via env, logs, or error messages | Full DB access | Never log `DATABASE_URL`; secrets management (see §4); rotate credentials annually |
+| **Privilege escalation** | Application DB user has DBA rights | Schema modification, data destruction | Principle of least privilege: app user has `SELECT`, `INSERT`, `UPDATE`, `DELETE` on app tables only; no `DROP` or `ALTER` |
+| **Data at rest exposure** | Disk or backup unencrypted | Subscription/payment history exposed | Enable encryption at rest on managed DB (RDS, Railway, Render) |
+| **Migration injection** | Malicious migration file committed | Schema altered in production | Migrations reviewed in PRs; no auto-migration on production startup; explicit `npx prisma migrate deploy` |
+
+#### Backend API threats
+
+| Threat | Attack vector | Impact | Mitigation |
+|--------|--------------|--------|-----------|
+| **JWT forgery** | Attacker forges a JWT without the signing key | Accesses any merchant's data | JWTs signed with ECDSA (EdDSA preferred); signing key stored in secrets manager; short TTL (24 h) |
+| **JWT hijacking** | Bearer token intercepted | Impersonation of merchant | HTTPS enforced; short token TTL; `aud` and `iss` claims validated |
+| **Tenant data leakage** | Query does not filter by authenticated merchant | Cross-tenant data exposure | All DB queries include `WHERE merchant = jwt.sub`; enforced at ORM layer, not just route handler |
+| **Rate limit bypass** | Attacker floods API | DoS; resource exhaustion | Rate limiting per IP and per JWT (`express-rate-limit`); 429 responses with `Retry-After` |
+| **CORS misconfiguration** | Wildcard `Access-Control-Allow-Origin` | Any origin reads API responses | Allowlist known frontend origins; credentials mode requires explicit origin |
+| **Dependency RCE** | Vulnerable npm package exploited | Server compromise | `npm audit` in CI; Dependabot PRs; minimal production dependencies |
+
+#### Operator / CI/CD threats
+
+| Threat | Attack vector | Impact | Mitigation |
+|--------|--------------|--------|-----------|
+| **Secret key exposure** | `OPERATOR_SECRET` leaked in logs or env dump | Attacker collects all due payments | Never log secrets; omit `OPERATOR_SECRET` unless `PaymentScheduler` is needed; rotate after any suspected exposure |
+| **CI pipeline injection** | Malicious PR modifies workflow YAML | Secrets exfiltrated from CI runner | `pull_request_target` restricted; secrets not accessible from fork PRs; branch protection on `main` |
+| **Dependency substitution (typosquatting)** | Malicious npm or crate published with similar name | Arbitrary code in build | Review package names before adding; use `npm install --save-exact` |
+| **Compromised deploy key** | GitHub Actions deploy key stolen | Attacker can deploy arbitrary code | Rotate keys; use short-lived OIDC tokens instead of long-lived secrets |
+
+### 1.4 Boundary crossing rules
+
+The following rules govern data flow across trust boundaries. Contributors must not violate these rules without a documented security review.
+
+| Boundary crossing | Rule |
+|-------------------|------|
+| Browser → RPC | All transactions must be signed by the user's wallet; frontend must never hold or construct raw secret keys |
+| RPC → Contract | Only Stellar-valid signed XDR accepted by validators; contract enforces all invariants independently of RPC honesty |
+| Contract → Token | Only via `token.transfer(subscriber, merchant, amount)` — no arbitrary calls; no balance held |
+| Backend → DB | All queries use Prisma parameterized ORM; no raw SQL with user-supplied values |
+| Backend → RPC | Read-only (`getEvents`, `getLedgerEntries`) unless `OPERATOR_SECRET` is configured; TLS required |
+| Backend → Merchant webhook | HMAC-SHA256 signed payload; webhook URL allowlist enforced; internal IPs blocked |
+| Operator → Backend | Secrets injected via environment or secrets manager, never via source code |
+
+### 1.5 Data classification
+
+| Data | Classification | Handling |
+|------|---------------|----------|
+| Subscriber Stellar public keys | Internal | Stored in DB; returned in API responses to the merchant only |
+| Payment amounts and timestamps | Internal | Stored in DB; accessible to authenticated merchant |
+| Transaction hashes | Internal | Stored in DB; publicly verifiable on Stellar Explorer |
+| `OPERATOR_SECRET` (Stellar private key) | **Secret** | Never logged; injected at runtime; rotate on exposure |
+| `DATABASE_URL` | **Secret** | Never logged; never returned in API responses |
+| `WEBHOOK_SECRET` | **Secret** | Returned once at webhook creation; never returned again |
+| JWT signing key | **Secret** | Generated at server startup or injected; never exposed via API |
+| Soroban RPC API keys (if applicable) | **Secret** | Never logged; injected at runtime |
+
+---
+
+## 2. Contract Security Model
 
 ### Non-custodial design
 
@@ -93,7 +262,7 @@ See [docs/architecture.md](architecture.md#7-storage-ttl-and-entry-lifecycle) fo
 
 ---
 
-## 2. Authorization Audit (SC-20)
+## 3. Authorization Audit (SC-20)
 
 This section documents which address is expected to authenticate at each contract entry point and what an attacker could do if they impersonated a different party.
 
@@ -145,7 +314,7 @@ pub fn subscribe(env: Env, subscriber: Address, ...) -> Result<(), ContractError
 
 ---
 
-## 3. Backend Secrets Management
+## 4. Backend Secrets Management
 
 ### Never commit secrets
 
@@ -331,102 +500,7 @@ const webhookSecret = readSecret('WEBHOOK_SECRET', 'WEBHOOK_SECRET_FILE');
 
 ---
 
-## 3a. Merchant Authentication — SEP-10 Challenge-Response (BE-55)
-
-All merchant-scoped backend API endpoints require authentication. Because merchants are Stellar keypair owners — not username/password holders — authentication is based on proving ownership of a Stellar private key via a cryptographic challenge-response flow. This mirrors [SEP-10: Stellar Web Authentication](https://github.com/stellar/stellar-protocol/blob/master/ecosystem/sep-0010.md).
-
-### Why SEP-10 style, not passwords
-
-Password-based authentication is inappropriate for a non-custodial blockchain app:
-
-- Merchants have no passwords — they have Stellar keypairs.
-- Issuing a JWT after a password check does nothing to verify the merchant controls the on-chain address that owns the subscription records.
-- SEP-10 challenge-response ties authentication directly to key ownership, making it impossible to claim another merchant's data without their private key.
-
-### Flow
-
-```
-1. GET /api/v1/auth/challenge?account=G…
-   ← { transaction: "<unsigned XDR>", network_passphrase, expires_in: 300 }
-
-2. Merchant signs the transaction with their private key (e.g. via Freighter).
-
-3. POST /api/v1/auth/token  { transaction: "<signed XDR>" }
-   ← { token: "<JWT>", expires_in: 86400 }
-
-4. All subsequent requests:
-   Authorization: Bearer <JWT>
-```
-
-### Challenge transaction
-
-The challenge is a Stellar `ManageData` transaction:
-
-- **Source account**: the merchant's G-address (so the transaction is tied to their key).
-- **Operation**: `ManageData("SorobanPay auth", <32-byte random nonce>)`.
-- **TTL**: 5 minutes. The server rejects signed transactions after expiry.
-- **Never broadcast**: the transaction is only used as a sign-this-data vehicle; it is never submitted to the network.
-
-### Server-side verification (`verifyChallenge`)
-
-Before issuing a JWT, the server checks:
-
-1. The XDR decodes to a valid Stellar transaction.
-2. A pending challenge exists for the transaction's source account.
-3. The challenge has not expired.
-4. The `ManageData` nonce in the transaction matches the stored nonce (prevents replay of a different account's signed XDR).
-5. At least one signature on the transaction is valid for the source account, verified using `Keypair.verify()` from `@stellar/stellar-sdk`.
-
-On success the challenge is consumed (deleted from the in-memory store) so it cannot be replayed.
-
-### JWT payload and expiry
-
-```jsonc
-{
-  "address": "G…",   // Merchant's Stellar public key — the authenticated identity
-  "iat": 1700000000, // Issued-at (Unix seconds)
-  "exp": 1700086400  // Expiry 24 hours later
-}
-```
-
-Signed with HMAC-SHA256 using `JWT_SECRET` from the environment. The algorithm and implementation match the admin JWT (`adminAuth.ts`) to keep the codebase consistent.
-
-### Protected endpoints
-
-| Route prefix | Protection |
-|---|---|
-| `GET /api/v1/auth/challenge` | None (public — required to start the flow) |
-| `POST /api/v1/auth/token` | None (public — accepts signed challenge) |
-| `GET /api/v1/subscriptions/*` | `requireMerchant` — valid JWT required |
-| All other `/api/v1/` routes | Unchanged (see their respective middleware) |
-
-### Environment variable
-
-| Variable | Required | Notes |
-|---|---|---|
-| `JWT_SECRET` | ✅ | 32+ byte random string; generate with `openssl rand -hex 32`. **Never reuse `ADMIN_JWT_SECRET`.** |
-
-### Tenant isolation
-
-`requireMerchant` extracts `res.locals.merchantAddress` from the JWT. Route handlers that return merchant-specific data (e.g. subscriptions, payments) **must** filter by this address — not by a URL parameter — to prevent horizontal privilege escalation. See [docs/backend-tenant-isolation.md](backend-tenant-isolation.md) for the full tenant isolation guide.
-
-### Limitations
-
-- **In-memory challenge store**: pending challenges are stored in a `Map` in process memory. In a multi-process (horizontally scaled) deployment this store must be moved to Redis or another shared cache.
-- **No account existence check**: the server accepts any syntactically valid G-address for the challenge step. A non-existent account will simply never receive a JWT because the merchant won't have a valid signing key.
-- **Nonce is per-account**: only one pending challenge exists per account at a time. A new challenge request supersedes the previous one; the old challenge becomes invalid.
-
-### References
-
-- [SEP-10 specification](https://github.com/stellar/stellar-protocol/blob/master/ecosystem/sep-0010.md)
-- `backend/src/services/authService.ts` — core challenge/JWT logic
-- `backend/src/routes/auth.ts` — HTTP endpoints
-- `backend/src/middleware/merchantAuth.ts` — JWT guard middleware
-- `backend/tests/auth.test.ts` — 34 unit tests
-
----
-
-## 4. Circuit Breaker Runbook (SC-25)
+## 5. Circuit Breaker Runbook (SC-25)
 
 A "circuit breaker" for SorobanPay means stopping all payment collection and communicating clearly to users while a fix is prepared. Because the contract is non-upgradeable, the primary levers are:
 
@@ -534,7 +608,7 @@ echo "New contract: $NEW_CONTRACT_ID"
 
 ---
 
-## 5. Frontend Security
+## 6. Frontend Security
 
 ### Content Security Policy (FE-45)
 
@@ -614,7 +688,7 @@ Warn users:
 
 ---
 
-## 6. Known Limitations and Mitigations
+## 7. Known Limitations and Mitigations
 
 ### No MEV protection
 
@@ -655,13 +729,11 @@ Warn users:
 stellar account merge --network mainnet ...
 ```
 
-### Protocol-wide pause (implemented — no individual subscription pause)
+### No on-chain subscription pause
 
-The contract now supports a **protocol-wide pause** via `pause_contract` / `unpause_contract` (see [§9 Pause / Unpause Runbook](#9-pause--unpause-runbook-sc-30)). This halts all state-mutating entry points simultaneously.
+**Limitation:** There is no contract-level mechanism to pause an individual subscription. The `is_paused` field exists in `SubscriptionData` but is not read by `execute_payment`.
 
-**Remaining limitation:** There is no mechanism to pause an individual subscription. The `is_paused` field exists in `SubscriptionData` but is not read by `execute_payment`.
-
-**Mitigation for individual pauses:** Subscribers can achieve the equivalent by revoking their token allowance (`approve(contract, 0)`). Merchants can stop calling `execute_payment` for specific subscribers.
+**Mitigation:** Subscribers can achieve the equivalent of a pause by revoking their token allowance (`approve(contract, 0)`). Merchants can stop calling `execute_payment`. A future contract version may implement on-chain pause semantics.
 
 ### Backend is a single point of failure for analytics
 
@@ -671,7 +743,7 @@ The contract now supports a **protocol-wide pause** via `pause_contract` / `unpa
 
 ---
 
-## 7. Dependency Security
+## 8. Dependency Security
 
 ### Rust / Cargo (contract)
 
@@ -762,7 +834,7 @@ updates:
 
 ---
 
-## 8. Security Disclosure Policy
+## 9. Security Disclosure Policy
 
 SorobanPay uses **coordinated disclosure**. If you find a security vulnerability:
 
@@ -790,190 +862,3 @@ For questions about this policy, contact the repository maintainers via the GitH
 - [ ] `cargo audit` and `npm audit` passing in CI
 - [ ] CSP headers configured in `next.config.mjs`
 - [ ] Security advisory channel tested (can create a draft advisory)
-
----
-
-## 9. Pause / Unpause Runbook (SC-30)
-
-The `pause_contract` / `unpause_contract` entry points provide an on-chain circuit breaker that immediately halts all state-mutating operations without requiring coordination with merchants or subscribers. This section describes when and how to use it.
-
-### When to use the pause
-
-Pause the contract when you have **confirmed** (not merely suspected) one of the following:
-
-| Scenario | Use pause? | Notes |
-|----------|-----------|-------|
-| Critical vulnerability in `subscribe`, `execute_payment`, or `cancel` | ✅ Yes | Stops exploitation immediately |
-| Dependency vulnerability in a SEP-41 token contract | ✅ Yes | Prevents further transfers until assessed |
-| Backend compromise (scheduler or indexer) | ⚠️ Optional | Backend cannot sign transactions; pause is precautionary |
-| Suspected front-running or MEV | ❌ No | No financial incentive to front-run; do not pause lightly |
-| Spam subscriptions (high volume, no exploits) | ❌ No | Rate-limit at the backend level instead |
-| Network congestion or RPC outage | ❌ No | Pause does not help network-level issues |
-
-**Pausing is disruptive.** All `subscribe`, `execute_payment`, `execute_payment_batch`, and `cancel` calls return `ContractPaused` (error 16) until unpause. Do not pause for anything less than a confirmed critical or high-severity issue.
-
-### Prerequisites
-
-The admin key must be:
-- Stored in a **hardware wallet** or **multisig account** for mainnet use.
-- Known and accessible to at least two team members (avoid single-key dependency).
-- Funded with enough XLM to pay transaction fees (minimum 1 XLM recommended).
-
-The contract must have been initialised with `initialize(admin)` before the pause functionality is available. Check with:
-
-```bash
-stellar contract invoke \
-  --id <CONTRACT_ID> --network mainnet \
-  -- is_paused
-```
-
-### Phase 1 — Pause (target: within 5 minutes of confirmed incident)
-
-#### Using the Stellar CLI
-
-```bash
-stellar contract invoke \
-  --id <CONTRACT_ID> \
-  --source <admin-identity> \
-  --network mainnet \
-  -- pause_contract
-```
-
-#### Using the JavaScript SDK
-
-```typescript
-import { Contract, SorobanRpc, TransactionBuilder, Networks, Keypair } from "@stellar/stellar-sdk";
-
-const server    = new SorobanRpc.Server("https://mainnet.stellar.validationcloud.io/v1/<KEY>");
-const adminKey  = Keypair.fromSecret(process.env.ADMIN_SECRET!);
-const contract  = new Contract(process.env.CONTRACT_ID!);
-const account   = await server.getAccount(adminKey.publicKey());
-
-const tx = new TransactionBuilder(account, {
-  fee: "10000",
-  networkPassphrase: Networks.PUBLIC,
-})
-  .addOperation(contract.call("pause_contract"))
-  .setTimeout(30)
-  .build();
-
-const simResult = await server.simulateTransaction(tx);
-if (!SorobanRpc.Api.isSimulationSuccess(simResult)) {
-  throw new Error(`Simulation failed: ${JSON.stringify(simResult)}`);
-}
-
-const preparedTx = SorobanRpc.assembleTransaction(tx, simResult).build();
-preparedTx.sign(adminKey);
-const response = await server.sendTransaction(preparedTx);
-console.log("Pause transaction:", response.hash);
-```
-
-#### Verify the pause
-
-```bash
-# Should print "true"
-stellar contract invoke \
-  --id <CONTRACT_ID> --network mainnet \
-  -- is_paused
-```
-
-Query the `contract_paused` event to obtain an on-chain timestamp of when the pause was recorded:
-
-```bash
-stellar events \
-  --id <CONTRACT_ID> \
-  --network mainnet \
-  --type contract \
-  --start-ledger <recent-ledger>
-```
-
-### Phase 2 — Communicate (within 15 minutes)
-
-1. Post in your internal incident channel: contract address, time of pause, severity level, and incident lead.
-2. Notify merchants via webhook, email, or Discord that the contract is paused and `execute_payment` calls will fail with error 16 until further notice.
-3. Optionally publish a status-page incident:
-   - Status: **Investigating**
-   - Message: "The SorobanPay contract has been temporarily paused to investigate a potential security issue. No funds are at risk at this time. We will update this page as the investigation proceeds."
-4. Do **not** disclose technical vulnerability details until a fix is deployed.
-
-### Phase 3 — Investigate and fix
-
-While the contract is paused, no new transactions are processed.  You can still call read-only entry points (`get_subscription`, `is_paused`, `version`) to query state.
-
-Follow the same investigation steps as the [Circuit Breaker Runbook (SC-25)](#4-circuit-breaker-runbook-sc-25), Phase 3.
-
-### Phase 4 — Unpause or deploy a new version
-
-#### Option A — Unpause (vulnerability was not exploitable or has a hotfix)
-
-If the vulnerability can be resolved without a contract upgrade (e.g., a backend configuration change, a false alarm, or the exploit vector is no longer reachable):
-
-```bash
-stellar contract invoke \
-  --id <CONTRACT_ID> \
-  --source <admin-identity> \
-  --network mainnet \
-  -- unpause_contract
-```
-
-Verify:
-
-```bash
-# Should print "false"
-stellar contract invoke \
-  --id <CONTRACT_ID> --network mainnet \
-  -- is_paused
-```
-
-Update your status page: **Resolved** — "The contract has been unpaused. Normal operations have resumed."
-
-#### Option B — Deploy a new contract version (vulnerability requires code change)
-
-Because Soroban contracts are immutable, a code fix requires deploying a new instance.  Follow Phase 4 of the [Circuit Breaker Runbook (SC-25)](#4-circuit-breaker-runbook-sc-25).
-
-Keep the old contract **paused** (do not unpause it) to ensure subscribers and merchants migrate to the new address.
-
-### Phase 5 — Post-incident
-
-1. Write a post-mortem: timeline, root cause, impact assessment, remediation steps.
-2. Update this runbook with any new lessons learned.
-3. Verify that the `contract_paused` and `contract_unpaused` events were captured in your event indexer.
-4. Re-run `make test` and `cargo audit` on the updated codebase.
-5. File a CVE if the vulnerability involves a shared dependency.
-
-### Severity and response time
-
-| Severity | Pause immediately? | Response SLA |
-|----------|--------------------|-------------|
-| Critical — funds at risk, active exploit | ✅ Yes | Pause < 5 min; fix < 4 hr |
-| High — auth bypass, state corruption | ✅ Yes | Pause < 15 min; fix < 24 hr |
-| Medium — DoS, information leak | ⚠️ Evaluate | Fix < 72 hr; pause optional |
-| Low — edge case, no immediate risk | ❌ No | Fix in next release |
-
-### Admin key security
-
-The admin key has no financial custody over contract funds (the contract holds no balances), but it controls contract availability.  A compromised admin key allows an attacker to pause the contract indefinitely (DoS).
-
-Best practices:
-- Use a **Stellar multisig account** (e.g., 2-of-3) as the admin address for mainnet.
-- Store the admin secret in a hardware wallet (Ledger) or HSM — never in a `.env` file.
-- Document the admin address in your incident runbook so any on-call engineer can verify pauses.
-- Rotate the admin key by deploying a new contract with a different admin address (no admin-transfer mechanism exists in this version).
-
-### Auth matrix update for admin entry points
-
-The following rows supplement the auth matrix in [§2 Authorization Audit](#2-authorization-audit-sc-20):
-
-| Entry point | Authenticating address | Effect when paused |
-|-------------|----------------------|--------------------|
-| `initialize` | `admin` (new) | Always available (creates AdminConfig) |
-| `pause_contract` | `admin` | Always available (admin can pause a paused contract — no-op) |
-| `unpause_contract` | `admin` | Always available (admin can unpause) |
-| `is_paused` | *(no auth)* | Always available (read-only) |
-| `subscribe` | `subscriber` | Returns `ContractPaused` (16) |
-| `execute_payment` | `merchant` | Returns `ContractPaused` (16) |
-| `execute_payment_batch` | `merchant` | Returns `ContractPaused` (16) |
-| `cancel` | `subscriber` | Returns `ContractPaused` (16) |
-| `get_subscription` | *(no auth)* | Unaffected — read-only |
-| `version` | *(no auth)* | Unaffected — read-only |
-| `contract_name` | *(no auth)* | Unaffected — read-only |

@@ -564,6 +564,71 @@ If a subscription entry's TTL reaches zero:
 
 ---
 
+## 7. Stuck or Duplicate Payment Runbook
+
+Use this runbook when a payment request times out, remains pending, appears more than once, or a merchant reports a duplicate. A timeout is not proof that a transaction failed. Do not submit the same payment again until the first transaction has a definitive chain result.
+
+### Contain and preserve evidence
+
+1. Record the network, contract ID, merchant and subscriber public addresses, token, amount, approximate time, request/trace ID, and every known transaction hash. Keep the incident record access-controlled.
+2. If automated on-chain submissions are enabled, disable them through the deployment's normal configuration and restart procedure. `PaymentScheduler` and automatic payment retries require `OPERATOR_SECRET`; confirm the startup log reports that scheduling/retries are disabled. Do not print or paste the secret. Keep the indexer and database running so they can continue collecting evidence. Do not delete retry jobs or payment rows as a containment measure.
+3. Capture relevant application logs before rotating or changing log settings. In the repository's local Compose setup, inspect the backend/indexer service with:
+
+   ```bash
+   docker compose ps
+   docker compose logs --since=2h indexer
+   ```
+
+   Expected: service state and recent indexer, payment, retry, or reconciliation events. If the service is unavailable, preserve the output and container status, restore database/RPC connectivity, and do not retry payment submission while the result remains unknown.
+
+Never include signing keys, access tokens, webhook secrets, authorization headers, or unredacted request bodies in tickets or shared logs. Retain transaction hashes, ledger numbers, error codes, and correlation IDs; restrict access to raw logs and customer identifiers.
+
+### Establish the chain result
+
+Query the transaction by its hash through the configured Stellar RPC endpoint:
+
+```bash
+curl --fail-with-body --silent --show-error \
+  --request POST "$RPC_URL" \
+  --header 'Content-Type: application/json' \
+  --data '{"jsonrpc":"2.0","id":1,"method":"getTransaction","params":{"hash":"<TX_HASH>"}}'
+```
+
+Expected: a JSON result with a definitive `SUCCESS` or `FAILED` status and ledger when available. `NOT_FOUND`, a timeout, or an RPC error is inconclusive: retry the read after RPC service recovers and check a second trusted endpoint if configured. Do not interpret absence from the off-chain database as proof that the chain transaction did not execute.
+
+Check whether the backend has persisted a payment and its audit row. This query is read-only; supply the transaction hash locally and do not paste database connection details into incident notes:
+
+```bash
+psql "$DATABASE_URL" -X -v ON_ERROR_STOP=1 -c "BEGIN READ ONLY; SELECT id, \"txHash\", merchant, subscriber, amount, token, ledger, status, timestamp FROM \"Payment\" WHERE \"txHash\" = '<TX_HASH>'; SELECT id, \"transactionHash\", merchant, subscriber, amount, ledger, status, \"createdAt\" FROM \"AuditLog\" WHERE \"transactionHash\" = '<TX_HASH>'; COMMIT;"
+```
+
+Expected: at most one row per table for a transaction hash; the schema makes both transaction-hash columns unique. Zero rows means indexing/audit persistence may be behind, not that payment failed. A query error is not a reason to resubmit: preserve the error code, restore read access, and repeat the read.
+
+The backend reconciliation endpoint compares stored chain events with subscription read-model state; it does not query transaction status or repair `Payment`/`AuditLog` rows. Run its default dry-run only after confirming authorized API access:
+
+```bash
+curl --fail-with-body --silent --show-error "$API_URL/api/reconcile?dry_run=true"
+```
+
+Expected: JSON with `dry_run: true`, `repairs`, and `errors`. A non-empty `errors` array or HTTP failure needs operator review. Do not use `dry_run=false` as payment recovery; it mutates subscription state only. Do not put bearer tokens into shell history; use the deployment's approved authenticated request mechanism.
+
+### Recover by outcome
+
+| Evidence | Action | Stop condition / recovery |
+|---|---|---|
+| Transaction is pending, `NOT_FOUND`, or RPC is unavailable | Keep automated submissions paused. Re-query chain status and inspect the transaction's ledger/events after RPC recovers. | Resume only after the transaction is definitively resolved; if status remains ambiguous, escalate to the network/operator on call. |
+| Transaction is `SUCCESS` and the expected payment execution is present on-chain | Do not submit again. Let the indexer catch up; compare the transaction hash, ledger, amount, token, and parties in `Payment` and `AuditLog`. | If the indexer remains behind, restore RPC/database connectivity and inspect `docker compose logs --since=2h indexer`; reconcile subscription state separately. Escalate persistent missing payment records for controlled repair. |
+| Transaction is `FAILED`, with no successful payment execution | Record the failure and inspect its error/result. Correct the underlying cause before authorizing one retry through the normal payment flow. | If chain evidence conflicts or a payment transfer may have succeeded despite the reported failure, keep retries paused and escalate. |
+| Two successful payment transactions charged the same intended installment | Pause further submissions for that subscription, preserve both hashes/ledgers and matching event/audit rows, and notify the merchant through the incident channel. | Do not attempt an automatic reversal or call subscription cancellation a refund. Resolve customer remediation under the merchant's approved refund/credit process, then record the decision and verify no further duplicate is scheduled. |
+| Only the webhook was delivered more than once | Deduplicate at the receiver with the stable `X-SorobanPay-Event-ID`; delivery attempt IDs differ. Inspect `WebhookDelivery` by event ID and attempt. | Do not submit another payment. Correct receiver idempotency or endpoint delivery and verify retries stop after a successful response. |
+
+### Closeout checklist
+
+- Confirm the payment scheduler and retry processing are intentionally enabled or disabled, and monitor the next scheduled cycle before closing.
+- Reconcile the chain transaction, indexed event, `Payment`, `AuditLog`, and merchant-side receipt. Record unresolved differences with an owner and next review time.
+- Preserve the incident timeline, hashes, ledgers, sanitized error codes, and recovery action. Redact credentials, webhook signatures/secrets, and unnecessary personal data.
+- Identify the trigger (RPC outage, worker restart, timeout, duplicate job, receiver retry, or indexing lag), assign a corrective action, and verify it using the operational alert/log signal before closing.
+
 ## See Also
 
 - [Network Configuration Guide](./networks.md) — testnet vs. mainnet RPC and passphrase values
@@ -571,334 +636,353 @@ If a subscription entry's TTL reaches zero:
 - `contracts/subscription/src/storage.rs` — TTL constant definitions
 - [Soroban RPC getLedgerEntries spec](https://developers.stellar.org/docs/data/rpc/api-reference/methods/getLedgerEntries)
 - [Soroban Storage and TTL](https://developers.stellar.org/docs/build/smart-contracts/storage/ttl)
-## 8. Reconciliation Operations
-
-The reconciler (`backend/reconciler.ts`) compares the canonical on-chain event log
-with stored subscription records and repairs any divergence. This section explains
-how to run it safely, how to interpret the `RepairReport`, and how to handle each
-discrepancy category.
 
 ---
 
-### 8.1 Overview
+## 7. Observability: Logs, Metrics, Traces, and Correlation IDs
 
-On-chain events are the **source of truth**. The backend's database is a derived
-projection that must stay consistent with the event stream. Divergence can arise from:
-
-- A process crash mid-write after events were indexed but before the DB was updated.
-- Missed events during a temporary RPC outage.
-- Manual DB modifications by an operator.
-- Clock skew between event timestamp and the DB write time.
-
-The reconciler is designed to be **idempotent**: running it multiple times produces
-the same outcome. It never deletes data without first comparing it against the chain.
+This section explains the backend's structured observability stack and how to use it
+in production operations. All three signals — logs, metrics, and traces — share the
+same `correlationId` so any incident can be correlated across tools.
 
 ---
 
-### 8.2 Dry-Run Mode
+### 7.1 Structured Logging (Pino)
 
-Always run in dry-run mode first. A dry run replays the event log, computes the
-diff, and prints what would be done — without touching the database.
+The backend uses [Pino](https://getpino.io) (`backend/src/lib/logger.ts`) to emit
+JSON-structured log lines to stdout. Every log record includes:
 
-```typescript
-// backend/reconciler.ts exports the reconcile() function.
-// Dry-run: pass a no-op DB implementation that never writes.
-
-import { reconcile } from './reconciler';
-import type { SubscriptionDB } from './reconciler';
-
-// Read-only stub — returns stored records but never applies changes
-const dryRunDB: SubscriptionDB = {
-  get:    (s, m, t) => liveDB.get(s, m, t),   // read from real DB
-  upsert: (_r) => { /* no-op */ },
-  delete: (_s, _m, _t) => { /* no-op */ },
-  all:    () => liveDB.all(),
-};
-
-const { repairs, errors } = reconcile(events, dryRunDB);
-
-console.log('Proposed repairs:', repairs.length);
-console.log('Errors:', errors);
-console.table(repairs);
-```
-
-Run from the backend directory:
-
-```bash
-cd backend
-# Print the repair plan to stdout without touching the DB
-npx ts-node scripts/reconcile-dry-run.ts \
-  --from-cursor 0 \
-  --to-ledger latest \
-  --dry-run
-```
-
-Expected output (no divergence):
-
-```
-Proposed repairs: 0
-Errors: []
-```
-
-Expected output (divergence found):
-
-```
-Proposed repairs: 3
-Errors: ["orphan record in DB for GAAA:GBBB:CTOK — no on-chain subscribe event found"]
-┌─────────┬──────────┬──────────────────────────────────────────────────────────┐
-│ (index) │ kind     │ details                                                  │
-├─────────┼──────────┼──────────────────────────────────────────────────────────┤
-│ 0       │ 'insert' │ subscriber: 'GAAA', merchant: 'GBBB', token: 'CTOK'     │
-│ 1       │ 'update' │ amount changed from 100000n to 200000n                   │
-│ 2       │ 'delete' │ subscriber: 'GXXX', merchant: 'GYYY'                     │
-└─────────┴──────────┴──────────────────────────────────────────────────────────┘
-```
-
----
-
-### 8.3 Discrepancy Categories
-
-The `repairs` array returned by `reconcile()` contains actions of three kinds:
-
-#### `insert` — missing DB record
-
-**Cause:** A `subscribe` event exists on-chain but no corresponding row exists in
-the database.
-
-**Common triggers:**
-- The indexer was down when the event was emitted.
-- A database write failed after the event was consumed.
-
-**Repair action:** The reconciler calls `db.upsert(record)` with the full
-subscription state derived from the event log.
-
-**Audit evidence:** Every `insert` repair is recorded in the `repairs[]` array with
-the full `StoredSubscription` payload. Persist this to your audit log before
-applying repairs:
-
-```typescript
-for (const repair of repairs.filter(r => r.kind === 'insert')) {
-  auditLog.write({ action: 'reconcile:insert', record: repair.record, at: Date.now() });
-}
-```
-
----
-
-#### `update` — stale or wrong DB record
-
-**Cause:** A DB record exists but one or more fields diverge from the chain state
-(e.g., `amount` differs after a re-subscribe, or `next_payment` was not advanced
-after an `executed` event).
-
-**Common triggers:**
-- A re-subscribe changed the amount but the DB was not updated.
-- A payment execution event was processed out of order.
-
-**Repair action:** The reconciler calls `db.upsert(want)` with the chain-derived
-state. The previous value is preserved in `repair.previous` for rollback if needed.
-
-```typescript
-for (const repair of repairs.filter(r => r.kind === 'update')) {
-  console.log('Field changed:', {
-    subscriber: repair.next.subscriber,
-    previousAmount: repair.previous.amount,
-    newAmount:      repair.next.amount,
-    previousNextPayment: repair.previous.next_payment,
-    newNextPayment:      repair.next.next_payment,
-  });
-}
-```
-
----
-
-#### `delete` — DB record with no on-chain subscription
-
-**Cause:** A row in the database has no corresponding `subscribe` event (or was
-followed by a `cancel` event). The DB record is an orphan.
-
-**Common triggers:**
-- A `cancel` event was indexed but the DB delete failed.
-- A direct DB insert by a script that bypassed the indexer.
-
-**Repair action:** The reconciler calls `db.delete(subscriber, merchant, token)`.
-
-> **Warning:** Before approving a bulk delete repair, verify the event log cursor
-> covers the full history from ledger 0. A partial event window could cause valid
-> subscriptions to appear as orphans if their `subscribe` event falls before the
-> scan window.
-
----
-
-#### `errors` — non-fatal anomalies
-
-The `errors` string array surfaces problems that cannot be auto-repaired:
-
-| Error pattern | Meaning | Action |
+| Field | Description | Example |
 |---|---|---|
-| `orphan record in DB for ... — no on-chain subscribe event found` | DB row has no chain history in the scanned window | Widen the event window; if still orphaned, escalate |
-| `executed event for ... has no preceding subscribe` | Payment recorded before subscription creation | Investigate cursor gap; re-index from an earlier ledger |
+| `level` | Severity string | `"info"`, `"warn"`, `"error"` |
+| `time` | ISO-8601 timestamp | `"2026-09-30T11:00:00.000Z"` |
+| `service` | Fixed label | `"soroban-pay-backend"` |
+| `correlationId` | Per-request UUID v4 | `"a1b2c3d4-..."` |
+| `event` | Machine-readable event name | `"request.received"` |
+| `msg` | Human-readable message | `"GET /subscriptions"` |
 
-Errors do not prevent repair actions from being applied. Log them and escalate
-if they persist after re-indexing.
+#### Log levels
 
----
-
-### 8.4 Approval Workflow
-
-The recommended workflow before applying repairs to production:
-
-```
-1. Run dry-run  →  review repairs[] and errors[]
-2. Check event window coverage (ledger range)
-3. Verify each 'delete' repair against your event index
-4. Get a second reviewer to sign off on any bulk repair (> 10 rows)
-5. Apply repairs in a transaction-backed run
-6. Verify: re-run dry-run after apply — expected repairs: 0
-```
-
-For automated nightly reconciliation, configure approval gates:
+Configure the minimum level with the `LOG_LEVEL` environment variable (default: `info`):
 
 ```bash
-# CI/CD gate: fail if unsupervised deletes exceed threshold
-if [ "$(node reconcile.js --count-deletes)" -gt 5 ]; then
-  echo "ERROR: Too many delete repairs — manual review required"
-  exit 1
-fi
+LOG_LEVEL=debug   # verbose — include all internal trace lines
+LOG_LEVEL=info    # default — operational events
+LOG_LEVEL=warn    # non-critical problems only
+LOG_LEVEL=error   # failures only
 ```
+
+#### Development pretty-printing
+
+In non-production environments (`NODE_ENV !== "production"`) the logger automatically
+loads `pino-pretty` to emit human-readable coloured output:
+
+```
+[2026-09-30 11:00:01.000] INFO  (soroban-pay-backend): request.received
+  correlationId: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+  method: "GET"
+  path: "/subscriptions/GABC...ALICE"
+```
+
+Production containers receive raw JSON:
+
+```json
+{
+  "level": "info",
+  "time": "2026-09-30T11:00:01.000Z",
+  "service": "soroban-pay-backend",
+  "correlationId": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+  "event": "request.received",
+  "method": "GET",
+  "path": "/subscriptions/GABC...ALICE"
+}
+```
+
+#### Sensitive-value redaction
+
+Stellar addresses are redacted to `<first-8>...<last-8>` before they appear in log
+output. This prevents accidentally logging full public keys in shared log storage.
+
+The redaction function is in `backend/src/lib/logger.ts`:
+
+```typescript
+// Example output: "GABC1234...XYZ56789"
+redactAddress("GABC1234XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXYZ56789")
+```
+
+Rule: redaction applies to the log fields, not to the HTTP response or database.
+The full address is preserved in storage and in API responses.
+
+**What is never logged:**
+- Private keys / secrets (none are held server-side)
+- JWT tokens — only claims (e.g., `merchantId`) are logged
+- Raw `SUBSCRIBER_SECRET` or `WEBHOOK_SECRET` values
 
 ---
 
-### 8.5 Applying Repairs
+### 7.2 Correlation IDs
 
-Once dry-run output is approved, apply repairs by passing the live database
-implementation:
+The middleware in `backend/src/middleware/correlationId.ts` runs on every request:
 
-```typescript
-import { reconcile } from './reconciler';
-import { db } from './src/lib/prisma';   // real Prisma-backed SubscriptionDB
+1. Reads `X-Correlation-Id` from the request header. If present, the value is reused
+   (allows propagation from an upstream API gateway or client).
+2. If the header is absent, a fresh UUID v4 is generated.
+3. The correlation ID is attached to `req.id` and to a child Pino logger on `req.log`.
+4. The ID is echoed in the `X-Correlation-Id` **response** header.
 
-const { repairs, errors } = reconcile(events, db);
+#### Forwarding from a client
 
-// Emit a structured log line for every repair
-for (const repair of repairs) {
-  logger.info({ event: 'reconcile.repair', repair });
-}
-
-if (errors.length > 0) {
-  logger.warn({ event: 'reconcile.errors', errors });
-}
+```bash
+curl -H "X-Correlation-Id: my-trace-id-1234" \
+  https://api.example.com/subscriptions/GABC...
 ```
 
-All repairs are applied synchronously in the order produced by the diff. The
-reconciler does not open its own database transaction — wrap the call in a
-transaction if atomicity is required:
+```
+< X-Correlation-Id: my-trace-id-1234
+```
+
+#### Using `req.log` in route handlers
+
+Every route handler should use `req.log` instead of the bare `logger` so the
+correlation ID is included automatically:
 
 ```typescript
-await prisma.$transaction(async (tx) => {
-  const txDB = wrapPrismaAsSubscriptionDB(tx);
-  const { repairs, errors } = reconcile(events, txDB);
-  logger.info({ event: 'reconcile.complete', repairs: repairs.length, errors: errors.length });
+// backend/src/routes/subscriptions.ts (illustrative)
+router.get('/:subscriber', async (req, res) => {
+  req.log.info({ event: 'subscription.lookup', subscriber: redactAddress(req.params.subscriber) });
+  // ...
 });
 ```
 
----
+#### Finding a request in log output
 
-### 8.6 Audit Evidence
-
-Retain a full audit trail for every reconciliation run:
-
-```typescript
-interface ReconcileAuditRecord {
-  runId:          string;   // UUID for this reconcile run
-  startedAt:      string;   // ISO-8601
-  completedAt:    string;
-  ledgerFrom:     number;
-  ledgerTo:       number;
-  eventsScanned:  number;
-  repairsApplied: number;
-  repairDetails:  RepairAction[];
-  errors:         string[];
-  operator:       string;   // who triggered the run
-}
+```bash
+# Grep JSON logs by correlationId
+docker logs sorobanpay-api | jq 'select(.correlationId == "a1b2c3d4-e5f6-7890-abcd-ef1234567890")'
 ```
 
-Persist the audit record to the `audit_logs` table
-(see `backend/migrations/20240101000002_create_audit_logs.js`) before the
-transaction commits:
+Expected output for a healthy request:
+
+```json
+{ "event": "request.received",  "method": "GET", "path": "/subscriptions/...", "correlationId": "a1b2c3d4-..." }
+{ "event": "request.finished", "statusCode": 200, "correlationId": "a1b2c3d4-..." }
+```
+
+#### Failure recovery
+
+If `X-Correlation-Id` is missing from a client request and the client did not capture
+the one echoed in the response header:
+
+1. Note the approximate request timestamp from the client side.
+2. Filter logs by `time` range and `path`:
+   ```bash
+   docker logs sorobanpay-api | jq 'select(.path == "/subscriptions/GABC..." and .event == "request.received")'
+   ```
+3. The `correlationId` in the matching log line can then be used to trace the full
+   request through both log and trace backends.
+
+---
+
+### 7.3 Distributed Tracing (OpenTelemetry)
+
+The backend initialises the OpenTelemetry Node.js SDK in `backend/src/lib/tracing.ts`
+before any other module loads. Traces are exported via OTLP HTTP to a configurable
+collector (Jaeger, Tempo, etc.).
+
+#### Environment variables
+
+| Variable | Default | Description |
+|---|---|---|
+| `OTEL_SDK_DISABLED` | `false` | Set to `true` to disable tracing entirely |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | `http://localhost:4318` | OTLP collector endpoint |
+| `OTEL_SERVICE_NAME` | `sorobanpay-backend` | Service name in trace UI |
+| `OTEL_SAMPLING_RATE` | `1.0` | Fraction of traces sampled (0.0–1.0) |
+
+#### Recommended production settings
+
+```bash
+# Kubernetes ConfigMap / docker-compose env section
+OTEL_SDK_DISABLED=false
+OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318
+OTEL_SERVICE_NAME=sorobanpay-backend
+OTEL_SAMPLING_RATE=0.1   # 10% head-based sampling — adjust for traffic volume
+```
+
+#### Disabling tracing (zero overhead)
+
+```bash
+OTEL_SDK_DISABLED=true
+```
+
+The SDK is not started and `withSpan` calls are no-ops. No network connections are
+opened. Use this in local development or CI where a collector is not available.
+
+#### Wrapping operations in a custom span
 
 ```typescript
-await auditLogs.create({
-  data: {
-    action:  'reconcile',
-    payload: JSON.stringify(auditRecord, (_k, v) =>
-      typeof v === 'bigint' ? v.toString() : v
-    ),
+import { withSpan, SpanKind } from '../lib/tracing';
+
+// In any backend service
+const result = await withSpan(
+  'sorobanpay.indexer',
+  'indexer.poll',
+  async (span) => {
+    span.setAttribute('ledger.cursor', cursor);
+    return await fetchEventsFromRPC(cursor);
   },
-});
+  { kind: SpanKind.CLIENT },
+);
 ```
 
-> `bigint` values (`amount`) must be serialised to string before `JSON.stringify`.
+If the function throws, the span is marked `ERROR`, the exception is recorded, and
+the error is re-thrown unchanged.
+
+#### Sampling rate guidance
+
+| Traffic level | Recommended `OTEL_SAMPLING_RATE` |
+|---|---|
+| Development / CI | `1.0` (capture everything) |
+| Staging | `1.0` |
+| Production — low (<100 req/s) | `1.0` |
+| Production — medium (100–1 000 req/s) | `0.1` |
+| Production — high (>1 000 req/s) | `0.01` |
+
+Head-based sampling at `0.1` means 10% of new traces are recorded; spans within
+a sampled trace are always recorded in full.
+
+#### Failure recovery — traces not appearing in UI
+
+1. Confirm the collector is reachable:
+   ```bash
+   curl -v "$OTEL_EXPORTER_OTLP_ENDPOINT/v1/traces"
+   # Expected: HTTP 4xx (auth or method not allowed) — not a connection error
+   ```
+2. Check startup log for the tracing banner:
+   ```
+   [tracing] OpenTelemetry started — service: sorobanpay-backend, sampling: 0.1, endpoint: http://otel-collector:4318
+   ```
+   If this line is absent, `OTEL_SDK_DISABLED=true` may be set inadvertently.
+3. Raise `OTEL_SAMPLING_RATE` to `1.0` temporarily to rule out sampling.
+4. Set `LOG_LEVEL=debug` — the OTLP exporter logs export batches at `debug` level.
 
 ---
 
-### 8.7 Repair and Escalation Runbook
+### 7.4 Metrics
 
-#### Step 1 — Identify the scope
+Prometheus metrics are exposed on port `3001` at `/metrics`. The Kubernetes manifests
+(`deploy/k8s/`) annotate all pods so Prometheus scrapes them automatically:
 
-```bash
-# Count divergences by kind
-node reconcile.js --dry-run --output json | jq 'group_by(.kind) | map({kind: .[0].kind, count: length})'
+```yaml
+annotations:
+  prometheus.io/scrape: "true"
+  prometheus.io/port:   "3001"
+  prometheus.io/path:   "/metrics"
 ```
 
-#### Step 2 — Widen the event window if orphans appear
+Key metrics emitted by the backend:
+
+| Metric | Type | Description |
+|---|---|---|
+| `sorobanpay_rpc_poll_duration_seconds` | Histogram | Time spent polling Soroban RPC per batch |
+| `sorobanpay_events_indexed_total` | Counter | Cumulative events indexed by type |
+| `sorobanpay_reconciliation_repairs_total` | Counter | Repairs applied per run |
+| `sorobanpay_http_request_duration_seconds` | Histogram | HTTP request latency (Express) |
+| `process_cpu_seconds_total` | Counter | Node.js process CPU (default prom-client metric) |
+
+To scrape metrics locally:
 
 ```bash
-# Re-index from ledger 0 (slow but conclusive)
-node reconcile.js --from-cursor 0 --to-ledger latest --dry-run
+# Port-forward the API pod
+kubectl port-forward svc/sorobanpay-api 3001:3001 -n sorobanpay
+curl http://localhost:3001/metrics
 ```
 
-If orphans disappear after widening the window, the original scan missed early
-events. Extend the indexer's starting cursor.
+Expected output (Prometheus text format):
 
-#### Step 3 — Apply inserts and updates
+```
+# HELP sorobanpay_events_indexed_total Cumulative events indexed
+# TYPE sorobanpay_events_indexed_total counter
+sorobanpay_events_indexed_total{type="subscribe"} 142
+sorobanpay_events_indexed_total{type="executed"}  89
+sorobanpay_events_indexed_total{type="cancel"}    11
+```
+
+---
+
+### 7.5 Health Endpoint Semantics
+
+`GET /health` on port `3001` runs two dependency checks:
+
+| Check | What it verifies | Failure behaviour |
+|---|---|---|
+| Soroban RPC reachability | Calls `getHealth` on the configured RPC URL | Returns `503`; pod not marked ready |
+| Contract address resolvability | Calls `getContractData` for `CONTRACT_ID` | Returns `503`; pod not marked ready |
+
+A pod that fails liveness checks is restarted by Kubernetes. A pod that fails
+readiness checks is removed from the load balancer pool without restart.
+
+Example healthy response:
+
+```json
+{
+  "status": "ok",
+  "rpc": "reachable",
+  "contract": "resolved",
+  "version": "1.0.0"
+}
+```
+
+Example degraded response (`503 Service Unavailable`):
+
+```json
+{
+  "status": "degraded",
+  "rpc": "unreachable",
+  "contract": "unknown",
+  "error": "connect ECONNREFUSED 127.0.0.1:4318"
+}
+```
+
+The `error` field in degraded responses does **not** include internal stack traces or
+credentials — only the failure reason. Full stack traces are available in the
+structured logs under the same request's `correlationId`.
+
+#### Manual health check
 
 ```bash
-node reconcile.js --apply --kinds insert,update
+# Testnet — API service
+curl -s https://api.example.com/health | jq .
+
+# Port-forward (local / staging)
+kubectl port-forward svc/sorobanpay-api 8080:80 -n sorobanpay
+curl -s http://localhost:8080/health | jq .
 ```
 
-#### Step 4 — Review deletes separately
+---
 
-```bash
-node reconcile.js --dry-run --kinds delete
-# Manual review of each delete target before applying
-node reconcile.js --apply --kinds delete --confirm
+### 7.6 Grafana Dashboard
+
+The pre-built Grafana dashboard is at `deploy/grafana/sorobanpay-dashboard.json`.
+Import it via the Grafana UI:
+
+```
+Dashboards → Import → Upload JSON file → select deploy/grafana/sorobanpay-dashboard.json
 ```
 
-#### Step 5 — Verify
-
-```bash
-# After apply, dry-run should show 0 repairs
-node reconcile.js --dry-run
-# Expected: "Proposed repairs: 0"
-```
-
-#### Escalation criteria
-
-Escalate to on-call engineering if:
-
-- Repair count exceeds 100 in a single run with no obvious cause (e.g., RPC outage).
-- Any `delete` repair appears for a subscription with recent `executed` events
-  (indicates potential event-log truncation).
-- `errors[]` contains more than 5 entries after re-indexing from ledger 0.
-- The dry-run → apply → verify cycle still shows remaining repairs after two runs.
+The dashboard surfaces:
+- RPC poll latency (p50 / p95 / p99)
+- Events indexed per minute by type
+- HTTP error rate and latency heatmap
+- Reconciliation repair rate
+- Pod CPU and memory (requires metrics-server)
 
 ---
 
 ### See Also
 
-- `backend/reconciler.ts` — reconcile function source
-- `backend/reconciler.test.ts` — 10 scenario test suite (dry-run behaviour, orphan
-  detection, full lifecycle)
-- `backend/migrations/20240101000002_create_audit_logs.js` — audit log table schema
-- `backend/migrations/20240101000006_create_indexer_state.js` — indexer cursor state
-- [Observability section (§7)](#7-observability-logs-metrics-traces-and-correlation-ids) — how to correlate reconcile logs
+- `backend/src/lib/logger.ts` — logger construction and `redactAddress` helper
+- `backend/src/middleware/correlationId.ts` — middleware source
+- `backend/src/lib/tracing.ts` — OpenTelemetry SDK initialisation and `withSpan`
+- `backend/src/routes/health.ts` — health check implementation
+- [Backend API Cookbook](./api-cookbook.md) — recipe examples using `req.log`
+- [Kubernetes Deployment](../README.md#kubernetes-deployment-backend-services) — pod annotations and HPA config
