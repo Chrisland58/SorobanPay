@@ -72,433 +72,304 @@ STELLAR_NETWORK=mainnet STELLAR_IDENTITY=my-mainnet-id bash deploy/deploy.sh
 
 ## Environment variables reference
 
-### `deploy/deploy.sh` variables
-
-These variables control the deployment script. Set them before running `bash deploy/deploy.sh`.
-
-| Variable | Default | Required | Allowed values | Description |
-|----------|---------|----------|---------------|-------------|
-| `STELLAR_NETWORK` | `testnet` | No | `testnet`, `mainnet` | Target Stellar network. Determines the RPC endpoint and network passphrase automatically — do not set `RPC_URL` or `PASSPHRASE` directly. |
-| `STELLAR_IDENTITY` | `alice` | No | Any registered identity alias | Stellar CLI identity alias that signs and pays fees for the deploy transaction. Must be pre-created with `stellar keys generate` and funded. |
-
-**Derived values** (set internally by the script — do not override):
-
-| Derived variable | Testnet value | Mainnet value |
-|-----------------|--------------|--------------|
-| `RPC_URL` | `https://soroban-testnet.stellar.org` | `https://mainnet.stellar.validationcloud.io/v1/<key>` |
-| `PASSPHRASE` | `Test SDF Network ; September 2015` | `Public Global Stellar Network ; September 2015` |
-
-**Quick examples:**
-
-```bash
-# Testnet (all defaults)
-bash deploy/deploy.sh
-
-# Testnet — capture contract address
-CONTRACT_ID=$(bash deploy/deploy.sh)
-
-# Mainnet — explicit identity
-STELLAR_NETWORK=mainnet STELLAR_IDENTITY=my-mainnet-id bash deploy/deploy.sh
-
-# Mainnet — capture contract address
-CONTRACT_ID=$(STELLAR_NETWORK=mainnet STELLAR_IDENTITY=my-mainnet-id bash deploy/deploy.sh)
-echo "Deployed: $CONTRACT_ID"
-```
-
-### Frontend (`frontend/.env.local`) variables
-
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `NEXT_PUBLIC_CONTRACT_ID` | ✅ | Deployed contract address (`C…`) from `deploy.sh` stdout |
-| `NEXT_PUBLIC_RPC_URL` | ✅ | Soroban RPC endpoint (must match the network Freighter is on) |
-| `NEXT_PUBLIC_NETWORK_PASSPHRASE` | ✅ | Stellar network passphrase — must match Freighter's selected network |
-
-Copy `frontend/.env.example` to `frontend/.env.local` and fill in the values above. See [README.md → Frontend → Configure environment variables](../README.md#2-configure-environment-variables) for the full setup walkthrough.
+| `NEXT_PUBLIC_CONTRACT_ID` | ✅ | Deployed contract address (`C…`) |
+| `NEXT_PUBLIC_RPC_URL` | ✅ | Soroban RPC endpoint |
+| `NEXT_PUBLIC_NETWORK_PASSPHRASE` | ✅ | Must match Freighter network |
 
 ---
 
-## Contract Deployment Runbook
+## Migration and rollback policy
 
-This runbook covers every step needed to deploy, initialize, configure, verify,
-upgrade, and roll back the `SubscriptionProtocol` contract on testnet and mainnet.
-Follow each phase in order and complete every check before proceeding.
+Soroban contracts are **immutable once deployed**: you cannot update the code of a live contract
+address. Every breaking change requires deploying a new contract and migrating subscribers to it.
+This section describes how to evolve the protocol safely using the **expand-contract** (aka
+parallel-deploy) migration pattern.
 
----
+### The expand-contract pattern
 
-### Phase 0 — Prerequisites
+The expand-contract pattern avoids big-bang cutover by keeping both contract versions live
+simultaneously for a transition window:
 
-Confirm all tools are installed and at the correct versions before proceeding.
+```
+Phase 1 — Expand
+  Deploy v2 alongside v1.
+  New subscribers are directed to v2.
+  Existing v1 subscribers continue paying on v1.
+
+Phase 2 — Migrate
+  Off-chain service (or merchant) calls subscribe() on v2 for each existing subscriber
+  and calls cancel() on v1 after each successful migration.
+
+Phase 3 — Contract
+  Once v1 has zero active subscriptions (verified via getEvents + state queries),
+  stop routing to v1. Revoke or archive the v1 contract address.
+```
+
+This ensures no subscriber experiences a missed payment during the transition and no funds
+are ever held by the contract at any point (the protocol is non-custodial by design).
+
+### Deploy order
+
+Follow this sequence for every upgrade:
+
+1. **Build and test the new WASM locally.**
+
+   ```bash
+   make build
+   make test
+   ```
+
+   Expected output: `test result: ok. N passed; 0 failed` from `cargo test`.
+
+2. **Deploy v2 to testnet and smoke-test the full lifecycle.**
+
+   ```bash
+   stellar keys generate alice --network testnet
+   stellar keys fund alice --network testnet
+   V2_CONTRACT_ID=$(bash deploy/deploy.sh)
+   echo "v2 testnet contract: $V2_CONTRACT_ID"
+   bash deploy/smoke_test.sh "$V2_CONTRACT_ID" testnet
+   ```
+
+   Expected output: `smoke_test PASSED` printed by the script.
+
+3. **Deploy v2 to mainnet** (requires a funded identity; no Friendbot on mainnet).
+
+   ```bash
+   # Capture the new address — do not proceed if this is empty
+   V2_CONTRACT_ID=$(STELLAR_NETWORK=mainnet STELLAR_IDENTITY=my-mainnet-id bash deploy/deploy.sh)
+   [[ -z "$V2_CONTRACT_ID" ]] && { echo "ERROR: deployment failed"; exit 1; }
+   echo "v2 mainnet contract: $V2_CONTRACT_ID"
+   ```
+
+4. **Update `NEXT_PUBLIC_CONTRACT_ID`** in all frontend environments to point at v2.
+
+   > Do this **before** directing new subscribers to v2 so the UI is consistent.
+   > Restart or redeploy the frontend after changing the environment variable.
+
+5. **Migrate existing v1 subscribers** using your off-chain tooling (see below).
+
+6. **Decommission v1** once the subscriber count drops to zero (see Verification below).
+
+### Schema migration with `migrate()`
+
+The contract exposes an on-chain `migrate(admin)` entry point that advances the stored
+`schema_version` from the old value to `CURRENT_SCHEMA_VERSION`. This is **not** a code
+upgrade — it is a data migration gate that signals off-chain tooling that the deployment
+is ready to serve the new schema.
 
 ```bash
-# Rust stable toolchain and WASM target
-rustup show            # must include stable
-rustup target list --installed | grep wasm32-unknown-unknown
-
-# If not installed:
-rustup target add wasm32-unknown-unknown
-
-# Stellar CLI — must be ≥ 21.x (deploy.sh pins 21.3.0)
-stellar --version
-# Expected: stellar 21.x.y
-
-# If not installed:
-cargo install --locked stellar-cli --features opt
-
-# Node.js ≥ 18 (for TTL scripts and smoke tests)
-node --version   # must be ≥ v18.0.0
-```
-
----
-
-### Phase 1 — Build and Test
-
-Always build from a clean state and run the full test suite before deploying.
-
-```bash
-# 1. Clean previous build artifacts
-make clean
-
-# 2. Compile contract to WASM (release profile)
-make build
-# Expected: contracts/target/wasm32-unknown-unknown/release/soroban_subscription_contract.wasm
-
-# 3. Verify the WASM artifact exists and is non-zero
-ls -lh contracts/target/wasm32-unknown-unknown/release/soroban_subscription_contract.wasm
-# Expected: file size > 0
-
-# 4. Run all unit and property tests
-make test
-# Expected: test result: ok. N passed; 0 failed.
-
-# 5. Enforce coverage threshold (≥ 95%)
-make coverage
-# Expected: Coverage: XX.XX% >= 95.00% — OK
-```
-
-**Do not proceed if any step above exits non-zero.**
-
----
-
-### Phase 2 — Testnet Deployment
-
-#### 2.1 Create and fund the deploy identity
-
-```bash
-# Create a new identity (one-time per environment)
-stellar keys generate alice --network testnet
-
-# Fund via Friendbot (testnet only — free)
-stellar keys fund alice --network testnet
-
-# Confirm the identity is funded
-stellar keys address alice --network testnet
-# Expected: GABC...ALICE  (Stellar public key, starts with G)
-```
-
-#### 2.2 Deploy
-
-```bash
-# Deploy to testnet and capture the contract address
-CONTRACT_ID=$(bash deploy/deploy.sh)
-echo "Deployed contract: $CONTRACT_ID"
-```
-
-All diagnostic output goes to stderr. `CONTRACT_ID` receives only the contract
-address on stdout — a `C`-prefixed Stellar contract ID (56 characters).
-
-Expected stderr output:
-
-```
-Network:             testnet
-Identity:            alice
-RPC URL:             https://soroban-testnet.stellar.org
-Stellar CLI version: 21.3.0
-Building contract...
-Deploying contract...
-```
-
-Expected stdout:
-
-```
-CXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
-```
-
-#### 2.3 Initialize — set admin and amount cap
-
-After deploy the contract is live but has no admin set. Call `init(admin)` before
-creating any subscriptions. Optionally set a per-deployment amount cap with
-`set_max_amount`.
-
-```bash
-ADMIN_ADDRESS=$(stellar keys address alice --network testnet)
-
-# Initialize the contract with the admin key
+# Call migrate() on the newly deployed contract to initialise the schema version
 stellar contract invoke \
-  --id "$CONTRACT_ID" \
-  --source alice \
-  --network testnet \
-  -- init \
-  --admin "$ADMIN_ADDRESS"
-# Expected: no output (void return)
-
-# Optional: set a per-subscription amount cap (in token base units)
-# Example: cap at 1,000 USDC (7 decimals → 10_000_000_000 base units)
-stellar contract invoke \
-  --id "$CONTRACT_ID" \
-  --source alice \
-  --network testnet \
-  -- set_max_amount \
-  --amount 10000000000
-# Expected: no output (void return)
+  --id "$V2_CONTRACT_ID" \
+  --source my-mainnet-id \
+  --network mainnet \
+  -- migrate \
+  --admin "$(stellar keys address my-mainnet-id)"
 ```
 
-#### 2.4 Configure the frontend
+Expected result: transaction succeeds and the `contract_migrated` event is emitted with
+`new_version = 1` (or the current `CURRENT_SCHEMA_VERSION` from `storage.rs`).
+
+Failure case — `AlreadyMigrated` (error 15): the contract was already at the current version.
+This is safe to ignore; it means `migrate()` was called a second time accidentally.
+
+### Off-chain subscriber migration
+
+For each active v1 subscription discovered via `getEvents()`:
 
 ```bash
-cd frontend
-cp .env.example .env.local
-
-# Set the three required variables:
-# NEXT_PUBLIC_CONTRACT_ID  — the C... address from step 2.2
-# NEXT_PUBLIC_RPC_URL      — https://soroban-testnet.stellar.org
-# NEXT_PUBLIC_NETWORK_PASSPHRASE — Test SDF Network ; September 2015
-```
-
-Edit `frontend/.env.local`:
-
-```env
-NEXT_PUBLIC_CONTRACT_ID=CXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
-NEXT_PUBLIC_RPC_URL=https://soroban-testnet.stellar.org
-NEXT_PUBLIC_NETWORK_PASSPHRASE=Test SDF Network ; September 2015
-```
-
-#### 2.5 Verify the testnet deployment
-
-```bash
-# 1. Smoke test — basic subscribe → execute → cancel lifecycle
-bash deploy/smoke_test.sh
-# Expected: all three operations succeed, no ContractError returned
-
-# 2. Check that get_subscription works (read-only, no auth)
+# 1. Verify the v1 subscription is still active
 stellar contract invoke \
-  --id "$CONTRACT_ID" \
-  --source alice \
-  --network testnet \
+  --id "$V1_CONTRACT_ID" \
+  --source my-mainnet-id \
+  --network mainnet \
   -- get_subscription \
-  --subscriber "$ADMIN_ADDRESS" \
-  --merchant   "$ADMIN_ADDRESS"
-# Expected: error NoActiveSubscription (code 4) — confirms contract is live and callable
+  --subscriber "$SUBSCRIBER_ADDRESS" \
+  --merchant   "$MERCHANT_ADDRESS"
 
-# 3. Run the full integration test suite
-bash scripts/integration-test.sh
-# Expected: all scenarios PASS
+# 2. Create the equivalent subscription on v2 (merchant must sign)
+stellar contract invoke \
+  --id "$V2_CONTRACT_ID" \
+  --source my-mainnet-id \
+  --network mainnet \
+  -- subscribe \
+  --subscriber "$SUBSCRIBER_ADDRESS" \
+  --merchant   "$MERCHANT_ADDRESS" \
+  --token      "$TOKEN_ADDRESS" \
+  --amount     "$AMOUNT" \
+  --interval   "$INTERVAL"
+
+# 3. Cancel the v1 subscription (subscriber must sign; coordinate off-chain)
+stellar contract invoke \
+  --id "$V1_CONTRACT_ID" \
+  --source subscriber-key \
+  --network mainnet \
+  -- cancel \
+  --subscriber "$SUBSCRIBER_ADDRESS" \
+  --merchant   "$MERCHANT_ADDRESS"
 ```
 
-#### 2.6 Save the deployment record
+> **Important:** The subscriber must re-approve the v2 contract address as a SEP-41
+> spender before the first v2 payment is collected. Notify subscribers of the new
+> contract address and ask them to call `token.approve(v2_contract_id, amount, expiry)`
+> before their next billing date.
 
-`deploy/deploy.sh` writes to `deploy/deployments.json`. Commit this file:
+### Backups before migration
 
-```bash
-git add deploy/deployments.json
-git commit -m "chore: record testnet deployment $(date -u +%Y-%m-%d)"
+Soroban persistent storage does not have a native snapshot or backup API.  Before migrating:
+
+1. **Export current state via `getEvents()`.**  Poll all `subscribe` and `cancel` events
+   from the v1 contract and reconstruct the full subscriber list.  Store in a database or
+   flat file with timestamps and amounts.
+
+   ```bash
+   # Example: fetch all subscribe events for a contract (adapt pagination as needed)
+   stellar events \
+     --network mainnet \
+     --contract-id "$V1_CONTRACT_ID" \
+     --topic "subscribe" \
+     --start-ledger 0
+   ```
+
+2. **Snapshot `get_subscription()` for each known subscriber pair.**  For each
+   `(subscriber, merchant)` pair from the event log, call `get_subscription` and record
+   the full `SubscriptionData` (token, amount, interval, next_payment) off-chain before
+   any migration step touches v1.
+
+3. **Store the snapshot in a durable location** (e.g. S3 bucket, database backup) with the
+   ledger sequence number at which it was taken.  Label it with the contract version and
+   timestamp so it can be retrieved during a rollback.
+
+### Rollback procedure
+
+Because Soroban contracts are immutable, "rollback" means **reverting traffic to the old
+contract**, not undoing an on-chain code change.
+
+#### Rollback decision criteria
+
+Initiate a rollback if any of the following occur after v2 deployment:
+
+- `smoke_test.sh` fails on mainnet within the first 30 minutes.
+- An on-chain `payment_transfer_failure` event rate exceeds 5% of `execute_payment` calls
+  for a 15-minute window (measured by the backend indexer).
+- A critical bug is confirmed in v2 contract logic within the first 48 hours.
+- The `contract_migrated` event is not observed within 10 minutes of calling `migrate()`.
+
+#### Rollback steps
+
+1. **Revert `NEXT_PUBLIC_CONTRACT_ID`** in the frontend to the v1 address and redeploy the
+   frontend.  New subscribers will be routed to v1 again.
+
+2. **Pause or reverse any in-progress subscriber migrations.**  For any subscriber already
+   migrated to v2, re-create their subscription on v1 and cancel on v2.  Use the pre-migration
+   snapshot (see Backups) to reconstruct parameters.
+
+3. **Do not call `cancel()` on any remaining v1 subscriptions** until v2 is confirmed stable
+   in a future deployment attempt.
+
+4. **Investigate v2** on testnet using the failure details.  Fix the bug, re-run
+   `make test` and the smoke test, and start the migration process again from step 1.
+
+#### Recovery from partial migration failure
+
+If the migration process stops partway (e.g., the off-chain migrator crashes mid-run):
+
+- Some subscribers will be on v1, some on v2.
+- The frontend may already be pointing at v2.
+
+Recovery path:
+
+```
+1. Determine the migration cursor (last successfully migrated subscriber from logs).
+2. Subscribers BEFORE the cursor → on v2 only; do not re-migrate.
+3. Subscribers AFTER the cursor  → still on v1; continue migration from the cursor.
+4. If rolling back: cancel all v2 subscriptions created during this run
+   using the snapshot and re-point frontend to v1.
 ```
 
----
+Always log the migration cursor durably (database row or append-only file) so you can
+resume or reverse precisely without guessing.
 
-### Phase 3 — Production (Mainnet) Deployment
+### Verification after migration
 
-**Do not deploy to mainnet until testnet verification is complete.**
-
-#### 3.1 Create and fund the mainnet identity
+After the migration window closes, confirm the old contract is empty:
 
 ```bash
-# Generate a dedicated mainnet deploy identity (one-time)
+# Query the number of active subscriptions on v1 via events
+# If all cancel events balance all subscribe events, v1 is clear.
+stellar events \
+  --network mainnet \
+  --contract-id "$V1_CONTRACT_ID" \
+  --topic "subscribe"
+
+stellar events \
+  --network mainnet \
+  --contract-id "$V1_CONTRACT_ID" \
+  --topic "cancel"
+```
+
+Expected result: the count of `cancel` events equals the count of `subscribe` events,
+indicating every subscription was either cancelled or allowed to expire.
+
+### Partial failure scenarios
+
+| Scenario | Impact | Recovery |
+|----------|--------|----------|
+| `deploy.sh` exits non-zero | v2 not deployed; v1 still live | Re-run after fixing the root cause (network, identity, insufficient XLM) |
+| `migrate()` returns `AlreadyMigrated` (error 15) | Benign; schema was already current | Ignore; continue with subscriber migration |
+| `migrate()` returns `NotInitialized` (error 17) | `initialize()` was not called | Call `initialize(admin)` first, then retry `migrate()` |
+| `migrate()` returns `NotAdmin` (error 16) | Wrong identity used | Re-run with the correct `STELLAR_IDENTITY` |
+| Frontend shows "Contract not configured" | `NEXT_PUBLIC_CONTRACT_ID` not updated | Set the env var to v2 address and restart |
+| Subscriber has insufficient allowance on v2 | First v2 `execute_payment` returns `TransferFailed` (error 7) | Notify subscriber to re-approve the v2 contract address |
+| Subscriber has insufficient balance on v2 | `execute_payment` returns `TransferFailed` (error 7) | The subscription remains active; retry after subscriber funds their account |
+| Off-chain migrator crashes mid-run | Split state — some subscribers on v1, some on v2 | Resume from the last logged cursor or roll back using the pre-migration snapshot |
+| v1 subscription entry has expired (TTL elapsed) | `get_subscription` returns `None` | The entry was garbage-collected; re-subscribe on v2 using off-chain snapshot data |
+
+### Key rotation before mainnet
+
+Testnet keys must never be used on mainnet.  Generate a fresh mainnet identity and fund it
+with real XLM before running any mainnet deployment:
+
+```bash
+# Generate mainnet identity (one-time)
 stellar keys generate my-mainnet-id --network mainnet
 
-# Print the public key and fund it with real XLM
-stellar keys address my-mainnet-id --network mainnet
-# Expected: GXYZ...PROD  — send at least 2 XLM to this address
-# Minimum: 1 XLM base reserve + ~0.1 XLM for deployment fees
+# Display the public key — send real XLM to this address to cover fees
+stellar keys address my-mainnet-id
+# Expected: G... (56-character Stellar public key)
 ```
 
-Mainnet has no Friendbot. You must transfer XLM from an exchange or funded wallet.
+Minimum XLM required:
 
-#### 3.2 Deploy to mainnet
+| Operation | Approximate fee |
+|-----------|----------------|
+| Contract deployment | 0.01–0.10 XLM |
+| `migrate()` call | < 0.001 XLM |
+| Per-subscriber migration (`subscribe` + `cancel` on v1) | < 0.005 XLM total |
 
-```bash
-CONTRACT_ID=$(STELLAR_NETWORK=mainnet STELLAR_IDENTITY=my-mainnet-id bash deploy/deploy.sh)
-echo "Mainnet contract: $CONTRACT_ID"
-```
-
-If the RPC node is unavailable or rate-limited:
-- Retry once after 60 seconds — the script is idempotent at the deploy step.
-- Check RPC connectivity: `curl -s https://mainnet.stellar.validationcloud.io/v1/.../getHealth | jq .`
-
-#### 3.3 Initialize on mainnet
-
-```bash
-ADMIN_ADDRESS=$(stellar keys address my-mainnet-id --network mainnet)
-
-stellar contract invoke \
-  --id "$CONTRACT_ID" \
-  --source my-mainnet-id \
-  --network mainnet \
-  -- init \
-  --admin "$ADMIN_ADDRESS"
-```
-
-#### 3.4 Configure mainnet frontend environment
-
-```env
-NEXT_PUBLIC_CONTRACT_ID=CXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
-NEXT_PUBLIC_RPC_URL=https://mainnet.stellar.validationcloud.io/v1/<YOUR_KEY>
-NEXT_PUBLIC_NETWORK_PASSPHRASE=Public Global Stellar Network ; September 2015
-```
-
-#### 3.5 Verify the mainnet deployment
-
-```bash
-# Check contract version (if get_version is implemented)
-stellar contract invoke \
-  --id "$CONTRACT_ID" \
-  --source my-mainnet-id \
-  --network mainnet \
-  -- get_version
-# Expected: version string, e.g. "1.0.0"
-
-# Confirm the contract is visible in Stellar Expert
-echo "https://stellar.expert/explorer/public/contract/$CONTRACT_ID"
-```
-
-Open the URL in a browser and confirm the contract entry exists.
+Keep the identity key file secure.  Do not commit it to source control or include it in any
+`NEXT_PUBLIC_` environment variable.
 
 ---
 
-### Phase 4 — Contract Upgrades
-
-SorobanPay contract upgrades must satisfy backward compatibility constraints to
-protect stored subscriptions.
-
-#### Allowed in an upgrade
-
-- Adding new `#[contractimpl]` entry points (existing entry points are unaffected).
-- Adding optional fields to storage structs with a default value.
-- Bumping constants that do not affect existing stored data.
-- Fixing bugs within an existing function body (same signature, same storage keys).
-
-#### Not allowed without migration
-
-- Removing or renaming existing entry points.
-- Changing the type or key structure of `DataKey::Subscription` (breaks reads).
-- Removing fields from `SubscriptionData` without a migration step.
-
-#### Upgrade regression tests
-
-Before deploying an upgraded WASM, run the two-phase upgrade regression suite:
-
-```bash
-make test-upgrade
-# Runs contracts/subscription/src/test_upgrade.rs under the --features upgrade-test flag
-# Expected: test result: ok. N passed; 0 failed.
-```
-
-These tests verify that subscriptions stored under the old schema are still
-readable and payable after the new WASM is deployed.
-
-#### Upgrade process
-
-```bash
-# 1. Build the new WASM
-make build
-
-# 2. Run upgrade tests
-make test-upgrade
-
-# 3. Deploy the new WASM as an upgrade (admin only)
-stellar contract invoke \
-  --id "$CONTRACT_ID" \
-  --source my-mainnet-id \
-  --network mainnet \
-  -- upgrade \
-  --new_wasm_hash <NEW_WASM_HASH>
-# The new WASM hash is obtained from the upload step before invoking upgrade.
-
-# 4. Verify get_version returns the new version
-stellar contract invoke \
-  --id "$CONTRACT_ID" \
-  --source my-mainnet-id \
-  --network mainnet \
-  -- get_version
-```
-
----
-
-### Phase 5 — Rollback Limits and Failure Recovery
-
-#### What can be rolled back
-
-| Scenario | Rollback approach |
-|---|---|
-| WASM upgrade failed mid-flight | Re-run `upgrade` with the previous WASM hash |
-| Frontend misconfiguration | Update `NEXT_PUBLIC_CONTRACT_ID` in `.env.local` and redeploy frontend |
-| Wrong `init` admin | Cannot undo — deploy a new contract instance |
-| Wrong `set_max_amount` | Call `set_max_amount` again with the correct value (admin only) |
-
-#### What cannot be rolled back
-
-- **Initial deployment** — a deployed contract's address is permanent. If the wrong
-  WASM was deployed, deploy a fresh contract and migrate users to the new address.
-- **Subscription data** — on-chain persistent storage entries cannot be reverted by
-  the contract. Reconcile via the off-chain reconciler (see [§8](#8-reconciliation-operations)).
-
-#### Partial deployment recovery
-
-If `deploy.sh` exits mid-run:
-
-1. Check `deploy/deployments.json` — if a contract address was written, the WASM
-   was uploaded and deployed successfully.
-2. If the file is empty or missing, re-run `bash deploy/deploy.sh` — the build step
-   is idempotent and the deploy step will create a fresh contract.
-3. If a contract address was written but `init` was never called, call `init` now
-   (it is a one-time call; calling it twice returns `AlreadyInitialized`).
-
-#### Deployment failure table
-
-| Symptom | Likely cause | Fix |
-|---|---|---|
-| `ERROR: Contract build failed` | Rust toolchain or `wasm32` target missing | `rustup target add wasm32-unknown-unknown` |
-| `ERROR: WASM artifact not found` | `make build` produced no output | Check Cargo errors; re-run `make build` |
-| `ERROR: Contract deployment failed` | Identity not funded or CLI misconfigured | Fund the account; verify with `stellar keys address <id>` |
-| `ERROR: Unknown STELLAR_NETWORK value` | Typo in `STELLAR_NETWORK` | Allowed values: `testnet` or `mainnet` only |
-| Empty `CONTRACT_ID` returned | RPC unreachable or rate-limited | Retry after 60 s; check RPC URL connectivity |
-| `AlreadyInitialized` on `init` | `init` was already called | No action needed — the contract is initialized |
-| Transaction fee too low (mainnet) | Surge pricing | Re-run; the Stellar CLI auto-adjusts fees |
-| `AmountExceedsLimit` on `subscribe` | `set_max_amount` is too low | Call `set_max_amount` with a higher value |
-
----
-
-### Phase 6 — Post-Deployment Checklist
+## Summary: migration decision tree
 
 ```
-[ ] Contract address recorded in deploy/deployments.json and committed
-[ ] frontend/.env.local set with correct CONTRACT_ID, RPC_URL, NETWORK_PASSPHRASE
-[ ] init() called and confirmed (no AlreadyInitialized error)
-[ ] smoke_test.sh passed against the deployed contract
-[ ] scripts/integration-test.sh passed
-[ ] Monitoring alerts configured (RPC reachability, /health endpoint)
-[ ] Grafana dashboard imported and showing data
-[ ] deploy/deployments.json committed and pushed to repository
-[ ] Contract address published to team / documentation
+New feature / bug fix?
+  │
+  ├─ No breaking change in SubscriptionData?
+  │    └─ Immutable contract: no migration needed.
+  │       Deploy a new contract for the fix, redirect frontend.
+  │
+  └─ Breaking change (new field, renamed entry point, different auth)?
+       └─ Follow expand-contract migration:
+            1. Deploy v2 alongside v1
+            2. Call initialize() + migrate() on v2
+            3. Update frontend to v2
+            4. Off-chain migration of subscribers
+            5. Decommission v1
+            6. Rollback via snapshot if v2 proves unstable
 ```
-
----
-
-### See Also
-
-- [README.md → Deployment](../README.md#deployment) — environment variable reference
-- [docs/security.md](./security.md) — key management and secret rotation guidance
-- [docs/operations.md](./operations.md) — TTL management, observability, and reconciliation
-- `deploy/deploy.sh` — deployment script source
-- `deploy/smoke_test.sh` — smoke test suite
-- `scripts/integration-test.sh` — full lifecycle integration tests
-- `contracts/subscription/src/test_upgrade.rs` — upgrade regression tests
