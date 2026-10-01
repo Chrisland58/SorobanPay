@@ -12,6 +12,7 @@
  */
 
 import { type FieldErrors } from "@/lib/validation";
+import { useEffect, useRef } from "react";
 import { TokenCombobox } from "@/components/TokenCombobox";
 import { HelpTooltip } from "@/components/HelpTooltip";
 import { NETWORK_NAME } from "@/constants/network";
@@ -45,6 +46,57 @@ export interface SubscriptionFormInputsProps {
   onIntervalChange: (value: string) => void;
   onMerchantBlur?: () => void;
   onTokenBlur?: () => void;
+  focusErrorSummaryRequest?: number;
+}
+
+export interface SubscriptionFormErrorSummaryProps {
+  fieldErrors: FieldErrors;
+  focusRequest?: number;
+}
+
+export function SubscriptionFormErrorSummary({
+  fieldErrors,
+  focusRequest = 0,
+}: SubscriptionFormErrorSummaryProps) {
+  const errorSummaryRef = useRef<HTMLDivElement>(null);
+  const errorItems = [
+    { id: "merchantAddress", label: "Merchant address", message: fieldErrors.merchantAddress },
+    { id: "tokenAddress", label: "Token contract address", message: fieldErrors.tokenAddress },
+    { id: "amount", label: "Amount", message: fieldErrors.amount },
+    { id: "interval", label: "Interval", message: fieldErrors.interval },
+  ].filter((item): item is typeof item & { message: string } => Boolean(item.message));
+
+  useEffect(() => {
+    if (focusRequest > 0 && errorItems.length > 0) {
+      errorSummaryRef.current?.focus();
+    }
+  }, [focusRequest, errorItems.length]);
+
+  if (errorItems.length === 0) return null;
+
+  return (
+    <div
+      ref={errorSummaryRef}
+      role="alert"
+      aria-labelledby="form-error-summary-title"
+      tabIndex={-1}
+      className="rounded-lg border border-red-700 bg-red-900/30 p-4 text-red-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-red-400"
+    >
+      <h2 id="form-error-summary-title" className="font-semibold">
+        There is a problem
+      </h2>
+      <p className="mt-1 text-sm">Review the following fields:</p>
+      <ul className="mt-2 list-disc pl-5 text-sm">
+        {errorItems.map(({ id, label, message }) => (
+          <li key={id}>
+            <a className="underline underline-offset-2" href={`#${id}`}>
+              {label}: {message}
+            </a>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
 }
 
 /**
@@ -68,9 +120,15 @@ export function SubscriptionFormInputs({
   onIntervalChange,
   onMerchantBlur,
   onTokenBlur,
+  focusErrorSummaryRequest,
 }: SubscriptionFormInputsProps) {
   return (
     <div className="space-y-4">
+      <SubscriptionFormErrorSummary
+        fieldErrors={fieldErrors}
+        focusRequest={focusErrorSummaryRequest}
+      />
+
       {/* Merchant address */}
       <div>
         <label htmlFor="merchantAddress" className={labelCls}>
@@ -108,7 +166,6 @@ export function SubscriptionFormInputs({
         {fieldErrors.merchantAddress && (
           <p
             id="err-merchant"
-            role="alert"
             className="mt-2 text-xs text-red-400 font-medium"
           >
             {fieldErrors.merchantAddress}
@@ -147,7 +204,6 @@ export function SubscriptionFormInputs({
         {fieldErrors.tokenAddress && (
           <p
             id="err-token"
-            role="alert"
             className="mt-2 text-xs text-red-400 font-medium"
           >
             {fieldErrors.tokenAddress}
@@ -190,7 +246,7 @@ export function SubscriptionFormInputs({
           decimals).
         </p>
         {fieldErrors.amount && (
-          <p id="err-amount" role="alert" className="mt-2 text-xs text-red-400 font-medium">
+          <p id="err-amount" className="mt-2 text-xs text-red-400 font-medium">
             {fieldErrors.amount}
           </p>
         )}
@@ -234,7 +290,6 @@ export function SubscriptionFormInputs({
         {fieldErrors.interval && (
           <p
             id="err-interval"
-            role="alert"
             className="mt-2 text-xs text-red-400 font-medium"
           >
             {fieldErrors.interval}

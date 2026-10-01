@@ -1,4 +1,5 @@
 "use client";
+import { SubscriptionFormErrorSummary } from "@/components/SubscriptionFormInputs";
 
 /**
  * SubscriptionForm.tsx
@@ -1442,6 +1443,7 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
   const [isConfirming, setIsConfirming] = useState(false);
   const [confirmingTxHash, setConfirmingTxHash] = useState<string | null>(null);
   const [fieldErrors, setFieldErrors]   = useState<FieldErrors>({});
+  const [errorSummaryFocusRequest, setErrorSummaryFocusRequest] = useState(0);
   const [txError, setTxError]           = useState<TxErrorInfo | null>(null);
   const [txErrorExplorerUrl, setTxErrorExplorerUrl] = useState<string | null>(null);
   const [successData, setSuccessData]   = useState<SuccessData | null>(null);
@@ -1684,7 +1686,10 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
       interval,
     });
     setFieldErrors(errors);
-    if (!isFormValid(errors)) return;
+    if (!isFormValid(errors)) {
+      setErrorSummaryFocusRequest((request) => request + 1);
+      return;
+    }
     if (!publicKey) return;
 
     // Run the allowance check in the background while opening the confirm
@@ -2043,6 +2048,11 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
           aria-labelledby="form-heading"
           className="space-y-4"
         >
+          <SubscriptionFormErrorSummary
+            fieldErrors={fieldErrors}
+            focusRequest={errorSummaryFocusRequest}
+          />
+
           {/* Merchant address */}
           <div>
             <label
@@ -2083,7 +2093,6 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
             {fieldErrors.merchantAddress && (
               <p
                 id="err-merchant"
-                role="alert"
                 className="mt-2 text-xs text-red-400 font-medium"
               >
                 {fieldErrors.merchantAddress}
@@ -2124,7 +2133,6 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
             {fieldErrors.tokenAddress && (
               <p
                 id="err-token"
-                role="alert"
                 className="mt-2 text-xs text-red-400 font-medium"
               >
                 {fieldErrors.tokenAddress}
@@ -2169,7 +2177,6 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
             {fieldErrors.amount && (
               <p
                 id="err-amount"
-                role="alert"
                 className="mt-2 text-xs text-red-400 font-medium"
               >
                 {fieldErrors.amount}
@@ -2222,7 +2229,7 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
               Required. The recurrence cadence for the subscription. Default is 30 days.
             </p>
             {intervalError && (
-              <p id="err-interval" role="alert" className="mt-2 text-xs text-red-400 font-medium">
+              <p id="err-interval" className="mt-2 text-xs text-red-400 font-medium">
                 {intervalError}
               </p>
             )}
