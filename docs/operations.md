@@ -571,3 +571,353 @@ If a subscription entry's TTL reaches zero:
 - `contracts/subscription/src/storage.rs` — TTL constant definitions
 - [Soroban RPC getLedgerEntries spec](https://developers.stellar.org/docs/data/rpc/api-reference/methods/getLedgerEntries)
 - [Soroban Storage and TTL](https://developers.stellar.org/docs/build/smart-contracts/storage/ttl)
+
+---
+
+## 7. Observability: Logs, Metrics, Traces, and Correlation IDs
+
+This section explains the backend's structured observability stack and how to use it
+in production operations. All three signals — logs, metrics, and traces — share the
+same `correlationId` so any incident can be correlated across tools.
+
+---
+
+### 7.1 Structured Logging (Pino)
+
+The backend uses [Pino](https://getpino.io) (`backend/src/lib/logger.ts`) to emit
+JSON-structured log lines to stdout. Every log record includes:
+
+| Field | Description | Example |
+|---|---|---|
+| `level` | Severity string | `"info"`, `"warn"`, `"error"` |
+| `time` | ISO-8601 timestamp | `"2026-09-30T11:00:00.000Z"` |
+| `service` | Fixed label | `"soroban-pay-backend"` |
+| `correlationId` | Per-request UUID v4 | `"a1b2c3d4-..."` |
+| `event` | Machine-readable event name | `"request.received"` |
+| `msg` | Human-readable message | `"GET /subscriptions"` |
+
+#### Log levels
+
+Configure the minimum level with the `LOG_LEVEL` environment variable (default: `info`):
+
+```bash
+LOG_LEVEL=debug   # verbose — include all internal trace lines
+LOG_LEVEL=info    # default — operational events
+LOG_LEVEL=warn    # non-critical problems only
+LOG_LEVEL=error   # failures only
+```
+
+#### Development pretty-printing
+
+In non-production environments (`NODE_ENV !== "production"`) the logger automatically
+loads `pino-pretty` to emit human-readable coloured output:
+
+```
+[2026-09-30 11:00:01.000] INFO  (soroban-pay-backend): request.received
+  correlationId: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+  method: "GET"
+  path: "/subscriptions/GABC...ALICE"
+```
+
+Production containers receive raw JSON:
+
+```json
+{
+  "level": "info",
+  "time": "2026-09-30T11:00:01.000Z",
+  "service": "soroban-pay-backend",
+  "correlationId": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+  "event": "request.received",
+  "method": "GET",
+  "path": "/subscriptions/GABC...ALICE"
+}
+```
+
+#### Sensitive-value redaction
+
+Stellar addresses are redacted to `<first-8>...<last-8>` before they appear in log
+output. This prevents accidentally logging full public keys in shared log storage.
+
+The redaction function is in `backend/src/lib/logger.ts`:
+
+```typescript
+// Example output: "GABC1234...XYZ56789"
+redactAddress("GABC1234XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXYZ56789")
+```
+
+Rule: redaction applies to the log fields, not to the HTTP response or database.
+The full address is preserved in storage and in API responses.
+
+**What is never logged:**
+- Private keys / secrets (none are held server-side)
+- JWT tokens — only claims (e.g., `merchantId`) are logged
+- Raw `SUBSCRIBER_SECRET` or `WEBHOOK_SECRET` values
+
+---
+
+### 7.2 Correlation IDs
+
+The middleware in `backend/src/middleware/correlationId.ts` runs on every request:
+
+1. Reads `X-Correlation-Id` from the request header. If present, the value is reused
+   (allows propagation from an upstream API gateway or client).
+2. If the header is absent, a fresh UUID v4 is generated.
+3. The correlation ID is attached to `req.id` and to a child Pino logger on `req.log`.
+4. The ID is echoed in the `X-Correlation-Id` **response** header.
+
+#### Forwarding from a client
+
+```bash
+curl -H "X-Correlation-Id: my-trace-id-1234" \
+  https://api.example.com/subscriptions/GABC...
+```
+
+```
+< X-Correlation-Id: my-trace-id-1234
+```
+
+#### Using `req.log` in route handlers
+
+Every route handler should use `req.log` instead of the bare `logger` so the
+correlation ID is included automatically:
+
+```typescript
+// backend/src/routes/subscriptions.ts (illustrative)
+router.get('/:subscriber', async (req, res) => {
+  req.log.info({ event: 'subscription.lookup', subscriber: redactAddress(req.params.subscriber) });
+  // ...
+});
+```
+
+#### Finding a request in log output
+
+```bash
+# Grep JSON logs by correlationId
+docker logs sorobanpay-api | jq 'select(.correlationId == "a1b2c3d4-e5f6-7890-abcd-ef1234567890")'
+```
+
+Expected output for a healthy request:
+
+```json
+{ "event": "request.received",  "method": "GET", "path": "/subscriptions/...", "correlationId": "a1b2c3d4-..." }
+{ "event": "request.finished", "statusCode": 200, "correlationId": "a1b2c3d4-..." }
+```
+
+#### Failure recovery
+
+If `X-Correlation-Id` is missing from a client request and the client did not capture
+the one echoed in the response header:
+
+1. Note the approximate request timestamp from the client side.
+2. Filter logs by `time` range and `path`:
+   ```bash
+   docker logs sorobanpay-api | jq 'select(.path == "/subscriptions/GABC..." and .event == "request.received")'
+   ```
+3. The `correlationId` in the matching log line can then be used to trace the full
+   request through both log and trace backends.
+
+---
+
+### 7.3 Distributed Tracing (OpenTelemetry)
+
+The backend initialises the OpenTelemetry Node.js SDK in `backend/src/lib/tracing.ts`
+before any other module loads. Traces are exported via OTLP HTTP to a configurable
+collector (Jaeger, Tempo, etc.).
+
+#### Environment variables
+
+| Variable | Default | Description |
+|---|---|---|
+| `OTEL_SDK_DISABLED` | `false` | Set to `true` to disable tracing entirely |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | `http://localhost:4318` | OTLP collector endpoint |
+| `OTEL_SERVICE_NAME` | `sorobanpay-backend` | Service name in trace UI |
+| `OTEL_SAMPLING_RATE` | `1.0` | Fraction of traces sampled (0.0–1.0) |
+
+#### Recommended production settings
+
+```bash
+# Kubernetes ConfigMap / docker-compose env section
+OTEL_SDK_DISABLED=false
+OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318
+OTEL_SERVICE_NAME=sorobanpay-backend
+OTEL_SAMPLING_RATE=0.1   # 10% head-based sampling — adjust for traffic volume
+```
+
+#### Disabling tracing (zero overhead)
+
+```bash
+OTEL_SDK_DISABLED=true
+```
+
+The SDK is not started and `withSpan` calls are no-ops. No network connections are
+opened. Use this in local development or CI where a collector is not available.
+
+#### Wrapping operations in a custom span
+
+```typescript
+import { withSpan, SpanKind } from '../lib/tracing';
+
+// In any backend service
+const result = await withSpan(
+  'sorobanpay.indexer',
+  'indexer.poll',
+  async (span) => {
+    span.setAttribute('ledger.cursor', cursor);
+    return await fetchEventsFromRPC(cursor);
+  },
+  { kind: SpanKind.CLIENT },
+);
+```
+
+If the function throws, the span is marked `ERROR`, the exception is recorded, and
+the error is re-thrown unchanged.
+
+#### Sampling rate guidance
+
+| Traffic level | Recommended `OTEL_SAMPLING_RATE` |
+|---|---|
+| Development / CI | `1.0` (capture everything) |
+| Staging | `1.0` |
+| Production — low (<100 req/s) | `1.0` |
+| Production — medium (100–1 000 req/s) | `0.1` |
+| Production — high (>1 000 req/s) | `0.01` |
+
+Head-based sampling at `0.1` means 10% of new traces are recorded; spans within
+a sampled trace are always recorded in full.
+
+#### Failure recovery — traces not appearing in UI
+
+1. Confirm the collector is reachable:
+   ```bash
+   curl -v "$OTEL_EXPORTER_OTLP_ENDPOINT/v1/traces"
+   # Expected: HTTP 4xx (auth or method not allowed) — not a connection error
+   ```
+2. Check startup log for the tracing banner:
+   ```
+   [tracing] OpenTelemetry started — service: sorobanpay-backend, sampling: 0.1, endpoint: http://otel-collector:4318
+   ```
+   If this line is absent, `OTEL_SDK_DISABLED=true` may be set inadvertently.
+3. Raise `OTEL_SAMPLING_RATE` to `1.0` temporarily to rule out sampling.
+4. Set `LOG_LEVEL=debug` — the OTLP exporter logs export batches at `debug` level.
+
+---
+
+### 7.4 Metrics
+
+Prometheus metrics are exposed on port `3001` at `/metrics`. The Kubernetes manifests
+(`deploy/k8s/`) annotate all pods so Prometheus scrapes them automatically:
+
+```yaml
+annotations:
+  prometheus.io/scrape: "true"
+  prometheus.io/port:   "3001"
+  prometheus.io/path:   "/metrics"
+```
+
+Key metrics emitted by the backend:
+
+| Metric | Type | Description |
+|---|---|---|
+| `sorobanpay_rpc_poll_duration_seconds` | Histogram | Time spent polling Soroban RPC per batch |
+| `sorobanpay_events_indexed_total` | Counter | Cumulative events indexed by type |
+| `sorobanpay_reconciliation_repairs_total` | Counter | Repairs applied per run |
+| `sorobanpay_http_request_duration_seconds` | Histogram | HTTP request latency (Express) |
+| `process_cpu_seconds_total` | Counter | Node.js process CPU (default prom-client metric) |
+
+To scrape metrics locally:
+
+```bash
+# Port-forward the API pod
+kubectl port-forward svc/sorobanpay-api 3001:3001 -n sorobanpay
+curl http://localhost:3001/metrics
+```
+
+Expected output (Prometheus text format):
+
+```
+# HELP sorobanpay_events_indexed_total Cumulative events indexed
+# TYPE sorobanpay_events_indexed_total counter
+sorobanpay_events_indexed_total{type="subscribe"} 142
+sorobanpay_events_indexed_total{type="executed"}  89
+sorobanpay_events_indexed_total{type="cancel"}    11
+```
+
+---
+
+### 7.5 Health Endpoint Semantics
+
+`GET /health` on port `3001` runs two dependency checks:
+
+| Check | What it verifies | Failure behaviour |
+|---|---|---|
+| Soroban RPC reachability | Calls `getHealth` on the configured RPC URL | Returns `503`; pod not marked ready |
+| Contract address resolvability | Calls `getContractData` for `CONTRACT_ID` | Returns `503`; pod not marked ready |
+
+A pod that fails liveness checks is restarted by Kubernetes. A pod that fails
+readiness checks is removed from the load balancer pool without restart.
+
+Example healthy response:
+
+```json
+{
+  "status": "ok",
+  "rpc": "reachable",
+  "contract": "resolved",
+  "version": "1.0.0"
+}
+```
+
+Example degraded response (`503 Service Unavailable`):
+
+```json
+{
+  "status": "degraded",
+  "rpc": "unreachable",
+  "contract": "unknown",
+  "error": "connect ECONNREFUSED 127.0.0.1:4318"
+}
+```
+
+The `error` field in degraded responses does **not** include internal stack traces or
+credentials — only the failure reason. Full stack traces are available in the
+structured logs under the same request's `correlationId`.
+
+#### Manual health check
+
+```bash
+# Testnet — API service
+curl -s https://api.example.com/health | jq .
+
+# Port-forward (local / staging)
+kubectl port-forward svc/sorobanpay-api 8080:80 -n sorobanpay
+curl -s http://localhost:8080/health | jq .
+```
+
+---
+
+### 7.6 Grafana Dashboard
+
+The pre-built Grafana dashboard is at `deploy/grafana/sorobanpay-dashboard.json`.
+Import it via the Grafana UI:
+
+```
+Dashboards → Import → Upload JSON file → select deploy/grafana/sorobanpay-dashboard.json
+```
+
+The dashboard surfaces:
+- RPC poll latency (p50 / p95 / p99)
+- Events indexed per minute by type
+- HTTP error rate and latency heatmap
+- Reconciliation repair rate
+- Pod CPU and memory (requires metrics-server)
+
+---
+
+### See Also
+
+- `backend/src/lib/logger.ts` — logger construction and `redactAddress` helper
+- `backend/src/middleware/correlationId.ts` — middleware source
+- `backend/src/lib/tracing.ts` — OpenTelemetry SDK initialisation and `withSpan`
+- `backend/src/routes/health.ts` — health check implementation
+- [Backend API Cookbook](./api-cookbook.md) — recipe examples using `req.log`
+- [Kubernetes Deployment](../README.md#kubernetes-deployment-backend-services) — pod annotations and HPA config
