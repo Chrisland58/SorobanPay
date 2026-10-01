@@ -26,6 +26,8 @@
  *   collectingRows  — Set of subscriber addresses currently being collected
  *   rowResults      — Map of subscriber → { txHash?, error? } after collection
  *   onRefresh       — re-fetch callback
+ *   hasMore         — whether another subscription page is available
+ *   onLoadMore      — fetch the next cursor page
  */
 
 import { useState, useCallback, useMemo } from 'react';
@@ -48,6 +50,8 @@ export interface MerchantSubscriptionsTableProps {
   collectingRows: Set<string>;
   rowResults: Map<string, RowResult>;
   onRefresh: () => void;
+  hasMore: boolean;
+  onLoadMore: () => void;
 }
 
 type SubscriptionStatusFilter = 'all' | 'due' | 'not-due' | 'expired';
@@ -153,6 +157,8 @@ export default function MerchantSubscriptionsTable({
   collectingRows,
   rowResults,
   onRefresh,
+  hasMore,
+  onLoadMore,
 }: MerchantSubscriptionsTableProps) {
   const [selectedSubscribers, setSelectedSubscribers] = useState<Set<string>>(
     new Set(),
@@ -266,7 +272,7 @@ export default function MerchantSubscriptionsTable({
   }
 
   // ── Empty state ────────────────────────────────────────────────────────────
-  if (!isLoading && subscriptions.length === 0) {
+  if (!isLoading && subscriptions.length === 0 && !hasMore) {
     return (
       <div className="rounded-2xl border border-gray-800 bg-gray-900/40 px-6 py-12 text-center">
         <p className="text-3xl mb-3" aria-hidden="true">🏪</p>
@@ -559,6 +565,26 @@ export default function MerchantSubscriptionsTable({
           </tbody>
         </table>
       </div>
+
+      {hasMore && (
+        <div className="flex justify-center border-t border-gray-800 px-4 py-4">
+          <button
+            type="button"
+            onClick={onLoadMore}
+            disabled={isLoading}
+            aria-label="Load more merchant subscriptions"
+            className="rounded-lg border border-gray-700 bg-gray-800 px-6 py-2.5 text-sm font-medium text-gray-300 hover:bg-gray-700 hover:text-white disabled:opacity-50 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400"
+          >
+            {isLoading ? 'Loading subscriptions…' : 'Load more'}
+          </button>
+        </div>
+      )}
+
+      {!hasMore && subscriptions.length > 0 && !isLoading && (
+        <p role="status" aria-label="All subscriptions loaded" className="border-t border-gray-800 px-4 py-3 text-center text-xs text-gray-500">
+          All subscriptions loaded
+        </p>
+      )}
 
       {/* Summary aria-live region */}
       <div

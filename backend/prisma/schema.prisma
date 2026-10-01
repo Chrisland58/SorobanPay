@@ -229,24 +229,19 @@ model PaymentRetry {
   @@index([status])
 }
 
-// #1073: Indexer checkpoint recovery
-// Replayable sequence checkpoints with SHA-256 checksums for tamper detection.
-model IndexerCheckpoint {
-  id         Int      @id @default(autoincrement())
-  sequence   Int      @unique
-  cursor     String
-  ledger     Int
-  eventCount Int      @default(0)
-  checksum   String
-  createdAt  DateTime @default(now())
-}
+// #1072: Transactional domain-event outbox
+// Written atomically with the main Event record; processed asynchronously by OutboxRelay.
+model OutboxEvent {
+  id               Int      @id @default(autoincrement())
+  aggregateType    String   // e.g. "subscription"
+  aggregateId      String   // e.g. "subscriber:merchant"
+  eventType        String   // e.g. "executed", "cancel"
+  payload          String   // JSON string of event data
+  status           String   @default("pending") // pending | published | failed
+  deduplicationKey String   @unique             // RPC event id for idempotency
+  createdAt        DateTime @default(now())
+  publishedAt      DateTime?
 
-// #1073: Processed event tracking for idempotent deduplication.
-model ProcessedEvent {
-  id        Int      @id @default(autoincrement())
-  eventId   String   @unique
-  ledger    Int
-  createdAt DateTime @default(now())
-
-  @@index([ledger])
+  @@index([status, createdAt])
+  @@index([aggregateId])
 }

@@ -39,6 +39,106 @@ import { getPrometheusMetrics } from './services/metricsService';
 import retriesRouter from './routes/retries';
 import { startRetryWorker, shutdownRetryWorker } from './services/retryQueue';
 
+// ─── Migration startup guard (#1078) ─────────────────────────────────────────
+
+export interface MigrationStatus {
+  hasPending: boolean;
+  pendingCount: number;
+  error?: string;
+}
+
+/**
+ * Checks for pending database migrations by comparing migration files on disk
+ * against applied records in the _prisma_migrations table.
+ * Never throws — errors are captured in the `error` field.
+ */
+export async function checkPendingMigrations(): Promise<MigrationStatus> {
+  try {
+    const fs = await import('fs');
+    const path = await import('path');
+    const migrationsDir = path.resolve(__dirname, '../../migrations');
+
+    if (!fs.existsSync(migrationsDir)) {
+      return { hasPending: false, pendingCount: 0 };
+    }
+
+    const migrationFiles: string[] = fs
+      .readdirSync(migrationsDir)
+      .filter((f: string) => f.endsWith('.js') || f.endsWith('.sql'))
+      .sort();
+
+    if (migrationFiles.length === 0) {
+      return { hasPending: false, pendingCount: 0 };
+    }
+
+    let appliedNames: string[] = [];
+    try {
+      const prismaModule = await import('./lib/prisma');
+      const prismaClient = prismaModule.default;
+      const rows = await prismaClient.$queryRaw<{ migration_name: string }[]>`
+        SELECT migration_name FROM "_prisma_migrations"
+        WHERE finished_at IS NOT NULL
+      `;
+      appliedNames = rows.map((r) => r.migration_name);
+    } catch {
+      // Table absent on first deploy — treat all files as pending
+      return { hasPending: true, pendingCount: migrationFiles.length };
+    }
+
+    const pendingCount = migrationFiles.filter(
+      (f: string) =>
+        !appliedNames.some(
+          (name) =>
+            f.startsWith(name) || name.startsWith(f.replace(/\.(js|sql)$/, '')),
+        ),
+    ).length;
+
+    return { hasPending: pendingCount > 0, pendingCount };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return { hasPending: false, pendingCount: 0, error: message };
+  }
+}
+
+/**
+ * Migration startup guard:
+ *  - MIGRATE_ON_START=true  → run `prisma migrate deploy` before server starts
+ *  - otherwise              → warn about pending migrations, never auto-apply
+ */
+async function runMigrationGuard(): Promise<void> {
+  const status = await checkPendingMigrations();
+
+  if (status.error) {
+    console.warn(`[migrations] Migration check error: ${status.error}`);
+    return;
+  }
+
+  if (!status.hasPending) {
+    console.log('[migrations] Database schema is up to date.');
+    return;
+  }
+
+  if (process.env.MIGRATE_ON_START === 'true') {
+    console.log(
+      `[migrations] MIGRATE_ON_START=true — applying ${status.pendingCount} pending migration(s)...`,
+    );
+    const { execSync } = await import('child_process');
+    try {
+      execSync('npx prisma migrate deploy', { stdio: 'inherit', cwd: process.cwd() });
+      console.log('[migrations] Migrations applied successfully.');
+    } catch {
+      // Do not expose connection details in the log
+      throw new Error('[migrations] Startup migration failed. Check DB connectivity.');
+    }
+  } else {
+    console.warn(
+      `[migrations] WARNING: ${status.pendingCount} pending migration(s) detected. ` +
+        'Set MIGRATE_ON_START=true to apply automatically, or run ' +
+        '`npx prisma migrate deploy` manually before starting the server.',
+    );
+  }
+}
+
 // ─── Config ─────────────────────────────────────────────────────────────────
 const config = validateConfig();
 const { port: PORT, rpcUrl, contractId } = config;
@@ -189,18 +289,25 @@ cron.schedule('* * * * *', async () => {
 });
 
 // ─── Start ───────────────────────────────────────────────────────────────────
-app.listen(PORT, () => {
-  console.log(`[server] SorobanPay backend running on port ${PORT}`);
-  if (!operatorSecret) {
-    console.warn('[scheduler] OPERATOR_SECRET not set — payment scheduler disabled.');
-  }
-  try {
-    startRetryWorker();
-  } catch (err) {
-    console.warn('[retryWorker] Could not start retry worker (Redis unavailable?):', err);
-  }
-  eventIndexer.fetchAndStoreEvents();
-});
+// Run migration guard before accepting traffic (#1078)
+runMigrationGuard()
+  .catch((err: Error) => {
+    console.error('[migrations] Fatal startup error:', err.message);
+  })
+  .finally(() => {
+    app.listen(PORT, () => {
+      console.log(`[server] SorobanPay backend running on port ${PORT}`);
+      if (!operatorSecret) {
+        console.warn('[scheduler] OPERATOR_SECRET not set — payment scheduler disabled.');
+      }
+      try {
+        startRetryWorker();
+      } catch (err) {
+        console.warn('[retryWorker] Could not start retry worker (Redis unavailable?):', err);
+      }
+      eventIndexer.fetchAndStoreEvents();
+    });
+  });
 
 // ─── Graceful shutdown ────────────────────────────────────────────────────────
 process.on('SIGTERM', async () => {
