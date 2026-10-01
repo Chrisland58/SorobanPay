@@ -101,6 +101,18 @@ export interface StoredWebhookDelivery {
   createdAt: Date;
 }
 
+export interface StoredOutboxEvent {
+  id: number;
+  aggregateType: string;
+  aggregateId: string;
+  eventType: string;
+  payload: string;
+  status: string;
+  deduplicationKey: string;
+  createdAt: Date;
+  publishedAt: Date | null;
+}
+
 export interface StoredIndexerState {
   id: number;
   lastCursor: string | null;
@@ -125,10 +137,12 @@ export class InMemoryPrismaClient {
   private webhookEndpoints: StoredWebhookEndpoint[] = [];
   private webhookDeliveries: StoredWebhookDelivery[] = [];
   private indexerStates: StoredIndexerState[] = [];
+  private outboxEvents: StoredOutboxEvent[] = [];
   private nextEventId = 1;
   private nextSummaryId = 1;
   private nextEndpointId = 1;
   private nextDeliveryId = 1;
+  private nextOutboxId = 1;
 
   event = {
     findFirst: async (args: { where: Partial<StoredEvent> }) => {
@@ -283,9 +297,77 @@ export class InMemoryPrismaClient {
    * Passes a proxy of this client as the tx argument so service code that
    * calls tx.event.create(...) etc. operates on the same in-memory store.
    */
-  async $transaction<T>(fn: (tx: InMemoryPrismaClient) => Promise<T>): Promise<T> {
-    return fn(this);
+  async $transaction<T>(fn: ((tx: InMemoryPrismaClient) => Promise<T>) | any[]): Promise<T | any[]> {
+    if (Array.isArray(fn)) {
+      // Handle array-style transactions (prisma.$transaction([op1, op2, ...]))
+      const results: any[] = [];
+      for (const op of fn) {
+        results.push(await op);
+      }
+      return results;
+    }
+    return (fn as (tx: InMemoryPrismaClient) => Promise<T>)(this);
   }
+
+  outboxEvent = {
+    findMany: async (args?: { where?: Partial<StoredOutboxEvent>; orderBy?: { createdAt?: 'asc' | 'desc' } }) => {
+      let result = [...this.outboxEvents];
+      if (args?.where) {
+        result = result.filter((e) =>
+          Object.entries(args.where!).every(([k, v]) => (e as any)[k] === v),
+        );
+      }
+      if (args?.orderBy?.createdAt === 'desc') {
+        result.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
+      }
+      return result;
+    },
+    create: async (args: { data: Omit<StoredOutboxEvent, 'id' | 'createdAt'> }) => {
+      const record: StoredOutboxEvent = {
+        ...args.data,
+        id: this.nextOutboxId++,
+        createdAt: new Date(),
+        publishedAt: args.data.publishedAt ?? null,
+      };
+      this.outboxEvents.push(record);
+      return record;
+    },
+    upsert: async (args: {
+      where: { deduplicationKey: string };
+      create: Omit<StoredOutboxEvent, 'id' | 'createdAt'>;
+      update: Partial<StoredOutboxEvent>;
+    }) => {
+      const existingIdx = this.outboxEvents.findIndex(
+        (e) => e.deduplicationKey === args.where.deduplicationKey,
+      );
+      if (existingIdx >= 0) {
+        this.outboxEvents[existingIdx] = { ...this.outboxEvents[existingIdx], ...args.update };
+        return this.outboxEvents[existingIdx];
+      }
+      const record: StoredOutboxEvent = {
+        ...args.create,
+        id: this.nextOutboxId++,
+        createdAt: new Date(),
+        publishedAt: (args.create as any).publishedAt ?? null,
+      };
+      this.outboxEvents.push(record);
+      return record;
+    },
+    updateMany: async (args: { where: { id?: number; status?: string }; data: Partial<StoredOutboxEvent> }) => {
+      let count = 0;
+      this.outboxEvents = this.outboxEvents.map((e) => {
+        if (
+          (args.where.id === undefined || e.id === args.where.id) &&
+          (args.where.status === undefined || e.status === args.where.status)
+        ) {
+          count++;
+          return { ...e, ...args.data };
+        }
+        return e;
+      });
+      return { count };
+    },
+  };
 
   private matchesEvent(record: StoredEvent, where: Record<string, any>): boolean {
     return Object.entries(where).every(([k, v]) => {
@@ -324,9 +406,11 @@ export class InMemoryPrismaClient {
     this.webhookEndpoints = [];
     this.webhookDeliveries = [];
     this.indexerStates = [];
+    this.outboxEvents = [];
     this.nextEventId = 1;
     this.nextSummaryId = 1;
     this.nextEndpointId = 1;
     this.nextDeliveryId = 1;
+    this.nextOutboxId = 1;
   }
 }

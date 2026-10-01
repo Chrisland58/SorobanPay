@@ -228,3 +228,20 @@ model PaymentRetry {
   @@index([nextRetryAt])
   @@index([status])
 }
+
+// #1072: Transactional domain-event outbox
+// Written atomically with the main Event record; processed asynchronously by OutboxRelay.
+model OutboxEvent {
+  id               Int      @id @default(autoincrement())
+  aggregateType    String   // e.g. "subscription"
+  aggregateId      String   // e.g. "subscriber:merchant"
+  eventType        String   // e.g. "executed", "cancel"
+  payload          String   // JSON string of event data
+  status           String   @default("pending") // pending | published | failed
+  deduplicationKey String   @unique             // RPC event id for idempotency
+  createdAt        DateTime @default(now())
+  publishedAt      DateTime?
+
+  @@index([status, createdAt])
+  @@index([aggregateId])
+}
