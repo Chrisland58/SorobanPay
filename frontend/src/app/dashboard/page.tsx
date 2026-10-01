@@ -263,9 +263,9 @@ export default function DashboardPage() {
             connectError={connectError}
             freighterInstalled={freighterInstalled}
           />
-        ) : isLoading ? (
+        ) : isLoading && subscriptions.length === 0 ? (
           <LoadingSkeleton />
-        ) : error ? (
+        ) : error && subscriptions.length === 0 ? (
           <div
             role="alert"
             className="rounded-2xl border border-red-800 bg-red-900/20 p-6 space-y-3"
@@ -290,6 +290,26 @@ export default function DashboardPage() {
           <DashboardEmptyState />
         ) : (
           <section aria-label="Active subscriptions">
+            {isLoading && (
+              <p role="status" aria-live="polite" className="mb-4 text-xs text-gray-400">
+                Refreshing subscriptions…
+              </p>
+            )}
+            {error && (
+              <div
+                role="alert"
+                className="mb-4 rounded-xl border border-yellow-800 bg-yellow-900/20 p-4 text-sm"
+              >
+                <p className="text-yellow-200">{error}</p>
+                <button
+                  type="button"
+                  onClick={refetch}
+                  className="mt-2 text-xs text-yellow-100 underline focus:outline-none focus-visible:ring-2 focus-visible:ring-yellow-400"
+                >
+                  Try again
+                </button>
+              </div>
+            )}
             {/* Count header */}
             <p className="text-xs text-gray-500 uppercase tracking-wide font-semibold mb-4">
               {visibleSubscriptions.length}{' '}
