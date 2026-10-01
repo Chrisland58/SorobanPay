@@ -127,7 +127,7 @@ type InMemoryStoredSubscription = {
   status: string;
 }
 
-/** Minimal Prisma-compatible client for use in integration tests. */
+  /** Minimal Prisma-compatible client for use in integration tests. */
 export class InMemoryPrismaClient {
   private events: StoredEvent[] = [];
   private summaries: StoredSummary[] = [];
@@ -396,6 +396,17 @@ export class InMemoryPrismaClient {
       this.webhookEndpoints.push({ ...ep, id: this.nextEndpointId++, createdAt: new Date() });
     }
   }
+
+  reconciliationAudit = {
+    create: async (args: { data: any }) => {
+      const record = { id: this.nextReconciliationAuditId++, ...args.data, createdAt: new Date() };
+      this.reconciliationAudits.push(record);
+      return record;
+    },
+    findMany: async (_args?: { where?: any; orderBy?: any }) => {
+      return [...this.reconciliationAudits];
+    },
+  };
 
   reset(): void {
     this.events = [];
