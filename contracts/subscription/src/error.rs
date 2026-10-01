@@ -5,6 +5,7 @@ use soroban_sdk::contracterror;
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 #[repr(u32)]
 pub enum ContractError {
+    // ── Core subscription errors (1–7) ──────────────────────────────────────
     /// `subscribe` called with amount <= 0
     AmountMustBePositive  = 1,
     /// `subscribe` called with interval < 86400 seconds (1 day)
@@ -75,4 +76,10 @@ pub enum ContractError {
     SubscriptionPaused        = 20,
     /// `resume_subscription` called on a subscription that is not currently paused
     SubscriptionNotPaused     = 21,
+    /// `execute_payment` detected that the same payment nonce was already executed (#1083).
+    ///
+    /// This error is returned when `execute_payment` is retried with a nonce that was
+    /// previously committed to an execution marker in temporary storage.  The transfer
+    /// is NOT repeated — the subscription state is left unchanged.
+    DuplicateExecution        = 22,
 }

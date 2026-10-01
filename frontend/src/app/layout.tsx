@@ -9,6 +9,8 @@ import { ErrorBoundary } from '@/components/ErrorBoundary';
 import { LanguageSelector } from '@/components/LanguageSelector';
 import { DarkModeToggle } from '@/components/DarkModeToggle';
 import { ToastProvider } from '@/components/Toast';
+import { NetworkWarningBanner } from '@/components/NetworkWarningBanner';
+import { PageHeader } from '@/components/PageHeader';
 import './globals.css';
 
 /**
@@ -78,7 +80,7 @@ export default async function RootLayout({
          */}
         <ThemeScript />
       </head>
-      <body className="min-h-screen bg-white dark:bg-gray-950 text-gray-900 dark:text-white antialiased transition-colors duration-200">
+      <body className="min-h-screen bg-surface-base text-content-primary antialiased transition-colors duration-200">
         {/*
          * Top-level ErrorBoundary (FE-38)
          * Prevents a full blank-screen crash on any unhandled render error.
@@ -88,6 +90,12 @@ export default async function RootLayout({
             <NextIntlClientProvider messages={messages}>
               <WalletProvider>
                 <ToastProvider>
+                  {/* Network warning banner - persistent on mainnet */}
+                  <NetworkWarningBanner />
+                  
+                  {/* Page header with branding, network, and wallet state */}
+                  <PageHeader />
+                  
                   {/* Top-right header area: dark mode toggle + language switcher */}
                   <div className="fixed top-4 right-4 z-50 flex items-center gap-2">
                     <DarkModeToggle />

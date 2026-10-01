@@ -5,14 +5,14 @@
  *
  * Hook for the merchant portal (/merchant).
  *
- * Two-phase data loading:
+ * Two-phase, cursor-paginated data loading:
  *   Phase 1 — Index discovery:
- *     Polls Soroban RPC getEvents() for all `subscribe` events where the
- *     second topic equals the connected merchant's public key. This gives us
- *     the set of known (subscriber, merchant) pairs.
+ *     Requests one bounded page of `subscribe` events where the third topic
+ *     equals the connected merchant's public key. `loadMore()` advances the
+ *     RPC cursor when additional events are available.
  *
  *   Phase 2 — State hydration:
- *     For each discovered subscriber, calls the contract's `get_subscription`
+ *     For each subscriber in the current page, calls `get_subscription`
  *     read-only entry point to fetch current subscription state including
  *     `next_payment`, `amount`, `token`, and `interval`.
  *
@@ -27,7 +27,7 @@
  *   Results are not cached because merchant state must be fresh before collection.
  *
  * Usage:
- *   const { subscriptions, isLoading, error, refresh } =
+ *   const { subscriptions, isLoading, error, hasMore, loadMore, refresh } =
  *     useMerchantSubscriptions({ publicKey });
  */
 
@@ -80,12 +80,16 @@ export interface UseMerchantSubscriptionsOptions {
 }
 
 export interface UseMerchantSubscriptionsResult {
-  /** All known subscriptions for this merchant (active + expired) */
+  /** Subscriptions loaded so far for this merchant (active + expired) */
   subscriptions: MerchantSubscription[];
   /** True while phase 1 or phase 2 fetch is in progress */
   isLoading: boolean;
   /** Error message if any fetch phase failed, null otherwise */
   error: string | null;
+  /** True when another page of subscribe events can be loaded */
+  hasMore: boolean;
+  /** Fetch the next event page */
+  loadMore: () => void;
   /** Re-fetch from scratch (no cache) */
   refresh: () => void;
 }
@@ -204,7 +208,7 @@ async function fetchSubscriptionState(
 
 // ── Hook ──────────────────────────────────────────────────────────────────────
 
-const PAGE_SIZE = 100; // Fetch up to 100 subscribe events per page
+const PAGE_SIZE = 100;
 
 /**
  * Classify a subscription as due or not based on the current client time.
@@ -225,79 +229,71 @@ export function useMerchantSubscriptions({
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Track the current fetch so stale fetches can be cancelled
+  const [hasMore, setHasMore] = useState(false);
   const fetchIdRef = useRef(0);
-  // Track which publicKey we've already fetched for (avoids duplicate fetches)
   const fetchedForRef = useRef<string | null>(null);
+  const cursorRef = useRef<string | null>(null);
+  const loadingRef = useRef(false);
 
-  const fetchAll = useCallback(
-    async (merchantKey: string, fetchId: number): Promise<void> => {
+  const fetchPage = useCallback(
+    async (
+      merchantKey: string,
+      cursor: string | null,
+      append: boolean,
+      fetchId: number,
+    ): Promise<void> => {
       if (!contractId) {
         setSubscriptions([]);
+        setHasMore(false);
         setError('Contract ID is not configured.');
         setIsLoading(false);
         return;
       }
 
+      loadingRef.current = true;
       setIsLoading(true);
       setError(null);
 
       try {
         const { NETWORK_PASSPHRASE } = await import('@/constants/network');
         const server = new SorobanRpc.Server(rpcUrl, { allowHttp: true });
-
-        // ── Phase 1: Discover subscribers from `subscribe` events ─────────
         const discoveredSubscribers = new Map<string, string>(); // subscriber → token
+        const requestOpts: SorobanRpc.Server.GetEventsRequest = {
+          filters: [
+            {
+              type: 'contract',
+              contractIds: [contractId],
+              topics: [['subscribe', '*', merchantKey, '*']],
+            },
+          ],
+          limit: PAGE_SIZE,
+        };
 
-        let cursor: string | undefined;
-        let hasMore = true;
-
-        while (hasMore) {
-          if (fetchIdRef.current !== fetchId) return; // aborted
-
-          const requestOpts: SorobanRpc.Server.GetEventsRequest = {
-            filters: [
-              {
-                type: 'contract',
-                contractIds: [contractId],
-                topics: [
-                  // topic[0] = "subscribe", topic[1] = *, topic[2] = merchant
-                  ['subscribe', '*', merchantKey, '*'],
-                ],
-              },
-            ],
-            limit: PAGE_SIZE,
-          };
-
-          if (cursor) {
-            (requestOpts as Record<string, unknown>).cursor = cursor;
-          } else {
-            requestOpts.startLedger = 1;
-          }
-
-          const response = await server.getEvents(requestOpts);
-
-          for (const raw of response.events ?? []) {
-            const decoded = decodeSubscribeEvent(raw as SorobanRpc.Api.RawEventResponse);
-            if (decoded && decoded.merchant === merchantKey) {
-              // Later events overwrite earlier ones — dedup by subscriber
-              discoveredSubscribers.set(decoded.subscriber, decoded.token);
-            }
-          }
-
-          const nextCursor = response.cursor;
-          const fetched = response.events?.length ?? 0;
-          hasMore = !!nextCursor && fetched >= PAGE_SIZE;
-          cursor = nextCursor ?? undefined;
+        if (cursor) {
+          (requestOpts as Record<string, unknown>).cursor = cursor;
+        } else {
+          requestOpts.startLedger = 1;
         }
 
-        if (fetchIdRef.current !== fetchId) return; // aborted
+        const response = await server.getEvents(requestOpts);
+        if (fetchIdRef.current !== fetchId) return;
 
-        // ── Phase 2: Hydrate on-chain state for each subscriber ───────────
+        for (const raw of response.events ?? []) {
+          const decoded = decodeSubscribeEvent(raw as SorobanRpc.Api.RawEventResponse);
+          if (decoded && decoded.merchant === merchantKey) {
+            discoveredSubscribers.set(decoded.subscriber, decoded.token);
+          }
+        }
+
+        const nextCursor = response.cursor ?? null;
+        const moreAvailable = !!nextCursor && (response.events?.length ?? 0) >= PAGE_SIZE;
+        cursorRef.current = moreAvailable ? nextCursor : null;
+        setHasMore(moreAvailable);
+
         const results: MerchantSubscription[] = [];
 
         for (const [subscriber, eventToken] of discoveredSubscribers) {
-          if (fetchIdRef.current !== fetchId) return; // aborted
+          if (fetchIdRef.current !== fetchId) return;
 
           const state = await fetchSubscriptionState(
             subscriber,
@@ -345,24 +341,26 @@ export function useMerchantSubscriptions({
           }
         }
 
-        if (fetchIdRef.current !== fetchId) return; // aborted
+        if (fetchIdRef.current !== fetchId) return;
 
-        // Sort: due first, then not-due, then expired
-        results.sort((a, b) => {
+        const sortSubscriptions = (items: MerchantSubscription[]) => items.sort((a, b) => {
           if (a.isExpired !== b.isExpired) return a.isExpired ? 1 : -1;
           if (a.isDue !== b.isDue) return a.isDue ? -1 : 1;
           return a.nextPaymentTimestamp - b.nextPaymentTimestamp;
         });
 
-        setSubscriptions(results);
-      } catch (err) {
-        if (fetchIdRef.current !== fetchId) return; // aborted
-        const msg =
-          err instanceof Error ? err.message : 'Failed to load merchant subscriptions';
-        setError(msg);
-        setSubscriptions([]);
+        setSubscriptions((current) => {
+          const merged = append ? new Map(current.map((item) => [item.subscriber, item])) : new Map();
+          for (const item of results) merged.set(item.subscriber, item);
+          return sortSubscriptions([...merged.values()]);
+        });
+      } catch {
+        if (fetchIdRef.current !== fetchId) return;
+        setError('Failed to load subscriptions. Please retry.');
+        if (!append) setSubscriptions([]);
       } finally {
         if (fetchIdRef.current === fetchId) {
+          loadingRef.current = false;
           setIsLoading(false);
         }
       }
@@ -370,29 +368,44 @@ export function useMerchantSubscriptions({
     [contractId, rpcUrl],
   );
 
-  // Fetch when publicKey changes
+  const scopeKey = publicKey ? `${publicKey}:${contractId}:${rpcUrl}` : null;
+
   useEffect(() => {
-    if (!publicKey) {
+    if (!publicKey || !scopeKey) {
       setSubscriptions([]);
       setError(null);
       setIsLoading(false);
+      setHasMore(false);
+      cursorRef.current = null;
       fetchedForRef.current = null;
       fetchIdRef.current++;
+      loadingRef.current = false;
       return;
     }
 
-    if (fetchedForRef.current === publicKey) return;
-    fetchedForRef.current = publicKey;
+    if (fetchedForRef.current === scopeKey) return;
+    fetchedForRef.current = scopeKey;
+    setSubscriptions([]);
+    setHasMore(false);
+    cursorRef.current = null;
     const id = ++fetchIdRef.current;
-    void fetchAll(publicKey, id);
-  }, [publicKey, fetchAll]);
+    void fetchPage(publicKey, null, false, id);
+  }, [publicKey, scopeKey, fetchPage]);
+
+  const loadMore = useCallback(() => {
+    if (!publicKey || loadingRef.current || !hasMore || !cursorRef.current) return;
+    void fetchPage(publicKey, cursorRef.current, true, fetchIdRef.current);
+  }, [publicKey, hasMore, fetchPage]);
 
   const refresh = useCallback(() => {
     if (!publicKey) return;
-    fetchedForRef.current = null;
+    fetchedForRef.current = scopeKey;
+    cursorRef.current = null;
+    setHasMore(false);
+    setSubscriptions([]);
     const id = ++fetchIdRef.current;
-    void fetchAll(publicKey, id);
-  }, [publicKey, fetchAll]);
+    void fetchPage(publicKey, null, false, id);
+  }, [publicKey, scopeKey, fetchPage]);
 
-  return { subscriptions, isLoading, error, refresh };
+  return { subscriptions, isLoading, error, hasMore, loadMore, refresh };
 }
