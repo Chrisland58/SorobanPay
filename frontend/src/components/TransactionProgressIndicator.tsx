@@ -38,6 +38,12 @@ export interface TransactionProgressIndicatorProps {
   isFailed?: boolean;
   /** Error message if failed */
   errorMessage?: string;
+  /** Current transaction confirmation state */
+  status?: "loading" | "success" | "failure" | "timeout" | "unknown";
+  /** Recheck a transaction whose status is unknown */
+  onRefresh?: () => void;
+  /** Whether a manual status refresh is currently running */
+  isRefreshing?: boolean;
 }
 
 function getStepIcon(status: TransactionProgressStep["status"]) {
@@ -86,10 +92,15 @@ export function TransactionProgressIndicator({
   estimatedTimeRemaining,
   isFailed = false,
   errorMessage,
+  status,
+  onRefresh,
+  isRefreshing = false,
 }: TransactionProgressIndicatorProps) {
   const completedSteps = steps.filter((s) => s.status === "completed").length;
   const totalSteps = steps.length;
-  const progressPercent = Math.round((completedSteps / totalSteps) * 100);
+  const progressPercent = totalSteps > 0 ? Math.round((completedSteps / totalSteps) * 100) : 0;
+  const currentStatus = status ?? (isFailed ? "failure" : "loading");
+  const statusUnknown = currentStatus === "timeout" || currentStatus === "unknown";
 
   return (
     <div className="w-full max-w-lg mx-auto p-6">
@@ -120,8 +131,13 @@ export function TransactionProgressIndicator({
         </div>
         <div className="w-full bg-gray-200 dark:bg-gray-700 rounded-full h-2 overflow-hidden">
           <div
+            role="progressbar"
+            aria-label="Transaction progress"
+            aria-valuemin={0}
+            aria-valuemax={100}
+            aria-valuenow={progressPercent}
             className={`h-full rounded-full transition-all duration-300 ${
-              isFailed ? "bg-red-500" : "bg-blue-500"
+              isFailed || currentStatus === "failure" ? "bg-red-500" : "bg-blue-500"
             }`}
             style={{ width: `${progressPercent}%` }}
           />
@@ -192,12 +208,34 @@ export function TransactionProgressIndicator({
       </div>
 
       {/* Error state */}
-      {isFailed && errorMessage && (
-        <div className="mb-6 p-4 rounded-lg bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800">
+      {(isFailed || currentStatus === "failure") && errorMessage && (
+        <div role="alert" className="mb-6 p-4 rounded-lg bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800">
           <p className="text-sm font-medium text-red-800 dark:text-red-200 mb-1">
             Transaction Failed
           </p>
           <p className="text-sm text-red-700 dark:text-red-300">{errorMessage}</p>
+        </div>
+      )}
+
+      {statusUnknown && (
+        <div role="alert" className="mb-6 p-4 rounded-lg bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800">
+          <p className="text-sm font-medium text-yellow-900 dark:text-yellow-200 mb-1">
+            Transaction status unknown
+          </p>
+          <p className="text-sm text-yellow-800 dark:text-yellow-300">
+            Confirmation timed out. Check the transaction status before trying again.
+          </p>
+          {onRefresh && (
+            <button
+              type="button"
+              onClick={onRefresh}
+              disabled={isRefreshing}
+              aria-label="Check transaction status again"
+              className="mt-3 rounded border border-yellow-700 px-3 py-2 text-sm font-medium text-yellow-900 hover:bg-yellow-100 disabled:opacity-60 dark:text-yellow-100 dark:hover:bg-yellow-900/40"
+            >
+              {isRefreshing ? "Checking status…" : "Check status again"}
+            </button>
+          )}
         </div>
       )}
 
@@ -229,11 +267,15 @@ export function TransactionProgressIndicator({
       )}
 
       {/* Info text */}
-      <div className="text-center text-xs text-gray-500 dark:text-gray-400">
+      <div role="status" aria-live="polite" className="text-center text-xs text-gray-500 dark:text-gray-400">
         <p>
-          {isFailed
+          {currentStatus === "success"
+            ? "Transaction confirmed."
+            : isFailed || currentStatus === "failure"
             ? "Please try again or contact support if the issue persists."
-            : "Please wait while your transaction is being confirmed on the blockchain."}
+            : statusUnknown
+              ? "Transaction details remain available in the explorer."
+              : "Please wait while your transaction is being confirmed on the blockchain."}
         </p>
       </div>
     </div>

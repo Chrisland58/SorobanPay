@@ -20,7 +20,7 @@
  *   Mainnet:  https://stellar.expert/explorer/public/tx/{hash}
  */
 
-import { useState, useCallback, useRef } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
 import { SorobanRpc } from '@stellar/stellar-sdk';
 import { NETWORK_NAME } from '@/constants/network';
 
@@ -88,9 +88,8 @@ export function buildExplorerUrl(txHash: string, networkName = NETWORK_NAME): st
 /**
  * Extract a human-readable error message from a failed Soroban transaction.
  *
- * Attempts to pull the contract error code from the result metadata XDR
- * (e.g. "Error(Contract, #7)" → "contract error #7") for display alongside
- * the raw result.
+ * Attempts to pull the contract error code from result metadata XDR while
+ * keeping the raw metadata payload out of user-facing errors.
  */
 export function extractFailureMessage(
   response: SorobanRpc.Api.GetTransactionResponse,
@@ -120,7 +119,7 @@ export function extractFailureMessage(
     return `Transaction failed on-chain: contract error #${code}`;
   }
 
-  return `Transaction failed on-chain: ${metaStr.slice(0, 120)}`;
+  return 'Transaction failed on-chain (details unavailable)';
 }
 
 // ── Hook ──────────────────────────────────────────────────────────────────────
@@ -145,7 +144,8 @@ export function useTransactionPoller(
   options: UseTransactionPollerOptions = {},
 ): {
   state: TransactionPollerState;
-  startPolling: (txHash: string, server: SorobanRpc.Server) => void;
+  startPolling: (txHash: string, server: SorobanRpc.Server, immediately?: boolean) => void;
+  refresh: () => void;
   reset: () => void;
 } {
   const { onSuccess, onFailed, onTimeout } = options;
@@ -157,23 +157,42 @@ export function useTransactionPoller(
     explorerUrl: null,
   });
 
-  // Track whether polling is active so we can cancel on unmount / reset
-  const activeRef = useRef(false);
+  const activeSessionRef = useRef<{
+    active: boolean;
+    txHash: string;
+    server: SorobanRpc.Server;
+    startedAt: number;
+    delay: number;
+  } | null>(null);
+  const lastRequestRef = useRef<{ txHash: string; server: SorobanRpc.Server } | null>(null);
+  const pollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const timeoutTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const cancelActivePolling = useCallback(() => {
+    if (activeSessionRef.current) activeSessionRef.current.active = false;
+    activeSessionRef.current = null;
+    if (pollTimerRef.current) clearTimeout(pollTimerRef.current);
+    if (timeoutTimerRef.current) clearTimeout(timeoutTimerRef.current);
+    pollTimerRef.current = null;
+    timeoutTimerRef.current = null;
+  }, []);
+
+  useEffect(() => () => cancelActivePolling(), [cancelActivePolling]);
 
   const reset = useCallback(() => {
-    activeRef.current = false;
+    cancelActivePolling();
+    lastRequestRef.current = null;
     setState({
       status: 'idle',
       txHash: null,
       errorMessage: null,
       explorerUrl: null,
     });
-  }, []);
+  }, [cancelActivePolling]);
 
   const startPolling = useCallback(
-    (txHash: string, server: SorobanRpc.Server) => {
-      // Cancel any previous poll
-      activeRef.current = false;
+    (txHash: string, server: SorobanRpc.Server, immediately = false) => {
+      cancelActivePolling();
 
       const explorerUrl = buildExplorerUrl(txHash);
 
@@ -184,91 +203,80 @@ export function useTransactionPoller(
         explorerUrl,
       });
 
-      // Mark this poll session as active
-      const sessionActive = { value: true };
-      activeRef.current = true;
+      const session = {
+        active: true,
+        txHash,
+        server,
+        startedAt: Date.now(),
+        delay: INITIAL_DELAY_MS,
+      };
+      activeSessionRef.current = session;
+      lastRequestRef.current = { txHash, server };
 
-      const startTime = Date.now();
-      let delay = INITIAL_DELAY_MS;
+      const finish = (
+        status: 'success' | 'failed' | 'timeout',
+        errorMessage: string | null = null,
+      ) => {
+        if (!session.active || activeSessionRef.current !== session) return;
+        session.active = false;
+        activeSessionRef.current = null;
+        if (pollTimerRef.current) clearTimeout(pollTimerRef.current);
+        if (timeoutTimerRef.current) clearTimeout(timeoutTimerRef.current);
+        pollTimerRef.current = null;
+        timeoutTimerRef.current = null;
+        setState((prev) => ({ ...prev, status, errorMessage }));
 
-      async function poll(): Promise<void> {
-        // Check for cancellation or timeout before each attempt
-        if (!sessionActive.value) return;
+        if (status === 'success') onSuccess?.(txHash);
+        if (status === 'failed') onFailed?.(errorMessage ?? 'Transaction failed', txHash);
+        if (status === 'timeout') onTimeout?.(txHash, explorerUrl);
+      };
 
-        if (Date.now() - startTime >= POLL_TIMEOUT_MS) {
-          setState((prev) => ({ ...prev, status: 'timeout' }));
-          onTimeout?.(txHash, explorerUrl);
+      const schedulePoll = (delay: number) => {
+        pollTimerRef.current = setTimeout(() => void poll(), delay);
+      };
+
+      const poll = async (): Promise<void> => {
+        if (!session.active || activeSessionRef.current !== session) return;
+        if (Date.now() - session.startedAt >= POLL_TIMEOUT_MS) {
+          finish('timeout');
           return;
         }
 
-        // Wait for the current backoff delay
-        await sleep(delay);
-
-        // Re-check after the sleep
-        if (!sessionActive.value) return;
-
-        let response: SorobanRpc.Api.GetTransactionResponse;
         try {
-          response = await server.getTransaction(txHash);
-        } catch (err) {
-          // RPC call itself failed — treat as retriable unless we've timed out
-          if (Date.now() - startTime >= POLL_TIMEOUT_MS) {
-            const msg =
-              err instanceof Error ? err.message : 'RPC error while polling';
-            setState((prev) => ({
-              ...prev,
-              status: 'failed',
-              errorMessage: msg,
-            }));
-            onFailed?.(msg, txHash);
+          const response = await server.getTransaction(txHash);
+          if (!session.active || activeSessionRef.current !== session) return;
+          if (Date.now() - session.startedAt >= POLL_TIMEOUT_MS) {
+            finish('timeout');
             return;
           }
-          // Otherwise back off and retry
-          delay = Math.min(delay * BACKOFF_FACTOR, MAX_DELAY_MS);
-          void poll();
-          return;
+
+          if (response.status === SorobanRpc.Api.GetTransactionStatus.SUCCESS) {
+            finish('success');
+            return;
+          }
+          if (response.status === SorobanRpc.Api.GetTransactionStatus.FAILED) {
+            finish('failed', extractFailureMessage(response));
+            return;
+          }
+        } catch {
+          if (!session.active || activeSessionRef.current !== session) return;
         }
 
-        if (!sessionActive.value) return;
-
-        if (response.status === SorobanRpc.Api.GetTransactionStatus.SUCCESS) {
-          setState((prev) => ({ ...prev, status: 'success' }));
-          onSuccess?.(txHash);
-          return;
-        }
-
-        if (response.status === SorobanRpc.Api.GetTransactionStatus.FAILED) {
-          const msg = extractFailureMessage(response);
-          setState((prev) => ({
-            ...prev,
-            status: 'failed',
-            errorMessage: msg,
-          }));
-          onFailed?.(msg, txHash);
-          return;
-        }
-
-        // NOT_FOUND — still in mempool. Back off and retry.
-        delay = Math.min(delay * BACKOFF_FACTOR, MAX_DELAY_MS);
-        void poll();
-      }
-
-      void poll();
-
-      // Return a cancel function that callers can invoke on unmount
-      return () => {
-        sessionActive.value = false;
-        activeRef.current = false;
+        session.delay = Math.min(session.delay * BACKOFF_FACTOR, MAX_DELAY_MS);
+        schedulePoll(session.delay);
       };
+
+      timeoutTimerRef.current = setTimeout(() => finish('timeout'), POLL_TIMEOUT_MS);
+      if (immediately) void poll();
+      else schedulePoll(session.delay);
     },
-    [onSuccess, onFailed, onTimeout],
+    [cancelActivePolling, onSuccess, onFailed, onTimeout],
   );
 
-  return { state, startPolling, reset };
-}
+  const refresh = useCallback(() => {
+    const request = lastRequestRef.current;
+    if (request) startPolling(request.txHash, request.server, true);
+  }, [startPolling]);
 
-// ── Utility ───────────────────────────────────────────────────────────────────
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+  return { state, startPolling, refresh, reset };
 }

@@ -69,6 +69,7 @@ import { useToast } from "@/components/Toast";
 import { useAddressBook } from "@/hooks/useAddressBook";
 import { AddressBookModal } from "@/components/AddressBookModal";
 import { AddressDisplay } from "@/components/AddressDisplay";// ─── Types ────────────────────────────────────────────────────────────────────
+import { TransactionProgressIndicator } from "@/components/TransactionProgressIndicator";
 
 interface SuccessData {
   txHash: string;
@@ -1441,7 +1442,6 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
 
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isConfirming, setIsConfirming] = useState(false);
-  const [confirmingTxHash, setConfirmingTxHash] = useState<string | null>(null);
   const [fieldErrors, setFieldErrors]   = useState<FieldErrors>({});
   const [errorSummaryFocusRequest, setErrorSummaryFocusRequest] = useState(0);
   const [txError, setTxError]           = useState<TxErrorInfo | null>(null);
@@ -1454,10 +1454,9 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
   const [cancelTxHash, setCancelTxHash] = useState<string | null>(null);
 
   // ── Transaction poller ──────────────────────────────────────────────────────
-  const { state: pollerState, startPolling } = useTransactionPoller({
+  const { state: pollerState, startPolling, refresh: refreshTransactionStatus } = useTransactionPoller({
     onSuccess: (txHash) => {
       setIsConfirming(false);
-      setConfirmingTxHash(null);
       setSuccessData({
         txHash,
         merchant: merchantAddress.trim(),
@@ -1470,7 +1469,6 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
     },
     onFailed: (errorMessage, txHash) => {
       setIsConfirming(false);
-      setConfirmingTxHash(null);
       const explorerUrl = buildExplorerUrl(txHash);
       setTxErrorExplorerUrl(explorerUrl);
       setTxError(classifyError(new Error(errorMessage)));
@@ -1483,17 +1481,9 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
       });
     },
     onTimeout: (txHash, explorerUrl) => {
-      setIsConfirming(false);
-      setConfirmingTxHash(null);
-      setTxErrorExplorerUrl(explorerUrl);
-      const timeoutMsg = `Transaction status unknown after 60 seconds. Hash: ${txHash}`;
-      setTxError(classifyError(new Error(timeoutMsg)));
-      const mapped = mapError(new Error(timeoutMsg));
       showToast({
         variant: 'error',
-        message: mapped.message,
-        action: mapped.action,
-        docsUrl: mapped.docsUrl,
+        message: `Transaction status is unknown. Check ${txHash} before retrying.`,
       });
     },
   });
@@ -1578,7 +1568,6 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
     setTxError(null);
     setTxErrorExplorerUrl(null);
     setIsConfirming(false);
-    setConfirmingTxHash(null);
     setFieldErrors({});
     setShowConfirm(false);
     setAllowanceResult(null);
@@ -1646,7 +1635,6 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
       );
       setIsSubmitting(false);
       setIsConfirming(true);
-      setConfirmingTxHash(txHash);
       startPolling(txHash, server);
     } catch (err) {
       const mapped = mapError(err);
@@ -1739,7 +1727,6 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
       // Transition to confirming state — show spinner with explorer link
       setIsSubmitting(false);
       setIsConfirming(true);
-      setConfirmingTxHash(txHash);
 
       // Phase 2: poll for confirmation (handled by useTransactionPoller callbacks above)
       startPolling(txHash, server);
@@ -2001,9 +1988,18 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
           animate="visible"
           exit="exit"
         >
-          <ProgressBar
-            phase="confirming"
-            explorerUrl={confirmingTxHash ? buildExplorerUrl(confirmingTxHash) : null}
+          <TransactionProgressIndicator
+            title="Confirming transaction"
+            description="Your transaction was submitted and is awaiting on-chain confirmation."
+            steps={[
+              { id: "submitted", label: "Transaction submitted", status: "completed" },
+              { id: "confirmation", label: "On-chain confirmation", status: "in-progress" },
+            ]}
+            currentStepIndex={1}
+            showExplorerLink={Boolean(pollerState.explorerUrl)}
+            explorerUrl={pollerState.explorerUrl ?? undefined}
+            status={pollerState.status === "timeout" ? "unknown" : "loading"}
+            onRefresh={pollerState.status === "timeout" ? refreshTransactionStatus : undefined}
           />
         </motion.div>
       )}
