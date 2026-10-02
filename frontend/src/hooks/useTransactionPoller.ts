@@ -20,7 +20,7 @@
  *   Mainnet:  https://stellar.expert/explorer/public/tx/{hash}
  */
 
-import { useState, useCallback, useRef } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
 import { SorobanRpc } from '@stellar/stellar-sdk';
 import { NETWORK_NAME } from '@/constants/network';
 
@@ -145,7 +145,7 @@ export function useTransactionPoller(
   options: UseTransactionPollerOptions = {},
 ): {
   state: TransactionPollerState;
-  startPolling: (txHash: string, server: SorobanRpc.Server) => void;
+  startPolling: (txHash: string, server: SorobanRpc.Server) => () => void;
   reset: () => void;
 } {
   const { onSuccess, onFailed, onTimeout } = options;
@@ -157,11 +157,11 @@ export function useTransactionPoller(
     explorerUrl: null,
   });
 
-  // Track whether polling is active so we can cancel on unmount / reset
-  const activeRef = useRef(false);
+  const cancelSessionRef = useRef<(() => void) | null>(null);
 
   const reset = useCallback(() => {
-    activeRef.current = false;
+    cancelSessionRef.current?.();
+    cancelSessionRef.current = null;
     setState({
       status: 'idle',
       txHash: null,
@@ -170,10 +170,15 @@ export function useTransactionPoller(
     });
   }, []);
 
+  useEffect(() => () => {
+    cancelSessionRef.current?.();
+    cancelSessionRef.current = null;
+  }, []);
+
   const startPolling = useCallback(
     (txHash: string, server: SorobanRpc.Server) => {
       // Cancel any previous poll
-      activeRef.current = false;
+      cancelSessionRef.current?.();
 
       const explorerUrl = buildExplorerUrl(txHash);
 
@@ -186,7 +191,13 @@ export function useTransactionPoller(
 
       // Mark this poll session as active
       const sessionActive = { value: true };
-      activeRef.current = true;
+      const cancelSession = () => {
+        sessionActive.value = false;
+        if (cancelSessionRef.current === cancelSession) {
+          cancelSessionRef.current = null;
+        }
+      };
+      cancelSessionRef.current = cancelSession;
 
       const startTime = Date.now();
       let delay = INITIAL_DELAY_MS;
@@ -211,6 +222,7 @@ export function useTransactionPoller(
         try {
           response = await server.getTransaction(txHash);
         } catch (err) {
+          if (!sessionActive.value) return;
           // RPC call itself failed — treat as retriable unless we've timed out
           if (Date.now() - startTime >= POLL_TIMEOUT_MS) {
             const msg =
@@ -255,11 +267,7 @@ export function useTransactionPoller(
 
       void poll();
 
-      // Return a cancel function that callers can invoke on unmount
-      return () => {
-        sessionActive.value = false;
-        activeRef.current = false;
-      };
+      return cancelSession;
     },
     [onSuccess, onFailed, onTimeout],
   );

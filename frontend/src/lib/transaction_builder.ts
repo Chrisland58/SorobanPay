@@ -213,7 +213,17 @@ export async function buildSignAndSubmitSubscribe(
   publicKey: string,
   networkPassphrase: string,
   rpcUrl: string,
+  signal?: AbortSignal,
 ): Promise<SubmitResult> {
+  const throwIfAborted = () => {
+    if (signal?.aborted) {
+      const error = new Error('Subscription submission cancelled');
+      error.name = 'AbortError';
+      throw error;
+    }
+  };
+
+  throwIfAborted();
   // 0. Normalize + validate addresses before making any network calls
   //    (non-retryable) — Issue #37: shared helper instead of a hand-rolled
   //    if/throw per field. Reassigning onto `params` means every downstream
@@ -227,7 +237,10 @@ export async function buildSignAndSubmitSubscribe(
 
   // 1. Fetch account with retry (up to 5 attempts, transient network issues)
   const account = await withBackoff(
-    () => server.getAccount(publicKey),
+    () => {
+      throwIfAborted();
+      return server.getAccount(publicKey);
+    },
     {
       maxRetries: 5,
       baseDelayMs: 300,
@@ -242,6 +255,7 @@ export async function buildSignAndSubmitSubscribe(
       },
     },
   );
+  throwIfAborted();
 
   // 2. Build transaction (local operation, no retry needed)
   const contract = new Contract(contractId);
@@ -267,7 +281,10 @@ export async function buildSignAndSubmitSubscribe(
   let preparedTx: ReturnType<typeof TransactionBuilder.fromXDR>;
   try {
     preparedTx = await withBackoff(
-      () => prepareTransactionWithDiagnostics(server, tx),
+      () => {
+        throwIfAborted();
+        return prepareTransactionWithDiagnostics(server, tx);
+      },
       {
         maxRetries: 3,
         baseDelayMs: 500,
@@ -286,9 +303,11 @@ export async function buildSignAndSubmitSubscribe(
     const msg = getErrorMessage(err);
     throw new Error(`Transaction preparation failed after retries: ${msg}`);
   }
+  throwIfAborted();
 
   // 4. Sign with Freighter (user action, no retry — if rejected, fail immediately)
   const signedXdr = await signTx(preparedTx.toXDR(), networkPassphrase);
+  throwIfAborted();
 
   const parsedTx = TransactionBuilder.fromXDR(signedXdr, networkPassphrase);
 
@@ -296,7 +315,10 @@ export async function buildSignAndSubmitSubscribe(
   let sendResult: SorobanRpc.Api.SendTransactionResponse;
   try {
     sendResult = await withBackoff(
-      () => server.sendTransaction(parsedTx),
+      () => {
+        throwIfAborted();
+        return server.sendTransaction(parsedTx);
+      },
       {
         maxRetries: 3,
         baseDelayMs: 500,
@@ -315,6 +337,7 @@ export async function buildSignAndSubmitSubscribe(
     const msg = getErrorMessage(err);
     throw new Error(`Transaction submission failed after retries: ${msg}`);
   }
+  throwIfAborted();
 
   if (sendResult.status === 'ERROR') {
     throw new Error(
