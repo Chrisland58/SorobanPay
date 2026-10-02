@@ -33,7 +33,7 @@ import { SubscriptionFormErrorSummary } from "@/components/SubscriptionFormInput
  *   Success → Connected/idle (click "Create another")
  */
 
-import { useState, useEffect, useCallback, type FormEvent } from "react";
+import { useState, useEffect, useCallback, useRef, type FormEvent } from "react";
 import { useWallet } from "@/hooks/useWallet";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { SkeletonForm } from "@/components/Skeleton";
@@ -46,7 +46,7 @@ import {
   clearPersistedFormData,
   useFormPersist,
 } from "@/hooks/useFormPersist";
-import { buildAndSubmitSubscribe } from "@/lib/transaction_builder";
+import { buildSignAndSubmitSubscribe } from "@/lib/transaction_builder";
 import { checkAllowance, type AllowanceResult } from "@/lib/allowance_checker";
 import { normalizeRpcError } from "@/lib/rpc_error_normalizer";
 import {
@@ -69,6 +69,7 @@ import { useToast } from "@/components/Toast";
 import { useAddressBook } from "@/hooks/useAddressBook";
 import { AddressBookModal } from "@/components/AddressBookModal";
 import { AddressDisplay } from "@/components/AddressDisplay";// ─── Types ────────────────────────────────────────────────────────────────────
+import { TransactionProgressIndicator } from "@/components/TransactionProgressIndicator";
 
 interface SuccessData {
   txHash: string;
@@ -1434,6 +1435,64 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
   const [tokenAddress, setTokenAddress]       = useState(initialValues?.tokenAddress ?? '');
   const [amount, setAmount]                   = useState(initialValues?.amount ?? '');
   const [interval, setInterval]               = useState(initialValues?.interval ?? String(DEFAULT_INTERVAL_SECONDS));
+  const submitAttemptIdRef = useRef(0);
+  const activeSubmitRef = useRef<{ id: number; publicKey: string; controller: AbortController } | null>(null);
+  const cancelPollingRef = useRef<(() => void) | null>(null);
+  const mountedRef = useRef(false);
+
+  useFormPersist({ merchantAddress, tokenAddress, amount, interval });
+
+  useEffect(() => {
+    if (initialValues) return;
+    const persisted = getPersistedFormData(String(DEFAULT_INTERVAL_SECONDS));
+    setMerchantAddress(persisted.merchantAddress);
+    setTokenAddress(persisted.tokenAddress);
+    setAmount(persisted.amount);
+    setInterval(persisted.interval);
+  }, [initialValues]);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      submitAttemptIdRef.current += 1;
+      activeSubmitRef.current?.controller.abort();
+      activeSubmitRef.current = null;
+      cancelPollingRef.current?.();
+      cancelPollingRef.current = null;
+    };
+  }, []);
+
+  function beginSubmitAttempt(subscriber: string) {
+    activeSubmitRef.current?.controller.abort();
+    cancelPollingRef.current?.();
+    cancelPollingRef.current = null;
+    const attempt = {
+      id: ++submitAttemptIdRef.current,
+      publicKey: subscriber,
+      controller: new AbortController(),
+    };
+    activeSubmitRef.current = attempt;
+    return attempt;
+  }
+
+  function isCurrentSubmitAttempt(attempt: { id: number; publicKey: string; controller: AbortController }) {
+    return mountedRef.current &&
+      activeSubmitRef.current?.id === attempt.id &&
+      !attempt.controller.signal.aborted;
+  }
+
+  useEffect(() => {
+    const attempt = activeSubmitRef.current;
+    if (attempt?.publicKey === publicKey) return;
+    attempt?.controller.abort();
+    if (attempt) activeSubmitRef.current = null;
+    cancelPollingRef.current?.();
+    cancelPollingRef.current = null;
+    setIsSubmitting(false);
+    setIsConfirming(false);
+    setConfirmingTxHash(null);
+  }, [publicKey]);
 
   // Issue #22 — track which address fields have been blurred so we can show
   // inline validation errors proactively (before the user hits submit).
@@ -1441,7 +1500,6 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
 
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isConfirming, setIsConfirming] = useState(false);
-  const [confirmingTxHash, setConfirmingTxHash] = useState<string | null>(null);
   const [fieldErrors, setFieldErrors]   = useState<FieldErrors>({});
   const [errorSummaryFocusRequest, setErrorSummaryFocusRequest] = useState(0);
   const [txError, setTxError]           = useState<TxErrorInfo | null>(null);
@@ -1454,10 +1512,9 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
   const [cancelTxHash, setCancelTxHash] = useState<string | null>(null);
 
   // ── Transaction poller ──────────────────────────────────────────────────────
-  const { state: pollerState, startPolling } = useTransactionPoller({
+  const { state: pollerState, startPolling, refresh: refreshTransactionStatus } = useTransactionPoller({
     onSuccess: (txHash) => {
       setIsConfirming(false);
-      setConfirmingTxHash(null);
       setSuccessData({
         txHash,
         merchant: merchantAddress.trim(),
@@ -1470,7 +1527,6 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
     },
     onFailed: (errorMessage, txHash) => {
       setIsConfirming(false);
-      setConfirmingTxHash(null);
       const explorerUrl = buildExplorerUrl(txHash);
       setTxErrorExplorerUrl(explorerUrl);
       setTxError(classifyError(new Error(errorMessage)));
@@ -1483,17 +1539,9 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
       });
     },
     onTimeout: (txHash, explorerUrl) => {
-      setIsConfirming(false);
-      setConfirmingTxHash(null);
-      setTxErrorExplorerUrl(explorerUrl);
-      const timeoutMsg = `Transaction status unknown after 60 seconds. Hash: ${txHash}`;
-      setTxError(classifyError(new Error(timeoutMsg)));
-      const mapped = mapError(new Error(timeoutMsg));
       showToast({
         variant: 'error',
-        message: mapped.message,
-        action: mapped.action,
-        docsUrl: mapped.docsUrl,
+        message: `Transaction status is unknown. Check ${txHash} before retrying.`,
       });
     },
   });
@@ -1578,7 +1626,6 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
     setTxError(null);
     setTxErrorExplorerUrl(null);
     setIsConfirming(false);
-    setConfirmingTxHash(null);
     setFieldErrors({});
     setShowConfirm(false);
     setAllowanceResult(null);
@@ -1627,6 +1674,7 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
    */
   async function handleRetry() {
     if (!publicKey) return;
+    const attempt = beginSubmitAttempt(publicKey);
     setTxError(null);
     setTxErrorExplorerUrl(null);
     setIsSubmitting(true);
@@ -1643,12 +1691,17 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
         publicKey,
         NETWORK_PASSPHRASE,
         RPC_URL,
+        attempt.controller.signal,
       );
+      if (!isCurrentSubmitAttempt(attempt)) return;
+      activeSubmitRef.current = null;
       setIsSubmitting(false);
       setIsConfirming(true);
       setConfirmingTxHash(txHash);
-      startPolling(txHash, server);
+      cancelPollingRef.current = startPolling(txHash, server);
     } catch (err) {
+      if (!isCurrentSubmitAttempt(attempt)) return;
+      activeSubmitRef.current = null;
       const mapped = mapError(err);
       setTxError(classifyError(err));
       showToast({ variant: 'error', message: mapped.message, action: mapped.action, docsUrl: mapped.docsUrl });
@@ -1716,6 +1769,7 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
     setShowConfirm(false);
     if (!publicKey) return;
 
+    const attempt = beginSubmitAttempt(publicKey);
     setIsSubmitting(true);
     setTxError(null);
     setTxErrorExplorerUrl(null);
@@ -1734,16 +1788,20 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
         publicKey,
         NETWORK_PASSPHRASE,
         RPC_URL,
+        attempt.controller.signal,
       );
+      if (!isCurrentSubmitAttempt(attempt)) return;
+      activeSubmitRef.current = null;
 
       // Transition to confirming state — show spinner with explorer link
       setIsSubmitting(false);
       setIsConfirming(true);
-      setConfirmingTxHash(txHash);
 
       // Phase 2: poll for confirmation (handled by useTransactionPoller callbacks above)
-      startPolling(txHash, server);
+      cancelPollingRef.current = startPolling(txHash, server);
     } catch (err) {
+      if (!isCurrentSubmitAttempt(attempt)) return;
+      activeSubmitRef.current = null;
       // Submission itself failed (signing rejected, RPC error, etc.)
       const mapped = mapError(err);
       setTxError(classifyError(err));
@@ -2001,9 +2059,22 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
           animate="visible"
           exit="exit"
         >
-          <ProgressBar
-            phase="confirming"
-            explorerUrl={confirmingTxHash ? buildExplorerUrl(confirmingTxHash) : null}
+          <TransactionProgressIndicator
+            title="Confirming transaction"
+            description="Your transaction was submitted and is awaiting on-chain confirmation."
+            steps={[
+              { id: "submitted", label: "Transaction submitted", status: "completed" },
+              {
+                id: "confirmation",
+                label: "On-chain confirmation",
+                status: pollerState.status === "timeout" ? "pending" : "in-progress",
+              },
+            ]}
+            currentStepIndex={1}
+            showExplorerLink={Boolean(pollerState.explorerUrl)}
+            explorerUrl={pollerState.explorerUrl ?? undefined}
+            status={pollerState.status === "timeout" ? "unknown" : "loading"}
+            onRefresh={pollerState.status === "timeout" ? refreshTransactionStatus : undefined}
           />
         </motion.div>
       )}

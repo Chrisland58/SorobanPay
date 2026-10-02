@@ -41,6 +41,14 @@ export interface PaymentHistoryTableProps {
   hasMore: boolean;
   onLoadMore: () => void;
   onRefresh: () => void;
+  /** Current visible page when page navigation is managed by the parent. */
+  currentPage?: number;
+  /** Whether a previous page is available in page-navigation mode. */
+  canGoPrevious?: boolean;
+  /** Whether a next page is available in page-navigation mode. */
+  canGoNext?: boolean;
+  onPreviousPage?: () => void;
+  onNextPage?: () => void;
   /** True when a wallet is connected — shows table vs. disconnected prompt */
   isConnected: boolean;
   /** "Testnet" or "Mainnet" — used for Stellar Expert links */
@@ -178,10 +186,19 @@ export default function PaymentHistoryTable({
   hasMore,
   onLoadMore,
   onRefresh,
+  currentPage = 1,
+  canGoPrevious = false,
+  canGoNext,
+  onPreviousPage,
+  onNextPage,
   isConnected,
   networkName = 'Testnet',
   getLabel = () => null,
 }: PaymentHistoryTableProps) {
+  const [focusedRowIndex, setFocusedRowIndex] = useState<number>(0);
+  const rowRefs = useRef<(HTMLTableRowElement | null)[]>([]);
+  const nextPageAvailable = canGoNext ?? hasMore;
+
   // 1. Disconnected
   if (!isConnected) {
     return <DisconnectedState />;
@@ -223,9 +240,6 @@ export default function PaymentHistoryTable({
   }
 
   // 5. Table with events
-  const [focusedRowIndex, setFocusedRowIndex] = useState<number>(0);
-  const rowRefs = useRef<(HTMLTableRowElement | null)[]>([]);
-
   const handleTableKeyDown = (e: KeyboardEvent<HTMLTableSectionElement>) => {
     if (events.length === 0) return;
     if (e.key === 'ArrowDown') {
@@ -312,17 +326,30 @@ export default function PaymentHistoryTable({
       </div>
 
       {/* Pagination */}
-      {hasMore && !isLoading && (
-        <div className="flex justify-center">
-          <button
-            type="button"
-            onClick={onLoadMore}
-            aria-label="Load more payment history events"
-            className="rounded-lg border border-gray-700 bg-gray-800 px-6 py-2.5 text-sm font-medium text-gray-300 hover:bg-gray-700 hover:text-white transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400"
-          >
-            Load more
-          </button>
-        </div>
+      {(canGoPrevious || nextPageAvailable) && !isLoading && (
+        <nav aria-label="Payment history pagination" className="flex items-center justify-center gap-4">
+          {canGoPrevious && onPreviousPage && (
+            <button
+              type="button"
+              onClick={onPreviousPage}
+              aria-label="Previous payment history page"
+              className="rounded-lg border border-gray-700 bg-gray-800 px-4 py-2.5 text-sm font-medium text-gray-300 hover:bg-gray-700 hover:text-white transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400"
+            >
+              Previous
+            </button>
+          )}
+          {onNextPage && <span aria-live="polite" className="text-xs text-gray-500">Page {currentPage}</span>}
+          {nextPageAvailable && (
+            <button
+              type="button"
+              onClick={onNextPage ?? onLoadMore}
+              aria-label={onNextPage ? 'Next payment history page' : 'Load more payment history events'}
+              className="rounded-lg border border-gray-700 bg-gray-800 px-6 py-2.5 text-sm font-medium text-gray-300 hover:bg-gray-700 hover:text-white transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400"
+            >
+              {onNextPage ? 'Next page' : 'Load more'}
+            </button>
+          )}
+        </nav>
       )}
 
       {isLoading && events.length > 0 && (
@@ -331,7 +358,7 @@ export default function PaymentHistoryTable({
         </p>
       )}
 
-      {!hasMore && events.length > 0 && !isLoading && (
+      {!nextPageAvailable && events.length > 0 && !isLoading && (
         <p className="text-center text-xs text-gray-600" aria-label="All payments loaded">
           All payments loaded
         </p>
