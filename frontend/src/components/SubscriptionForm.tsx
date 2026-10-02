@@ -1993,7 +1993,11 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
             description="Your transaction was submitted and is awaiting on-chain confirmation."
             steps={[
               { id: "submitted", label: "Transaction submitted", status: "completed" },
-              { id: "confirmation", label: "On-chain confirmation", status: "in-progress" },
+              {
+                id: "confirmation",
+                label: "On-chain confirmation",
+                status: pollerState.status === "timeout" ? "pending" : "in-progress",
+              },
             ]}
             currentStepIndex={1}
             showExplorerLink={Boolean(pollerState.explorerUrl)}
