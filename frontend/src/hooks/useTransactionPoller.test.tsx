@@ -109,13 +109,13 @@ describe('extractFailureMessage', () => {
     expect(msg).toContain('contract error #4');
   });
 
-  it('returns truncated XDR when no code pattern matches', () => {
+  it('does not expose raw XDR when no code pattern matches', () => {
     const response = {
       status: 'FAILED',
       resultMetaXdr: 'AAABBBCCC',
     } as unknown as SorobanRpc.Api.GetTransactionResponse;
     const msg = extractFailureMessage(response);
-    expect(msg).toContain('AAABBBCCC');
+    expect(msg).toBe('Transaction failed on-chain (details unavailable)');
   });
 });
 
