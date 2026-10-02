@@ -20,18 +20,71 @@
  */
 
 import Link from 'next/link';
+import { useCallback, useEffect, useState } from 'react';
 import { useWallet } from '@/hooks/useWallet';
 import { usePaymentHistory } from '@/hooks/usePaymentHistory';
 import PaymentHistoryTable from '@/components/PaymentHistoryTable';
 import { NETWORK_NAME } from '@/constants/network';
 
+const PAGE_SIZE = 20;
+
+function getPageFromUrl(): number {
+  const page = Number(new URLSearchParams(window.location.search).get('page'));
+  return Number.isSafeInteger(page) && page > 0 ? page : 1;
+}
+
 // ── Page ──────────────────────────────────────────────────────────────────────
 
 export default function HistoryPage() {
   const { publicKey } = useWallet();
+  const [currentPage, setCurrentPage] = useState(1);
 
   const { events, isLoading, error, hasMore, loadMore, refresh } =
     usePaymentHistory({ publicKey });
+
+  const syncPageFromUrl = useCallback(() => {
+    setCurrentPage(getPageFromUrl());
+  }, []);
+
+  useEffect(() => {
+    syncPageFromUrl();
+    window.addEventListener('popstate', syncPageFromUrl);
+    return () => window.removeEventListener('popstate', syncPageFromUrl);
+  }, [syncPageFromUrl]);
+
+  const updatePageUrl = useCallback((page: number, replace = false) => {
+    const url = new URL(window.location.href);
+    if (page === 1) url.searchParams.delete('page');
+    else url.searchParams.set('page', String(page));
+    window.history[replace ? 'replaceState' : 'pushState']({}, '', url);
+    setCurrentPage(page);
+  }, []);
+
+  const goToNextPage = useCallback(() => {
+    const nextPage = currentPage + 1;
+    updatePageUrl(nextPage);
+    if (events.length < nextPage * PAGE_SIZE) loadMore();
+  }, [currentPage, events.length, loadMore, updatePageUrl]);
+
+  const refreshHistory = useCallback(() => {
+    updatePageUrl(1, true);
+    refresh();
+  }, [refresh, updatePageUrl]);
+
+  useEffect(() => {
+    if (isLoading || currentPage === 1) return;
+    if (events.length < currentPage * PAGE_SIZE && hasMore) {
+      loadMore();
+      return;
+    }
+    if (!hasMore && events.length < currentPage * PAGE_SIZE) {
+      const lastPage = Math.max(1, Math.ceil(events.length / PAGE_SIZE));
+      updatePageUrl(lastPage, true);
+    }
+  }, [currentPage, events.length, hasMore, isLoading, loadMore, updatePageUrl]);
+
+  const pageEvents = events.slice((currentPage - 1) * PAGE_SIZE, currentPage * PAGE_SIZE);
+  const canGoNext = hasMore || events.length > currentPage * PAGE_SIZE;
 
   return (
     <main
@@ -105,12 +158,17 @@ export default function HistoryPage() {
         aria-live="polite"
       >
         <PaymentHistoryTable
-          events={events}
+          events={pageEvents}
           isLoading={isLoading}
           error={error}
           hasMore={hasMore}
           onLoadMore={loadMore}
-          onRefresh={refresh}
+          onRefresh={refreshHistory}
+          currentPage={currentPage}
+          canGoPrevious={currentPage > 1}
+          canGoNext={canGoNext}
+          onPreviousPage={() => updatePageUrl(currentPage - 1)}
+          onNextPage={goToNextPage}
           isConnected={!!publicKey}
           networkName={NETWORK_NAME}
         />
