@@ -22,7 +22,7 @@ jest.mock('@/hooks/useWallet', () => ({
 }));
 
 jest.mock('@/lib/transaction_builder', () => ({
-  buildAndSubmitSubscribe: () => new Promise(() => {}),
+  buildSignAndSubmitSubscribe: () => new Promise(() => {}),
 }));
 
 import SubscriptionForm from '@/components/SubscriptionForm';

@@ -312,34 +312,20 @@ describe('useTransactionPoller', () => {
     expect(result.current.state.txHash).toBeNull();
   });
 
-  it('clears polling timers on reset and unmount', () => {
+  it('cancels the scheduled RPC poll when unmounted', async () => {
     const server = makeServer(() => new Promise(() => {}));
     const { result, unmount } = renderHook(() => useTransactionPoller());
 
-    act(() => result.current.startPolling(MOCK_TX_HASH, server));
-    expect(jest.getTimerCount()).toBe(2);
-
-    act(() => result.current.reset());
-    expect(jest.getTimerCount()).toBe(0);
-
-    act(() => result.current.startPolling(MOCK_TX_HASH, server));
+    act(() => {
+      result.current.startPolling(MOCK_TX_HASH, server);
+    });
     unmount();
-    expect(jest.getTimerCount()).toBe(0);
-  });
-
-  it('refresh() immediately rechecks the last submitted transaction', async () => {
-    const getTransaction = jest.fn().mockResolvedValue({ status: 'NOT_FOUND' });
-    const server = { getTransaction } as unknown as SorobanRpc.Server;
-    const { result } = renderHook(() => useTransactionPoller());
-
-    act(() => result.current.startPolling(MOCK_TX_HASH, server));
-    act(() => result.current.refresh());
 
     await act(async () => {
+      jest.advanceTimersByTime(2_000);
       await Promise.resolve();
     });
-
-    expect(getTransaction).toHaveBeenCalledWith(MOCK_TX_HASH);
+    expect(server.getTransaction).not.toHaveBeenCalled();
   });
 
   it('explorerUrl is set to testnet URL during confirming', () => {
