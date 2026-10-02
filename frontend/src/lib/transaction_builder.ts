@@ -288,7 +288,7 @@ export async function buildSignAndSubmitSubscribe(
   }
 
   // 4. Sign with Freighter (user action, no retry — if rejected, fail immediately)
-  const signedXdr = await signTx(preparedTx.toXDR(), networkPassphrase);
+  const signedXdr = await signTx(preparedTx.toXDR(), networkPassphrase, publicKey);
 
   const parsedTx = TransactionBuilder.fromXDR(signedXdr, networkPassphrase);
 
