@@ -20,7 +20,7 @@ jest.mock('@/hooks/useWallet', () => ({
 // Controllable pending promise keeps isSubmitting=true until resolved
 let resolveSubmit: (v: { txHash: string }) => void;
 jest.mock('@/lib/transaction_builder', () => ({
-  buildAndSubmitSubscribe: () =>
+  buildSignAndSubmitSubscribe: () =>
     new Promise<{ txHash: string }>((res) => { resolveSubmit = res; }),
 }));
 

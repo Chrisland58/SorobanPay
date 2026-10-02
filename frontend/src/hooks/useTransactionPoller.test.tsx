@@ -312,6 +312,22 @@ describe('useTransactionPoller', () => {
     expect(result.current.state.txHash).toBeNull();
   });
 
+  it('cancels the scheduled RPC poll when unmounted', async () => {
+    const server = makeServer(() => new Promise(() => {}));
+    const { result, unmount } = renderHook(() => useTransactionPoller());
+
+    act(() => {
+      result.current.startPolling(MOCK_TX_HASH, server);
+    });
+    unmount();
+
+    await act(async () => {
+      jest.advanceTimersByTime(2_000);
+      await Promise.resolve();
+    });
+    expect(server.getTransaction).not.toHaveBeenCalled();
+  });
+
   it('explorerUrl is set to testnet URL during confirming', () => {
     const server = makeServer(() => new Promise(() => {}));
     const { result } = renderHook(() => useTransactionPoller());
