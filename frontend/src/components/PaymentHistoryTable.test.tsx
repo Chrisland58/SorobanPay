@@ -295,6 +295,42 @@ describe('PaymentHistoryTable', () => {
       );
       expect(screen.getByRole('status', { name: /loading more/i })).toBeInTheDocument();
     });
+
+    it('renders accessible previous and next page controls in page mode', () => {
+      render(
+        <PaymentHistoryTable
+          {...defaultProps({ events, hasMore: true })}
+          currentPage={2}
+          canGoPrevious
+          canGoNext
+          onPreviousPage={jest.fn()}
+          onNextPage={jest.fn()}
+        />,
+      );
+      expect(screen.getByRole('navigation', { name: /payment history pagination/i })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: /previous payment history page/i })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: /next payment history page/i })).toBeInTheDocument();
+      expect(screen.getByText('Page 2')).toBeInTheDocument();
+    });
+
+    it('invokes the supplied page-change handlers', () => {
+      const onPreviousPage = jest.fn();
+      const onNextPage = jest.fn();
+      render(
+        <PaymentHistoryTable
+          {...defaultProps({ events, hasMore: true })}
+          currentPage={2}
+          canGoPrevious
+          canGoNext
+          onPreviousPage={onPreviousPage}
+          onNextPage={onNextPage}
+        />,
+      );
+      fireEvent.click(screen.getByRole('button', { name: /previous payment history page/i }));
+      fireEvent.click(screen.getByRole('button', { name: /next payment history page/i }));
+      expect(onPreviousPage).toHaveBeenCalledTimes(1);
+      expect(onNextPage).toHaveBeenCalledTimes(1);
+    });
   });
 
   // ── Refresh button ───────────────────────────────────────────────────────
