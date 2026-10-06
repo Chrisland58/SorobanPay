@@ -32,6 +32,20 @@ updates:
     commit-message:
       prefix: "chore(frontend):"
 
+  # ── npm — root gas-estimation scripts ─────────────────────────────────────────
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "08:00"
+    labels:
+      - dependencies
+      - scripts
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore(scripts):"
+
   # ── npm — backend ──────────────────────────────────────────────────────────────
   - package-ecosystem: npm
     directory: /backend

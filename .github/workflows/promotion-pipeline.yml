@@ -96,6 +96,7 @@ jobs:
       - name: Build Soroban WASM contract
         run: |
           cargo build \
+            --locked \
             --manifest-path contracts/subscription/Cargo.toml \
             --target wasm32-unknown-unknown \
             --release
