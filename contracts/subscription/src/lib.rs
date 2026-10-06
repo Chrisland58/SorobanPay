@@ -8,9 +8,9 @@ use soroban_sdk::{contract, contractimpl, symbol_short, token, Address, BytesN, 
 
 use crate::error::ContractError;
 use crate::storage::{
-    get_protocol_fee_config, set_protocol_fee_config, subscription_key, DataKey,
-    ProtocolFeeConfig, SubscriptionData, CONTRACT_VERSION, CURRENT_SCHEMA_VERSION, MAX_AMOUNT,
-    MAX_FEE_BPS, MAX_TTL_LEDGERS, MIN_TTL_LEDGERS,
+    get_protocol_fee_config, has_execution_marker, set_protocol_fee_config, subscription_key,
+    write_execution_marker, DataKey, ProtocolFeeConfig, SubscriptionData, CONTRACT_VERSION,
+    CURRENT_SCHEMA_VERSION, MAX_AMOUNT, MAX_FEE_BPS, MAX_TTL_LEDGERS, MIN_TTL_LEDGERS,
 };
 
 /// Maximum number of subscribers allowed in a single `batch_execute_payment` call.
@@ -336,9 +336,8 @@ impl SubscriptionProtocol {
         env: Env,
         subscriber: Address,
         merchant: Address,
-        token: Address,
     ) -> BytesN<32> {
-        subscription_key(&env, &subscriber, &merchant, &token)
+        subscription_key(&env, &subscriber, &merchant)
     }
 
     /// Return all subscription key hashes indexed for a given merchant.
@@ -402,30 +401,8 @@ impl SubscriptionProtocol {
 
     /// Create or update a recurring payment subscription.
     ///
-    /// # Storage key
-    /// Uses `sha256(subscriber_xdr ++ merchant_xdr)` as the storage key —
-    /// a compact 32-byte `BytesN<32>` vs. the old ~70-byte two-Address tuple.
-    ///
-    /// # Authorization
-    /// Requires a valid signature from `subscriber`.
-    ///
-    /// # Parameters
-    /// - `subscriber`: Account charged on each interval.
-    /// - `merchant`:   Account receiving payments.
-    /// - `token`:      SEP-41 token contract address.
-    /// - `amount`:     Payment amount per interval. Must be > 0 and <= 10^18.
-    /// - `interval`:   Seconds between payments. Must be in [86400, 31536000].
-    /// - `strict`:     When `true`, rejects the subscription if the subscriber's
-    ///                 current SEP-41 allowance for this contract is below `amount`.
-    ///
-    /// # Errors
-    /// - `ContractError::SelfSubscription`       — `subscriber == merchant`.
-    /// - `ContractError::AmountMustBePositive`   — `amount <= 0`.
-    /// - `ContractError::AmountTooLarge`         — `amount > 10^18`.
-    /// - `ContractError::IntervalTooShort`       — `interval < 86400`.
-    /// - `ContractError::IntervalTooLong`        — `interval > 31536000`.
-    /// - `ContractError::InvalidTimestamp`       — ledger timestamp is zero or overflows.
-    /// - `ContractError::InsufficientAllowance`  — `strict == true` and `allowance < amount`.
+    /// Amount must be > 0 and <= 10^18. Interval must be in [86400, 31536000].
+    /// Set `strict=true` to reject if allowance < amount.
     pub fn subscribe(
         env: Env,
         subscriber: Address,
@@ -486,7 +463,7 @@ impl SubscriptionProtocol {
         };
 
         // Compact key (#347): sha256(subscriber_xdr ++ merchant_xdr).
-        let hash = subscription_key(&env, &subscriber, &merchant, &token);
+        let hash = subscription_key(&env, &subscriber, &merchant);
         let key = DataKey::Subscription(hash.clone());
         env.storage().persistent().set(&key, &data);
         env.storage()
@@ -617,7 +594,7 @@ impl SubscriptionProtocol {
     ) -> Result<(), ContractError> {
         subscriber.require_auth();
 
-        let hash = subscription_key(&env, &subscriber, &merchant, &token);
+        let hash = subscription_key(&env, &subscriber, &merchant);
         let key = DataKey::Subscription(hash);
         let mut data: SubscriptionData = env
             .storage()
@@ -668,7 +645,7 @@ impl SubscriptionProtocol {
     ) -> Result<(), ContractError> {
         subscriber.require_auth();
 
-        let hash = subscription_key(&env, &subscriber, &merchant, &token);
+        let hash = subscription_key(&env, &subscriber, &merchant);
         let key = DataKey::Subscription(hash);
         let mut data: SubscriptionData = env
             .storage()
@@ -723,7 +700,7 @@ impl SubscriptionProtocol {
     ) -> Result<(), ContractError> {
         merchant.require_auth();
 
-        let hash = subscription_key(&env, &subscriber, &merchant, &token);
+        let hash = subscription_key(&env, &subscriber, &merchant);
         let key = DataKey::Subscription(hash.clone());
         let mut data: SubscriptionData = env
             .storage()
@@ -747,6 +724,16 @@ impl SubscriptionProtocol {
         }
         if now < data.next_payment {
             return Err(ContractError::PaymentNotDue);
+        }
+
+        // ── Duplicate execution guard (#1083) ────────────────────────────────
+        // Check whether this (subscription_hash, payment_nonce) pair was already
+        // executed.  The marker is written to temporary storage after a successful
+        // transfer, so a retry that lands before next_payment is advanced would
+        // hit PaymentNotDue above.  This guard covers the narrow window where a
+        // transaction is submitted twice in the same ledger before state is flushed.
+        if has_execution_marker(&env, &hash, data.payment_nonce) {
+            return Err(ContractError::DuplicateExecution);
         }
 
         let contract_address = env.current_contract_address();
@@ -802,40 +789,13 @@ impl SubscriptionProtocol {
             .persistent()
             .extend_ttl(&key, MIN_TTL_LEDGERS, MAX_TTL_LEDGERS);
 
+        // Write execution marker for the NEW nonce so the next payment period is
+        // protected from same-nonce replay attacks once the nonce advances again.
+        // The marker for the OLD nonce (checked above) remains in temporary storage
+        // until its TTL expires, preventing late-arriving duplicate transactions.
+        write_execution_marker(&env, &hash, data.payment_nonce);
+
         events::emit_executed(&env, &subscriber, &merchant, &data.token, data.amount, data.payment_nonce);
-
-        Ok(())
-    }
-
-    pub fn expire_subscription(env: Env, subscriber: Address, merchant: Address) -> Result<(), ContractError> {
-        let hash = subscription_key(&env, &subscriber, &merchant);
-        let key = DataKey::Subscription(hash.clone());
-        let data: SubscriptionData = env.storage().persistent().get(&key).ok_or(ContractError::NoActiveSubscription)?;
-        let overdue_since = data.overdue_since.ok_or(ContractError::GracePeriodActive)?;
-        let now = ledger_timestamp(&env)?;
-        if now <= overdue_since.checked_add(data.grace_period).ok_or(ContractError::InvalidTimestamp)? { return Err(ContractError::GracePeriodActive); }
-        env.storage().persistent().remove(&key);
-        index_remove(&env, &merchant, &hash);
-        events::emit_expired(&env, &subscriber, &merchant);
-        Ok(())
-    }
-
-    /// Collect payments from multiple subscribers in a single transaction.
-    ///
-    /// Hard cap: at most [`BATCH_MAX_SIZE`] (50) subscribers per call.
-    ///
-    /// Sets `status` to `Cancelled` rather than removing the storage entry, preserving
-    /// the record for off-chain indexers and audit trails. The cancelled entry will
-    /// naturally expire via TTL after ~30 days with no further interaction.
-    ///
-    /// # Authorization
-    /// Requires a valid signature from `merchant` — authenticated once for the batch.
-    ///
-    /// # Fee split
-    ///
-    /// The same fee logic as [`execute_payment`] applies per subscriber: when a
-    /// protocol fee is configured the merchant receives `amount - fee` and the fee
-    /// collector receives `fee` for each successful payment in the batch.
     pub fn batch_execute_payment(
         env: Env,
         merchant: Address,
@@ -862,7 +822,7 @@ impl SubscriptionProtocol {
         let mut hashes_to_extend: Vec<soroban_sdk::BytesN<32>> = Vec::new(&env);
 
         for subscriber in subscribers.iter() {
-            let hash = subscription_key(&env, &subscriber, &merchant, &token);
+            let hash = subscription_key(&env, &subscriber, &merchant);
             let key = DataKey::Subscription(hash.clone());
 
             let mut data: SubscriptionData = match env.storage().persistent().get(&key) {
@@ -961,7 +921,7 @@ impl SubscriptionProtocol {
     ) -> Result<(), ContractError> {
         subscriber.require_auth();
 
-        let hash = subscription_key(&env, &subscriber, &merchant, &token);
+        let hash = subscription_key(&env, &subscriber, &merchant);
         let key = DataKey::Subscription(hash.clone());
         if !env.storage().persistent().has(&key) {
             return Err(ContractError::NoActiveSubscription);
@@ -1078,7 +1038,7 @@ impl SubscriptionProtocol {
         merchant: Address,
         token: Address,
     ) -> Option<SubscriptionData> {
-        let hash = subscription_key(&env, &subscriber, &merchant, &token);
+        let hash = subscription_key(&env, &subscriber, &merchant);
         let key = DataKey::Subscription(hash);
         let data = env.storage().persistent().get(&key)?;
         env.storage()
@@ -1121,3 +1081,6 @@ mod property_tests;
 
 #[cfg(test)]
 mod multi_token_tests;
+
+#[cfg(test)]
+mod regression_tests;

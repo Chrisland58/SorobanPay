@@ -24,15 +24,20 @@ import {
 } from '@stellar/stellar-sdk';
 import { SorobanRpc } from '@stellar/stellar-sdk';
 import { signTx } from './wallet_manager';
-import { isValidCAddress, isValidGAddress } from './validation';
+import { assertValidGAddress, assertValidCAddress } from './validation';
 import { normalizeRpcError } from './rpc_error_normalizer';
 import { checkAllowance, type AllowanceResult } from './allowance_checker';
+import { withBackoff, isRpcRetryable as isRetryable, getErrorMessage } from './backoff';
 
 // Re-export NormalizedRpcError so callers can import from one place.
 export type { NormalizedRpcError, RpcErrorCategory } from './rpc_error_normalizer';
 
 // Re-export AllowanceResult for callers that want structured allowance data.
 export type { AllowanceResult } from './allowance_checker';
+
+// Re-export typed network API — callers can resolve network config here.
+export { getNetworkConfig, NETWORK_CONFIGS } from './network_config';
+export type { StellarNetwork, NetworkConfig } from './network_config';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -89,6 +94,48 @@ export interface CancelResult {
   txHash: string;
 }
 
+/** Parameters for collecting a recurring payment from a single subscriber */
+export interface ExecutePaymentParams {
+  /** Subscriber Stellar G-address (the account being charged) */
+  subscriber: string;
+  /** Merchant Stellar G-address (the account receiving payment) */
+  merchant: string;
+}
+
+/** Result of a successful execute_payment transaction */
+export interface ExecutePaymentResult {
+  /** Transaction hash on Stellar network */
+  txHash: string;
+}
+
+/** A single entry in a batch payment collection request */
+export interface BatchPaymentEntry {
+  /** Subscriber Stellar G-address */
+  subscriber: string;
+  /** Merchant Stellar G-address */
+  merchant: string;
+}
+
+/** Per-entry result from a batch execute_payment run */
+export interface BatchPaymentEntryResult {
+  subscriber: string;
+  merchant: string;
+  /** Set on success */
+  txHash?: string;
+  /** Set on failure */
+  error?: string;
+}
+
+/** Aggregate result returned by buildAndSubmitBatchExecutePayment */
+export interface BatchExecutePaymentResult {
+  /** Individual outcome per (subscriber, merchant) pair */
+  results: BatchPaymentEntryResult[];
+  /** Number of entries that succeeded */
+  successCount: number;
+  /** Number of entries that failed */
+  failureCount: number;
+}
+
 /**
  * Intermediate result returned after the transaction is submitted but before
  * it has been confirmed. The caller should pass `txHash` and `server` to
@@ -141,13 +188,6 @@ export interface BatchExecutePaymentResult {
   failureCount: number;
 }
 
-// ── Constants ─────────────────────────────────────────────────────────────────
-
-/** @deprecated Use useTransactionPoller (exponential backoff) instead */
-const POLL_INTERVAL_MS = 1_000;
-/** @deprecated Use useTransactionPoller (exponential backoff) instead */
-const MAX_POLL_ATTEMPTS = 60; // 60 seconds total
-
 // ΓöÇΓöÇ Phase 1: build, sign, and submit ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
 /**
@@ -173,23 +213,34 @@ export async function buildSignAndSubmitSubscribe(
   publicKey: string,
   networkPassphrase: string,
   rpcUrl: string,
+  signal?: AbortSignal,
 ): Promise<SubmitResult> {
-  // 0. Validate addresses before making any network calls (non-retryable)
-  if (!isValidGAddress(params.subscriber)) {
-    throw new Error(`Invalid subscriber address: ${params.subscriber}`);
-  }
-  if (!isValidGAddress(params.merchant)) {
-    throw new Error(`Invalid merchant address: ${params.merchant}`);
-  }
-  if (!isValidCAddress(params.token)) {
-    throw new Error(`Invalid token contract address: ${params.token}`);
-  }
+  const throwIfAborted = () => {
+    if (signal?.aborted) {
+      const error = new Error('Subscription submission cancelled');
+      error.name = 'AbortError';
+      throw error;
+    }
+  };
+
+  throwIfAborted();
+  // 0. Normalize + validate addresses before making any network calls
+  //    (non-retryable) — Issue #37: shared helper instead of a hand-rolled
+  //    if/throw per field. Reassigning onto `params` means every downstream
+  //    use of params.subscriber/merchant/token (including the eventual
+  //    `new Address(...)` calls) gets the trimmed value, not the raw input.
+  params.subscriber = assertValidGAddress(params.subscriber, 'subscriber');
+  params.merchant = assertValidGAddress(params.merchant, 'merchant');
+  params.token = assertValidCAddress(params.token, 'token');
 
   const server = new SorobanRpc.Server(rpcUrl, { allowHttp: false });
 
   // 1. Fetch account with retry (up to 5 attempts, transient network issues)
   const account = await withBackoff(
-    () => server.getAccount(publicKey),
+    () => {
+      throwIfAborted();
+      return server.getAccount(publicKey);
+    },
     {
       maxRetries: 5,
       baseDelayMs: 300,
@@ -204,6 +255,7 @@ export async function buildSignAndSubmitSubscribe(
       },
     },
   );
+  throwIfAborted();
 
   // 2. Build transaction (local operation, no retry needed)
   const contract = new Contract(contractId);
@@ -229,7 +281,10 @@ export async function buildSignAndSubmitSubscribe(
   let preparedTx: ReturnType<typeof TransactionBuilder.fromXDR>;
   try {
     preparedTx = await withBackoff(
-      () => server.prepareTransaction(tx),
+      () => {
+        throwIfAborted();
+        return prepareTransactionWithDiagnostics(server, tx);
+      },
       {
         maxRetries: 3,
         baseDelayMs: 500,
@@ -248,9 +303,11 @@ export async function buildSignAndSubmitSubscribe(
     const msg = getErrorMessage(err);
     throw new Error(`Transaction preparation failed after retries: ${msg}`);
   }
+  throwIfAborted();
 
   // 4. Sign with Freighter (user action, no retry — if rejected, fail immediately)
   const signedXdr = await signTx(preparedTx.toXDR(), networkPassphrase);
+  throwIfAborted();
 
   const parsedTx = TransactionBuilder.fromXDR(signedXdr, networkPassphrase);
 
@@ -258,7 +315,10 @@ export async function buildSignAndSubmitSubscribe(
   let sendResult: SorobanRpc.Api.SendTransactionResponse;
   try {
     sendResult = await withBackoff(
-      () => server.sendTransaction(parsedTx),
+      () => {
+        throwIfAborted();
+        return server.sendTransaction(parsedTx);
+      },
       {
         maxRetries: 3,
         baseDelayMs: 500,
@@ -277,6 +337,7 @@ export async function buildSignAndSubmitSubscribe(
     const msg = getErrorMessage(err);
     throw new Error(`Transaction submission failed after retries: ${msg}`);
   }
+  throwIfAborted();
 
   if (sendResult.status === 'ERROR') {
     throw new Error(
@@ -343,15 +404,9 @@ export async function buildSignAndSubmitCancel(
   networkPassphrase: string,
   rpcUrl: string,
 ): Promise<SubmitResult> {
-  if (!isValidGAddress(params.subscriber)) {
-    throw new Error(`Invalid subscriber address: ${params.subscriber}`);
-  }
-  if (!isValidGAddress(params.merchant)) {
-    throw new Error(`Invalid merchant address: ${params.merchant}`);
-  }
-  if (!isValidCAddress(params.token)) {
-    throw new Error(`Invalid token contract address: ${params.token}`);
-  }
+  params.subscriber = assertValidGAddress(params.subscriber, 'subscriber');
+  params.merchant = assertValidGAddress(params.merchant, 'merchant');
+  params.token = assertValidCAddress(params.token, 'token');
 
   const strict = params.strict ?? false;
   const server = new SorobanRpc.Server(rpcUrl, { allowHttp: false });
@@ -428,7 +483,7 @@ export async function buildSignAndSubmitCancel(
   // 4. Prepare transaction (simulation + resource fee injection)
   let preparedTx: ReturnType<typeof TransactionBuilder.fromXDR>;
   try {
-    preparedTx = await server.prepareTransaction(tx);
+    preparedTx = await prepareTransactionWithDiagnostics(server, tx);
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
     // Wrap in a descriptive message so the normalizer can classify it, then
@@ -441,7 +496,16 @@ export async function buildSignAndSubmitCancel(
 
   // 6. Submit
   const parsedTx = TransactionBuilder.fromXDR(signedXdr, networkPassphrase);
-  const sendResult = await server.sendTransaction(parsedTx);
+  let sendResult: Awaited<ReturnType<typeof server.sendTransaction>>;
+  try {
+    sendResult = await server.sendTransaction(parsedTx);
+  } catch (err: unknown) {
+    throw new ContractLifecycleError(
+      ContractLifecycleErrorCode.SUBMISSION_FAILED,
+      `Transaction submission failed: ${err instanceof Error ? err.message : String(err)}`,
+      err,
+    );
+  }
 
   if (sendResult.status === 'ERROR') {
     throw normalizeRpcError(
@@ -457,44 +521,6 @@ export async function buildSignAndSubmitCancel(
   return { txHash, allowanceCheck };
 }
 
-// ── Legacy polling helper ─────────────────────────────────────────────────────
-
-/** @deprecated Use useTransactionPoller (exponential backoff) instead */
-async function pollForConfirmation(
-  server: SorobanRpc.Server,
-  hash: string,
-): Promise<string> {
-  for (let attempt = 0; attempt < MAX_POLL_ATTEMPTS; attempt++) {
-    await sleep(POLL_INTERVAL_MS);
-
-    const result = await server.getTransaction(hash);
-
-    if (result.status === SorobanRpc.Api.GetTransactionStatus.SUCCESS) {
-      return hash;
-    }
-
-    if (result.status === SorobanRpc.Api.GetTransactionStatus.FAILED) {
-      const meta = (result as SorobanRpc.Api.GetFailedTransactionResponse).resultMetaXdr;
-      throw normalizeRpcError(
-        new Error(
-          `Transaction failed on-chain: ${meta ?? 'no result meta available'}`
-        )
-      );
-    }
-
-    // status === NOT_FOUND ΓÇö still in mempool, continue polling
-  }
-
-  throw normalizeRpcError(
-    new Error(
-      `Transaction confirmation timeout after ${MAX_POLL_ATTEMPTS} seconds. Hash: ${hash}`
-    )
-  );
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
 
 // ΓöÇΓöÇ execute_payment builder ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
@@ -542,13 +568,9 @@ export async function buildAndSubmitExecutePayment(
   networkPassphrase: string,
   rpcUrl: string,
 ): Promise<ExecutePaymentResult> {
-  // Validate before any network calls (non-retryable)
-  if (!isValidGAddress(params.subscriber)) {
-    throw new Error(`Invalid subscriber address: ${params.subscriber}`);
-  }
-  if (!isValidGAddress(params.merchant)) {
-    throw new Error(`Invalid merchant address: ${params.merchant}`);
-  }
+  // Normalize + validate before any network calls (non-retryable)
+  params.subscriber = assertValidGAddress(params.subscriber, 'subscriber');
+  params.merchant = assertValidGAddress(params.merchant, 'merchant');
 
   const server = new SorobanRpc.Server(rpcUrl, { allowHttp: false });
 
@@ -570,18 +592,19 @@ export async function buildAndSubmitExecutePayment(
     },
   );
 
-  const contract = new Contract(contractId);
-
+  // Issue #35: type-safe wrapper instead of a hand-rolled contract.call() —
+  // each argument's Soroban type is declared once via the `arg.*` helpers,
+  // and a malformed argument is mapped through normalizeRpcError() the same
+  // way every other transaction-layer failure is.
   const tx = new TransactionBuilder(account, {
     fee: BASE_FEE,
     networkPassphrase,
   })
     .addOperation(
-      contract.call(
-        'execute_payment',
-        new Address(params.subscriber).toScVal(),
-        new Address(params.merchant).toScVal(),
-      ),
+      buildContractCall(contractId, 'execute_payment', [
+        arg.address(params.subscriber),
+        arg.address(params.merchant),
+      ]),
     )
     .setTimeout(30)
     .build();
@@ -590,7 +613,7 @@ export async function buildAndSubmitExecutePayment(
   let preparedTx: ReturnType<typeof TransactionBuilder.fromXDR>;
   try {
     preparedTx = await withBackoff(
-      () => server.prepareTransaction(tx),
+      () => prepareTransactionWithDiagnostics(server, tx),
       {
         maxRetries: 3,
         baseDelayMs: 500,
@@ -715,28 +738,34 @@ export async function buildAndSubmitBatchExecutePayment(
   const atomicGroups = new Map<string, BatchPaymentEntry[]>();
 
   for (const entry of entries) {
-    if (!isValidGAddress(entry.subscriber)) {
+    try {
+      assertValidGAddress(entry.subscriber, 'subscriber');
+    } catch (err: unknown) {
       output.push({
         subscriber: entry.subscriber,
         merchant: entry.merchant,
-        error: `Invalid subscriber address: ${entry.subscriber}`,
+        error: err instanceof Error ? err.message : String(err),
       });
       continue;
     }
-    if (!isValidGAddress(entry.merchant)) {
+    try {
+      assertValidGAddress(entry.merchant, 'merchant');
+    } catch (err: unknown) {
       output.push({
         subscriber: entry.subscriber,
         merchant: entry.merchant,
-        error: `Invalid merchant address: ${entry.merchant}`,
+        error: err instanceof Error ? err.message : String(err),
       });
       continue;
     }
     if (entry.token) {
-      if (!isValidCAddress(entry.token)) {
+      try {
+        assertValidCAddress(entry.token, 'token');
+      } catch (err: unknown) {
         output.push({
           subscriber: entry.subscriber,
           merchant: entry.merchant,
-          error: `Invalid token contract address: ${entry.token}`,
+          error: err instanceof Error ? err.message : String(err),
         });
         continue;
       }
@@ -856,7 +885,7 @@ async function submitAtomicBatchPayment(
     let preparedTx: ReturnType<typeof TransactionBuilder.fromXDR>;
     try {
       preparedTx = await withBackoff(
-        () => server.prepareTransaction(tx),
+        () => prepareTransactionWithDiagnostics(server, tx),
         {
           maxRetries: 3,
           baseDelayMs: 500,
@@ -1007,12 +1036,8 @@ export async function buildAndSubmitUpdateSubscription(
   rpcUrl: string,
 ): Promise<UpdateSubscriptionResult> {
   // Validate before any network calls — same rules as subscribe().
-  if (!isValidGAddress(params.subscriber)) {
-    throw new Error(`Invalid subscriber address: ${params.subscriber}`);
-  }
-  if (!isValidGAddress(params.merchant)) {
-    throw new Error(`Invalid merchant address: ${params.merchant}`);
-  }
+  params.subscriber = assertValidGAddress(params.subscriber, 'subscriber');
+  params.merchant = assertValidGAddress(params.merchant, 'merchant');
   if (!Number.isInteger(params.newAmount) || params.newAmount <= 0) {
     throw new Error('Amount must be a positive whole number');
   }
@@ -1048,7 +1073,7 @@ export async function buildAndSubmitUpdateSubscription(
 
   let preparedTx: ReturnType<typeof TransactionBuilder.fromXDR>;
   try {
-    preparedTx = await server.prepareTransaction(tx);
+    preparedTx = await prepareTransactionWithDiagnostics(server, tx);
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
     throw new Error(`Transaction preparation failed: ${msg}`);
@@ -1115,12 +1140,8 @@ export async function buildAndSubmitUpdateSubscription(
   networkPassphrase: string,
   rpcUrl: string,
 ): Promise<UpdateSubscriptionResult> {
-  if (!isValidGAddress(params.subscriber)) {
-    throw new Error(`Invalid subscriber address: ${params.subscriber}`);
-  }
-  if (!isValidGAddress(params.merchant)) {
-    throw new Error(`Invalid merchant address: ${params.merchant}`);
-  }
+  params.subscriber = assertValidGAddress(params.subscriber, 'subscriber');
+  params.merchant = assertValidGAddress(params.merchant, 'merchant');
   if (!Number.isInteger(params.newAmount) || params.newAmount <= 0) {
     throw new Error('Amount must be a positive integer.');
   }
@@ -1154,7 +1175,7 @@ export async function buildAndSubmitUpdateSubscription(
 
   let preparedTx: ReturnType<typeof TransactionBuilder.fromXDR>;
   try {
-    preparedTx = await server.prepareTransaction(tx);
+    preparedTx = await prepareTransactionWithDiagnostics(server, tx);
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
     throw new Error(`Transaction preparation failed: ${msg}`);
@@ -1218,15 +1239,9 @@ export async function buildAndSubmitTransferSubscription(
   networkPassphrase: string,
   rpcUrl: string,
 ): Promise<TransferSubscriptionResult> {
-  if (!isValidGAddress(params.subscriber)) {
-    throw new Error(`Invalid subscriber address: ${params.subscriber}`);
-  }
-  if (!isValidGAddress(params.oldMerchant)) {
-    throw new Error(`Invalid current merchant address: ${params.oldMerchant}`);
-  }
-  if (!isValidGAddress(params.newMerchant)) {
-    throw new Error(`Invalid new merchant address: ${params.newMerchant}`);
-  }
+  params.subscriber = assertValidGAddress(params.subscriber, 'subscriber');
+  params.oldMerchant = assertValidGAddress(params.oldMerchant, 'current merchant');
+  params.newMerchant = assertValidGAddress(params.newMerchant, 'new merchant');
   if (params.oldMerchant === params.newMerchant) {
     throw new Error(
       'Transfer failed: the new merchant must be different from the current merchant.',
@@ -1257,7 +1272,7 @@ export async function buildAndSubmitTransferSubscription(
 
   let preparedTx: ReturnType<typeof TransactionBuilder.fromXDR>;
   try {
-    preparedTx = await server.prepareTransaction(tx);
+    preparedTx = await prepareTransactionWithDiagnostics(server, tx);
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
     throw new Error(`Transaction preparation failed: ${msg}`);

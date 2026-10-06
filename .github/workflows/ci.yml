@@ -9,6 +9,9 @@ on:
   # Allow manual trigger (e.g., to run gas estimation or load tests on demand)
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   contract:
     name: Rust contract
@@ -25,6 +28,13 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: contracts/subscription
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+
+      - name: Security audit (cargo audit)
+        run: cargo audit --manifest-path contracts/subscription/Cargo.toml
+        working-directory: contracts/subscription
 
       - name: Build (wasm32 release)
         run: cargo build --manifest-path contracts/subscription/Cargo.toml --target wasm32-unknown-unknown --release
@@ -207,7 +217,7 @@ jobs:
           echo "::warning::Benchmark step failed (likely a testnet connectivity issue). Resource regression check was skipped. Re-run the workflow or check testnet availability."
 
   backend-integration:
-    name: Backend integration tests
+    name: Backend quality and integration tests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -221,6 +231,14 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
+        working-directory: backend
+
+      - name: Type check
+        run: npm run type-check
+        working-directory: backend
+
+      - name: Run unit tests
+        run: npm test -- --runInBand
         working-directory: backend
 
       - name: Run integration tests

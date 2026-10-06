@@ -1,4 +1,5 @@
 "use client";
+import { SubscriptionFormErrorSummary } from "@/components/SubscriptionFormInputs";
 
 /**
  * SubscriptionForm.tsx
@@ -32,7 +33,7 @@
  *   Success → Connected/idle (click "Create another")
  */
 
-import { useState, useEffect, useCallback, type FormEvent } from "react";
+import { useState, useEffect, useCallback, useRef, type FormEvent } from "react";
 import { useWallet } from "@/hooks/useWallet";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { SkeletonForm } from "@/components/Skeleton";
@@ -45,7 +46,7 @@ import {
   clearPersistedFormData,
   useFormPersist,
 } from "@/hooks/useFormPersist";
-import { buildAndSubmitSubscribe } from "@/lib/transaction_builder";
+import { buildSignAndSubmitSubscribe } from "@/lib/transaction_builder";
 import { checkAllowance, type AllowanceResult } from "@/lib/allowance_checker";
 import { normalizeRpcError } from "@/lib/rpc_error_normalizer";
 import {
@@ -68,6 +69,7 @@ import { useToast } from "@/components/Toast";
 import { useAddressBook } from "@/hooks/useAddressBook";
 import { AddressBookModal } from "@/components/AddressBookModal";
 import { AddressDisplay } from "@/components/AddressDisplay";// ─── Types ────────────────────────────────────────────────────────────────────
+import { TransactionProgressIndicator } from "@/components/TransactionProgressIndicator";
 
 interface SuccessData {
   txHash: string;
@@ -781,12 +783,39 @@ function ConfirmModal({
   onConfirm: () => void;
   onCancel: () => void;
 }) {
+  // Issue #21 — truncate long addresses for mobile-friendly display
+  const truncate = (addr: string) =>
+    addr.length > 16 ? `${addr.slice(0, 8)}…${addr.slice(-6)}` : addr;
+
   const days = Math.round(Number(interval) / 86400);
   return (
     <div
       role="dialog"
       aria-modal="true"
       aria-labelledby="confirm-title"
+      aria-describedby="confirm-subtitle"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4"
+    >
+      <div className="w-full max-w-md bg-gray-900 border border-gray-700 rounded-2xl shadow-2xl p-6 space-y-5 text-white">
+        {/* Issue #21 — header with icon for clarity */}
+        <div className="flex items-center gap-3">
+          <span className="text-2xl flex-shrink-0" aria-hidden="true">📋</span>
+          <div>
+            {/* autoFocus moves keyboard focus into the dialog on open */}
+            <h3
+              id="confirm-title"
+              className="text-lg font-bold leading-tight"
+              // eslint-disable-next-line jsx-a11y/no-autofocus
+              autoFocus
+              tabIndex={-1}
+            >
+              Review your subscription
+            </h3>
+            <p id="confirm-subtitle" className="text-sm text-gray-400 mt-0.5">
+              Confirm the details below before calling Freighter.
+            </p>
+          </div>
+        </div>
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4"
     >
       <div className="w-full max-w-md bg-gray-900 border border-gray-700 rounded-2xl shadow-2xl p-6 space-y-5 text-white">
@@ -805,6 +834,21 @@ function ConfirmModal({
           />
         )}
 
+        {/* Issue #21 — full summary: merchant, token, amount, interval */}
+        <dl className="bg-gray-800/60 rounded-lg divide-y divide-gray-700 text-sm">
+          {[
+            { label: "Merchant address", value: merchantAddress, truncated: truncate(merchantAddress), full: merchantAddress },
+            { label: "Token address",    value: tokenAddress,    truncated: truncate(tokenAddress),    full: tokenAddress },
+            { label: "Amount",           value: `${amount} tokens`, truncated: `${amount} tokens`,       full: null },
+            { label: "Interval",         value: `Every ${days} day${days !== 1 ? "s" : ""}`, truncated: `Every ${days} day${days !== 1 ? "s" : ""} (${Number(interval).toLocaleString()} s)`, full: null },
+          ].map(({ label, truncated, full }) => (
+            <div key={label} className="flex flex-col gap-0.5 px-4 py-3">
+              <dt className="text-xs text-gray-400 font-medium">{label}</dt>
+              <dd
+                className="font-mono text-xs text-gray-100 break-all"
+                title={full ?? undefined}
+              >
+                {truncated}
         <dl className="bg-gray-800/60 rounded-lg divide-y divide-gray-700 text-sm">
           {[
             ["Merchant", merchantAddress],
@@ -821,6 +865,7 @@ function ConfirmModal({
           ))}
         </dl>
 
+        {/* Issue #21 — Go Back first in tab order (logical: cancel before confirm) */}
         <div className="flex gap-3 pt-1">
           <button
             onClick={onCancel}
@@ -832,6 +877,7 @@ function ConfirmModal({
             onClick={onConfirm}
             className="flex-1 rounded-lg bg-blue-600 hover:bg-blue-500 active:bg-blue-700 py-3 text-sm font-semibold transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400"
           >
+            Confirm &amp; Authorize
             Confirm & Authorize
           </button>
         </div>
@@ -978,14 +1024,28 @@ function classifyError(err: unknown): TxErrorInfo {
   };
 }
 
+/**
+ * Issue #24 — Returns true when the error is a network/RPC/fetch error.
+ * Used to decide whether to show the Retry button in ErrorCard.
+ */
+function isNetworkError(error: TxErrorInfo): boolean {
+  return /network|rpc|fetch|failed to fetch|timeout|timed out/i.test(
+    `${error.title} ${error.raw}`,
+  );
+}
+
 function ErrorCard({
   error,
   onDismiss,
   explorerUrl,
+  onRetry,
 }: {
   error: TxErrorInfo;
   onDismiss: () => void;
   explorerUrl?: string | null;
+  /** Issue #24 — optional retry callback. When provided and the error is a
+   *  network error a prominent "Try Again" button is rendered. */
+  onRetry?: () => void;
 }) {
   const [showDetails, setShowDetails] = useState(false);
   const showConfig = /network|rpc|contract|passphrase/i.test(`${error.title} ${error.raw}`);
@@ -1081,6 +1141,39 @@ function ErrorCard({
             {error.raw}
           </pre>
           <CopyButton text={error.raw} label="Copy" />
+        </div>
+      )}
+      {/* Issue #24 — Retry button for network errors */}
+      {onRetry && isNetworkError(error) && (
+        <div className="mt-4 pt-3 border-t border-red-800/40">
+          <button
+            type="button"
+            onClick={() => { onDismiss(); onRetry(); }}
+            className="w-full flex items-center justify-center gap-2 rounded-lg
+                       bg-blue-600 hover:bg-blue-500 active:bg-blue-700
+                       py-3 text-sm font-semibold text-white transition-colors
+                       focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400
+                       focus-visible:ring-offset-2 focus-visible:ring-offset-gray-900"
+            aria-label="Retry the transaction"
+          >
+            <svg
+              xmlns="http://www.w3.org/2000/svg"
+              className="h-4 w-4"
+              viewBox="0 0 20 20"
+              fill="currentColor"
+              aria-hidden="true"
+            >
+              <path
+                fillRule="evenodd"
+                d="M4 2a1 1 0 011 1v2.101a7.002 7.002 0 0111.601 2.566 1 1 0 11-1.885.666A5.002 5.002 0 005.999 7H9a1 1 0 010 2H4a1 1 0 01-1-1V3a1 1 0 011-1zm.008 9.057a1 1 0 011.276.61A5.002 5.002 0 0014.001 13H11a1 1 0 110-2h5a1 1 0 011 1v5a1 1 0 11-2 0v-2.101a7.002 7.002 0 01-11.601-2.566 1 1 0 01.61-1.276z"
+                clipRule="evenodd"
+              />
+            </svg>
+            Try Again
+          </button>
+          <p className="mt-2 text-center text-xs text-gray-500">
+            Your form data has been preserved — no need to re-enter anything.
+          </p>
         </div>
       )}
     </div>
@@ -1342,11 +1435,73 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
   const [tokenAddress, setTokenAddress]       = useState(initialValues?.tokenAddress ?? '');
   const [amount, setAmount]                   = useState(initialValues?.amount ?? '');
   const [interval, setInterval]               = useState(initialValues?.interval ?? String(DEFAULT_INTERVAL_SECONDS));
+  const submitAttemptIdRef = useRef(0);
+  const activeSubmitRef = useRef<{ id: number; publicKey: string; controller: AbortController } | null>(null);
+  const cancelPollingRef = useRef<(() => void) | null>(null);
+  const mountedRef = useRef(false);
+
+  useFormPersist({ merchantAddress, tokenAddress, amount, interval });
+
+  useEffect(() => {
+    if (initialValues) return;
+    const persisted = getPersistedFormData(String(DEFAULT_INTERVAL_SECONDS));
+    setMerchantAddress(persisted.merchantAddress);
+    setTokenAddress(persisted.tokenAddress);
+    setAmount(persisted.amount);
+    setInterval(persisted.interval);
+  }, [initialValues]);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      submitAttemptIdRef.current += 1;
+      activeSubmitRef.current?.controller.abort();
+      activeSubmitRef.current = null;
+      cancelPollingRef.current?.();
+      cancelPollingRef.current = null;
+    };
+  }, []);
+
+  function beginSubmitAttempt(subscriber: string) {
+    activeSubmitRef.current?.controller.abort();
+    cancelPollingRef.current?.();
+    cancelPollingRef.current = null;
+    const attempt = {
+      id: ++submitAttemptIdRef.current,
+      publicKey: subscriber,
+      controller: new AbortController(),
+    };
+    activeSubmitRef.current = attempt;
+    return attempt;
+  }
+
+  function isCurrentSubmitAttempt(attempt: { id: number; publicKey: string; controller: AbortController }) {
+    return mountedRef.current &&
+      activeSubmitRef.current?.id === attempt.id &&
+      !attempt.controller.signal.aborted;
+  }
+
+  useEffect(() => {
+    const attempt = activeSubmitRef.current;
+    if (attempt?.publicKey === publicKey) return;
+    attempt?.controller.abort();
+    if (attempt) activeSubmitRef.current = null;
+    cancelPollingRef.current?.();
+    cancelPollingRef.current = null;
+    setIsSubmitting(false);
+    setIsConfirming(false);
+    setConfirmingTxHash(null);
+  }, [publicKey]);
+
+  // Issue #22 — track which address fields have been blurred so we can show
+  // inline validation errors proactively (before the user hits submit).
+  const [touchedFields, setTouchedFields] = useState<Record<string, boolean>>({});
 
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isConfirming, setIsConfirming] = useState(false);
-  const [confirmingTxHash, setConfirmingTxHash] = useState<string | null>(null);
   const [fieldErrors, setFieldErrors]   = useState<FieldErrors>({});
+  const [errorSummaryFocusRequest, setErrorSummaryFocusRequest] = useState(0);
   const [txError, setTxError]           = useState<TxErrorInfo | null>(null);
   const [txErrorExplorerUrl, setTxErrorExplorerUrl] = useState<string | null>(null);
   const [successData, setSuccessData]   = useState<SuccessData | null>(null);
@@ -1357,10 +1512,9 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
   const [cancelTxHash, setCancelTxHash] = useState<string | null>(null);
 
   // ── Transaction poller ──────────────────────────────────────────────────────
-  const { state: pollerState, startPolling } = useTransactionPoller({
+  const { state: pollerState, startPolling, refresh: refreshTransactionStatus } = useTransactionPoller({
     onSuccess: (txHash) => {
       setIsConfirming(false);
-      setConfirmingTxHash(null);
       setSuccessData({
         txHash,
         merchant: merchantAddress.trim(),
@@ -1373,7 +1527,6 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
     },
     onFailed: (errorMessage, txHash) => {
       setIsConfirming(false);
-      setConfirmingTxHash(null);
       const explorerUrl = buildExplorerUrl(txHash);
       setTxErrorExplorerUrl(explorerUrl);
       setTxError(classifyError(new Error(errorMessage)));
@@ -1386,17 +1539,9 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
       });
     },
     onTimeout: (txHash, explorerUrl) => {
-      setIsConfirming(false);
-      setConfirmingTxHash(null);
-      setTxErrorExplorerUrl(explorerUrl);
-      const timeoutMsg = `Transaction status unknown after 60 seconds. Hash: ${txHash}`;
-      setTxError(classifyError(new Error(timeoutMsg)));
-      const mapped = mapError(new Error(timeoutMsg));
       showToast({
         variant: 'error',
-        message: mapped.message,
-        action: mapped.action,
-        docsUrl: mapped.docsUrl,
+        message: `Transaction status is unknown. Check ${txHash} before retrying.`,
       });
     },
   });
@@ -1481,10 +1626,10 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
     setTxError(null);
     setTxErrorExplorerUrl(null);
     setIsConfirming(false);
-    setConfirmingTxHash(null);
     setFieldErrors({});
     setShowConfirm(false);
     setAllowanceResult(null);
+    setTouchedFields({});
     setMerchantAddress("");
     setTokenAddress("");
     setAmount("");
@@ -1522,6 +1667,66 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
     }
   }
 
+  /**
+   * Issue #24 — Retry handler for network errors.
+   * Clears the current error and re-submits using existing form values.
+   * Form data is preserved so the user doesn't need to re-enter anything.
+   */
+  async function handleRetry() {
+    if (!publicKey) return;
+    const attempt = beginSubmitAttempt(publicKey);
+    setTxError(null);
+    setTxErrorExplorerUrl(null);
+    setIsSubmitting(true);
+    try {
+      const { txHash, server } = await buildSignAndSubmitSubscribe(
+        {
+          subscriber: publicKey,
+          merchant: merchantAddress.trim(),
+          token: tokenAddress.trim(),
+          amount: Number(amount),
+          interval: Number(interval),
+        },
+        CONTRACT_ID,
+        publicKey,
+        NETWORK_PASSPHRASE,
+        RPC_URL,
+        attempt.controller.signal,
+      );
+      if (!isCurrentSubmitAttempt(attempt)) return;
+      activeSubmitRef.current = null;
+      setIsSubmitting(false);
+      setIsConfirming(true);
+      setConfirmingTxHash(txHash);
+      cancelPollingRef.current = startPolling(txHash, server);
+    } catch (err) {
+      if (!isCurrentSubmitAttempt(attempt)) return;
+      activeSubmitRef.current = null;
+      const mapped = mapError(err);
+      setTxError(classifyError(err));
+      showToast({ variant: 'error', message: mapped.message, action: mapped.action, docsUrl: mapped.docsUrl });
+      setIsSubmitting(false);
+    }
+   * Issue #22 — Proactive blur validation for address fields.
+   * When a user leaves a field (onBlur) we mark it as touched and
+   * immediately validate just that field, giving faster feedback than
+   * waiting for form submission.
+   */
+  function handleFieldBlur(field: keyof FieldErrors) {
+    setTouchedFields((prev) => ({ ...prev, [field]: true }));
+    const errors = validateSubscriptionForm({
+      merchantAddress,
+      tokenAddress,
+      amount,
+      interval,
+    });
+    // Only surface errors for fields the user has already interacted with.
+    setFieldErrors((prev) => ({
+      ...prev,
+      [field]: errors[field],
+    }));
+  }
+
   function handleSubmit(e: FormEvent) {
     e.preventDefault();
     setTxError(null);
@@ -1534,7 +1739,10 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
       interval,
     });
     setFieldErrors(errors);
-    if (!isFormValid(errors)) return;
+    if (!isFormValid(errors)) {
+      setErrorSummaryFocusRequest((request) => request + 1);
+      return;
+    }
     if (!publicKey) return;
 
     // Run the allowance check in the background while opening the confirm
@@ -1561,6 +1769,7 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
     setShowConfirm(false);
     if (!publicKey) return;
 
+    const attempt = beginSubmitAttempt(publicKey);
     setIsSubmitting(true);
     setTxError(null);
     setTxErrorExplorerUrl(null);
@@ -1579,16 +1788,20 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
         publicKey,
         NETWORK_PASSPHRASE,
         RPC_URL,
+        attempt.controller.signal,
       );
+      if (!isCurrentSubmitAttempt(attempt)) return;
+      activeSubmitRef.current = null;
 
       // Transition to confirming state — show spinner with explorer link
       setIsSubmitting(false);
       setIsConfirming(true);
-      setConfirmingTxHash(txHash);
 
       // Phase 2: poll for confirmation (handled by useTransactionPoller callbacks above)
-      startPolling(txHash, server);
+      cancelPollingRef.current = startPolling(txHash, server);
     } catch (err) {
+      if (!isCurrentSubmitAttempt(attempt)) return;
+      activeSubmitRef.current = null;
       // Submission itself failed (signing rejected, RPC error, etc.)
       const mapped = mapError(err);
       setTxError(classifyError(err));
@@ -1846,9 +2059,22 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
           animate="visible"
           exit="exit"
         >
-          <ProgressBar
-            phase="confirming"
-            explorerUrl={confirmingTxHash ? buildExplorerUrl(confirmingTxHash) : null}
+          <TransactionProgressIndicator
+            title="Confirming transaction"
+            description="Your transaction was submitted and is awaiting on-chain confirmation."
+            steps={[
+              { id: "submitted", label: "Transaction submitted", status: "completed" },
+              {
+                id: "confirmation",
+                label: "On-chain confirmation",
+                status: pollerState.status === "timeout" ? "pending" : "in-progress",
+              },
+            ]}
+            currentStepIndex={1}
+            showExplorerLink={Boolean(pollerState.explorerUrl)}
+            explorerUrl={pollerState.explorerUrl ?? undefined}
+            status={pollerState.status === "timeout" ? "unknown" : "loading"}
+            onRefresh={pollerState.status === "timeout" ? refreshTransactionStatus : undefined}
           />
         </motion.div>
       )}
@@ -1859,6 +2085,7 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
           error={txError}
           onDismiss={() => { setTxError(null); setTxErrorExplorerUrl(null); }}
           explorerUrl={txErrorExplorerUrl}
+          onRetry={handleRetry}
         />
       )}
 
@@ -1892,6 +2119,11 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
           aria-labelledby="form-heading"
           className="space-y-4"
         >
+          <SubscriptionFormErrorSummary
+            fieldErrors={fieldErrors}
+            focusRequest={errorSummaryFocusRequest}
+          />
+
           {/* Merchant address */}
           <div>
             <label
@@ -1912,6 +2144,8 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
               autoComplete="off"
               value={merchantAddress}
               onChange={(e) => setMerchantAddress(e.target.value)}
+              onChange={(e) => { setMerchantAddress(e.target.value); if (touchedFields.merchantAddress) handleFieldBlur('merchantAddress'); }}
+              onBlur={() => handleFieldBlur('merchantAddress')}
               disabled={isSubmitting || isConfirming}
               required
               aria-required="true"
@@ -1930,7 +2164,6 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
             {fieldErrors.merchantAddress && (
               <p
                 id="err-merchant"
-                role="alert"
                 className="mt-2 text-xs text-red-400 font-medium"
               >
                 {fieldErrors.merchantAddress}
@@ -1955,6 +2188,8 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
               id="tokenAddress"
               value={tokenAddress}
               onChange={setTokenAddress}
+              onChange={(v) => { setTokenAddress(v); if (touchedFields.tokenAddress) handleFieldBlur('tokenAddress'); }}
+              onBlur={() => handleFieldBlur('tokenAddress')}
               disabled={isSubmitting || isConfirming}
               hasError={!!fieldErrors.tokenAddress}
               tokens={getKnownTokens(NETWORK_NAME)}
@@ -1969,7 +2204,6 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
             {fieldErrors.tokenAddress && (
               <p
                 id="err-token"
-                role="alert"
                 className="mt-2 text-xs text-red-400 font-medium"
               >
                 {fieldErrors.tokenAddress}
@@ -2014,7 +2248,6 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
             {fieldErrors.amount && (
               <p
                 id="err-amount"
-                role="alert"
                 className="mt-2 text-xs text-red-400 font-medium"
               >
                 {fieldErrors.amount}
@@ -2067,7 +2300,7 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
               Required. The recurrence cadence for the subscription. Default is 30 days.
             </p>
             {intervalError && (
-              <p id="err-interval" role="alert" className="mt-2 text-xs text-red-400 font-medium">
+              <p id="err-interval" className="mt-2 text-xs text-red-400 font-medium">
                 {intervalError}
               </p>
             )}
