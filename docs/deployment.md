@@ -114,3 +114,13 @@ echo "Deployed: $CONTRACT_ID"
 | `NEXT_PUBLIC_NETWORK_PASSPHRASE` | ✅ | Stellar network passphrase — must match Freighter's selected network |
 
 Copy `frontend/.env.example` to `frontend/.env.local` and fill in the values above. See [README.md → Frontend → Configure environment variables](../README.md#2-configure-environment-variables) for the full setup walkthrough.
+
+## Deployment smoke checks and rollback
+
+Run `bash deploy/smoke_test.sh` to exercise the deployment script with disposable build and Stellar CLI stubs. It covers testnet/mainnet configuration, rejected networks, the unchanged-WASM guard and its explicit override, plus failed-deploy recovery. It does not deploy a contract, modify the checked-out manifest, or need a wallet, key, or production secret.
+
+The `Deployment smoke` pull-request workflow runs those offline scenarios with read-only repository permissions. It requires no GitHub secrets. Promotion workflows may additionally set `SMOKE_TARGET_URL` to an HTTPS service base URL; the smoke script requests `/health`, discards the response body, and rejects URLs containing credentials, query strings, or fragments. Keep this value as a trusted environment/repository variable, not user-controlled input.
+
+For an actual deployment, the deploy workflow uses `STELLAR_SECRET_KEY` to configure its Stellar identity. `DEPLOY_GITHUB_TOKEN` is only needed when repository protection prevents the default `GITHUB_TOKEN` from updating `deploy/deployments.json`.
+
+If a release must be rolled back, stop further promotion and redeploy the previously approved application configuration with its recorded contract ID from `deploy/deployments.json` (or the last known-good release). Soroban contract deployments and transactions are not reversed by this procedure; restoring the application pointer does not undo on-chain state or payments. Verify the restored service health before resuming promotion.
