@@ -38,4 +38,5 @@ jobs:
         run: cargo install cargo-audit --locked
 
       - name: Audit contract dependencies
-        run: cargo audit --manifest-path contracts/subscription/Cargo.toml
+        run: cargo audit
+        working-directory: contracts/subscription
