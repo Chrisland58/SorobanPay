@@ -14,6 +14,8 @@
 import { useEffect, useState } from 'react';
 import { SECTION_IDS } from '@/hooks/useKeyboardShortcuts';
 
+const ACTIVE_NAV_STORAGE_KEY = 'sorobanpay-mobile-nav-active';
+
 interface NavItem {
   id: string;
   label: string;
@@ -104,8 +106,24 @@ const NAV_ITEMS: NavItem[] = [
 export default function BottomNavBar() {
   const [active, setActive] = useState('home');
 
+  function setActiveAndPersist(id: string) {
+    setActive(id);
+    try {
+      window.sessionStorage.setItem(ACTIVE_NAV_STORAGE_KEY, id);
+    } catch {
+      // Navigation remains usable when storage is unavailable.
+    }
+  }
+
   // Track which section is in view via IntersectionObserver
   useEffect(() => {
+    try {
+      const saved = window.sessionStorage.getItem(ACTIVE_NAV_STORAGE_KEY);
+      if (NAV_ITEMS.some((item) => item.id === saved)) setActive(saved!);
+    } catch {
+      // Ignore storage failures and keep the default active item.
+    }
+
     const observers: IntersectionObserver[] = [];
 
     NAV_ITEMS.forEach((item) => {
@@ -115,7 +133,7 @@ export default function BottomNavBar() {
 
       const obs = new IntersectionObserver(
         ([entry]) => {
-          if (entry.isIntersecting) setActive(item.id);
+          if (entry.isIntersecting) setActiveAndPersist(item.id);
         },
         { rootMargin: '-40% 0px -40% 0px', threshold: 0 },
       );
@@ -127,14 +145,17 @@ export default function BottomNavBar() {
   }, []);
 
   function handleNav(item: NavItem) {
-    setActive(item.id);
+    setActiveAndPersist(item.id);
+    const behavior = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
+      ? 'auto'
+      : 'smooth';
     if (item.sectionId === 'top') {
-      window.scrollTo({ top: 0, behavior: 'smooth' });
+      window.scrollTo({ top: 0, behavior });
       return;
     }
     const el = document.getElementById(item.sectionId);
     if (el) {
-      el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      el.scrollIntoView({ behavior, block: 'start' });
       el.focus({ preventScroll: true });
     }
   }
@@ -164,14 +185,14 @@ export default function BottomNavBar() {
               py-2 px-1
               min-h-[56px] min-w-[44px]
               text-xs font-medium
-              transition-colors duration-150
+              transition-colors duration-150 motion-reduce:transition-none
               focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-400
               ${isActive
                 ? 'text-blue-500 dark:text-blue-400'
                 : 'text-gray-400 dark:text-gray-500 hover:text-gray-700 dark:hover:text-gray-300 active:text-gray-900 dark:active:text-gray-200'}
             `}
           >
-            <span className={`transition-transform duration-150 ${isActive ? 'scale-110' : ''}`}>
+            <span className={`transition-transform duration-150 motion-reduce:transition-none ${isActive ? 'scale-110' : ''}`}>
               {item.icon}
             </span>
             <span>{item.label}</span>
