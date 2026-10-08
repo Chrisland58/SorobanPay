@@ -71,7 +71,7 @@ jobs:
 
       - name: Upload test output as artifact
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: contract-regression-output
           path: /tmp/regression-output.txt
@@ -108,7 +108,7 @@ jobs:
 
       - name: Upload frontend coverage
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: frontend-payment-coverage
           path: frontend/coverage/
@@ -143,7 +143,7 @@ jobs:
 
       - name: Upload backend test output
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: backend-payment-regression-output
           path: /tmp/backend-regression-output.txt
