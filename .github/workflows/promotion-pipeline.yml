@@ -137,7 +137,7 @@ jobs:
           EOF
 
       - name: Upload artifact bundle
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: "sorobanpay-artifact-${{ steps.meta.outputs.artifact_id }}"
           path: |
@@ -398,7 +398,7 @@ jobs:
           echo "\`\`\`" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload promotion audit log
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: "promotion-audit-prod-${{ needs.build-artifact.outputs.artifact_id }}"
           path: deployment.env
