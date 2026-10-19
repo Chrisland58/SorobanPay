@@ -1084,3 +1084,6 @@ mod multi_token_tests;
 
 #[cfg(test)]
 mod regression_tests;
+
+#[cfg(test)]
+mod batch_execute_payment_tests;
