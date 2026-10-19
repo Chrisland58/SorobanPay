@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: SorobanPay Documentation
+    url: https://github.com/Chrisland58/SorobanPay/tree/main/docs
+    about: Browse the full documentation before opening an issue.
+  - name: Stellar Developer Docs
+    url: https://developers.stellar.org/docs
+    about: Questions about the Stellar / Soroban platform itself.
