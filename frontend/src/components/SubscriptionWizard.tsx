@@ -30,7 +30,9 @@ import {
   type KeyboardEvent,
 } from 'react';
 import { useWallet } from '@/hooks/useWallet';
+import { useAddressBook } from '@/hooks/useAddressBook';
 import { ErrorBoundary } from '@/components/ErrorBoundary';
+import { MerchantAddressInput } from '@/components/MerchantAddressInput';
 import { buildAndSubmitSubscribe } from '@/lib/transaction_builder';
 import {
   isValidGAddress,
@@ -152,10 +154,12 @@ function StepMerchant({
   value,
   onChange,
   onNext,
+  addressBook,
 }: {
   value: string;
   onChange: (v: string) => void;
   onNext: () => void;
+  addressBook: import('@/hooks/useAddressBook').UseAddressBookReturn;
 }) {
   const [error, setError] = useState('');
   const inputRef = useRef<HTMLInputElement>(null);
@@ -183,31 +187,27 @@ function StepMerchant({
         Choose a merchant
       </h3>
       <p className="text-sm text-gray-400 mb-5 leading-relaxed">
-        Enter the Stellar public key of the merchant you want to subscribe to.
+        Enter the Stellar public key of the merchant you want to subscribe to,
+        or pick one from your address book.
       </p>
 
       <div className="space-y-2">
         <label htmlFor="wiz-merchant" className="block text-sm font-semibold text-gray-200">
           Merchant address <span className="text-red-400" aria-hidden="true">*</span>
         </label>
-        <input
-          ref={inputRef}
+        <MerchantAddressInput
           id="wiz-merchant"
-          type="text"
-          placeholder="GABC…WXYZ"
-          autoComplete="off"
           value={value}
-          onChange={(e) => { onChange(e.target.value); if (error) setError(''); }}
-          onBlur={validate}
-          aria-required="true"
-          aria-invalid={!!error}
-          aria-describedby={error ? 'wiz-merchant-err' : 'wiz-merchant-hint'}
-          className={`${inputCls} ${error ? errorInputCls : ''}`}
+          onChange={(v) => { onChange(v); if (error) setError(''); }}
+          addressBook={addressBook}
+          hasError={!!error}
+          ariaDescribedBy={error ? 'wiz-merchant-err' : 'wiz-merchant-hint'}
         />
         {error
           ? <p id="wiz-merchant-err" role="alert" className="text-xs text-red-400 font-medium">{error}</p>
           : <p id="wiz-merchant-hint" className="text-xs text-gray-400">
               Starts with <code className="bg-gray-800 px-1 rounded text-gray-200">G</code>, 56 characters long.
+              Use the <span aria-hidden="true">📒</span> button to manage saved addresses.
             </p>
         }
       </div>
@@ -717,6 +717,7 @@ function WizardSuccess({
 
 function WizardShell() {
   const { publicKey } = useWallet();
+  const addressBook = useAddressBook(publicKey);
 
   const [step, setStep] = useState(1);
   const [form, setForm] = useState<WizardFormState>({
@@ -804,6 +805,7 @@ function WizardShell() {
           value={form.merchantAddress}
           onChange={(v) => update('merchantAddress', v)}
           onNext={goNext}
+          addressBook={addressBook}
         />
       ) : step === 2 ? (
         <StepTokenAmount
