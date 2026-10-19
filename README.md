@@ -882,6 +882,70 @@ npm run dev
 
 ---
 
+## Grafana Dashboard
+
+A pre-built Grafana dashboard for monitoring SorobanPay in production is provided at [`deploy/grafana/sorobanpay-dashboard.json`](deploy/grafana/sorobanpay-dashboard.json).
+
+### Dashboard Panels
+
+| # | Panel | Description |
+|---|-------|-------------|
+| 1 | **Events Indexed per Minute** | Rate of contract events (subscribe, executed, cancel, payment_transfer_failure) indexed per minute |
+| 2 | **Webhook Delivery Success Rate** | Percentage of webhook deliveries that received an HTTP 2xx response |
+| 3 | **RPC Poll Duration (p50/p95/p99)** | Latency of Soroban RPC `getEvents()` polling calls at the 50th, 95th, and 99th percentiles |
+| 4 | **Active Subscriptions** | Gauge of total active on-chain subscriptions tracked by the indexer |
+| 5 | **Payment Failure Rate** | Rate of `payment_transfer_failure` events per minute (insufficient-balance payments) |
+| 6 | **API Request Rate and Latency** | Backend REST API throughput (req/s) and p95 response latency |
+| 7 | **Pod CPU and Memory Usage** | CPU cores and memory (RSS) consumed by backend pods |
+| 8 | **DB Connection Pool Utilization** | Active vs. idle DB connections and pool utilization percentage |
+
+### Dashboard Variables
+
+| Variable | Description |
+|----------|-------------|
+| `datasource` | Prometheus datasource — select from the dropdown in the top-left |
+| `namespace` | Kubernetes namespace — auto-populated from the `sorobanpay_events_indexed_total` metric |
+
+### Importing the Dashboard
+
+**Via Grafana UI:**
+
+1. Open your Grafana instance and log in.
+2. In the left sidebar, click **Dashboards** → **Import**.
+3. Click **Upload dashboard JSON file** and select `deploy/grafana/sorobanpay-dashboard.json`.
+4. On the import screen, select your **Prometheus** datasource from the dropdown.
+5. Click **Import**.
+
+**Via Grafana API (automated):**
+
+```bash
+GRAFANA_URL=http://localhost:3000
+GRAFANA_TOKEN=<your-service-account-token>
+
+curl -X POST "$GRAFANA_URL/api/dashboards/import" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $GRAFANA_TOKEN" \
+  -d "{
+    \"dashboard\": $(cat deploy/grafana/sorobanpay-dashboard.json),
+    \"overwrite\": true,
+    \"folderId\": 0,
+    \"inputs\": [{\"name\": \"DS_PROMETHEUS\", \"type\": \"datasource\", \"pluginId\": \"prometheus\", \"value\": \"Prometheus\"}]
+  }"
+```
+
+**Via Grafana provisioning (GitOps / Helm):**
+
+Copy the file into your provisioning directory and Grafana will auto-import it on startup:
+
+```bash
+cp deploy/grafana/sorobanpay-dashboard.json \
+   /etc/grafana/provisioning/dashboards/sorobanpay-dashboard.json
+```
+
+Ensure your provisioning config (`/etc/grafana/provisioning/dashboards/default.yaml`) has the `path` set to the directory above. The dashboard UID is `sorobanpay-overview`.
+
+---
+
 ## License
 
 MIT
