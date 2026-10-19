@@ -11,27 +11,42 @@
  *  - Cursor-based pagination via the usePaymentHistory hook
  *  - 60-second localStorage cache to reduce RPC calls
  *  - Accessible table (WCAG 2.1 AA) via PaymentHistoryTable component
+ *  - Search and filter panel via PaymentHistoryFilters (issue #1435):
+ *      date range, event type multi-select, merchant address search,
+ *      amount range, token filter
+ *  - Filter state persisted in URL query params
+ *  - Client-side filtering for < 100 results; server-side notice above
  *  - Loading, empty, error, and disconnected states
  *  - Back-link to the home page
  *  - Network indicator (Testnet / Mainnet)
- *
- * Keyboard shortcut H on the home page scrolls to the placeholder section
- * which contains a link to this page.
  */
 
+import { Suspense } from 'react';
 import Link from 'next/link';
 import { useWallet } from '@/hooks/useWallet';
 import { usePaymentHistory } from '@/hooks/usePaymentHistory';
+import { usePaymentHistoryFilters, SERVER_THRESHOLD } from '@/hooks/usePaymentHistoryFilters';
 import PaymentHistoryTable from '@/components/PaymentHistoryTable';
+import { PaymentHistoryFilters } from '@/components/PaymentHistoryFilters';
 import { NETWORK_NAME } from '@/constants/network';
 
-// ── Page ──────────────────────────────────────────────────────────────────────
+// ── Inner page (needs useSearchParams, wrapped in Suspense below) ─────────────
 
-export default function HistoryPage() {
+function HistoryPageInner() {
   const { publicKey } = useWallet();
 
   const { events, isLoading, error, hasMore, loadMore, refresh } =
     usePaymentHistory({ publicKey });
+
+  const {
+    filters,
+    setFilter,
+    toggleEventType,
+    clearFilters,
+    hasActiveFilters,
+    filteredEvents,
+    needsServerFilter,
+  } = usePaymentHistoryFilters(events);
 
   return (
     <main
@@ -98,6 +113,34 @@ export default function HistoryPage() {
         </div>
       )}
 
+      {/* ── Filter panel ────────────────────────────────────────────────── */}
+      {publicKey && (
+        <div className="w-full max-w-4xl mb-6">
+          <PaymentHistoryFilters
+            filters={filters}
+            onFilterChange={setFilter}
+            onToggleEventType={toggleEventType}
+            onClear={clearFilters}
+            hasActiveFilters={hasActiveFilters}
+            totalCount={events.length}
+            filteredCount={filteredEvents.length}
+          />
+
+          {/* Server-side filter notice */}
+          {needsServerFilter && hasActiveFilters && (
+            <p
+              role="status"
+              aria-live="polite"
+              className="mt-2 text-xs text-yellow-400"
+            >
+              {events.length}+ results loaded — server-side filtering applies.
+              Showing all {events.length} events; refine your date range to
+              narrow results via the RPC.
+            </p>
+          )}
+        </div>
+      )}
+
       {/* ── Table section ───────────────────────────────────────────────── */}
       <section
         className="w-full max-w-4xl"
@@ -105,10 +148,12 @@ export default function HistoryPage() {
         aria-live="polite"
       >
         <PaymentHistoryTable
-          events={events}
+          events={
+            needsServerFilter || !hasActiveFilters ? events : filteredEvents
+          }
           isLoading={isLoading}
           error={error}
-          hasMore={hasMore}
+          hasMore={hasMore && !hasActiveFilters}
           onLoadMore={loadMore}
           onRefresh={refresh}
           isConnected={!!publicKey}
@@ -123,10 +168,21 @@ export default function HistoryPage() {
           <code className="rounded bg-gray-800 px-1 text-gray-400">executed</code>{' '}
           events for your account from the SorobanPay contract on{' '}
           <span className="text-gray-500">{NETWORK_NAME}</span>.{' '}
-          Results are cached for 60 seconds. Use the refresh button to fetch the
-          latest data.
+          Results are cached for 60 seconds. Filters below {SERVER_THRESHOLD}{' '}
+          results are applied client-side; above that threshold the RPC
+          is queried with date range parameters.
         </p>
       </div>
     </main>
+  );
+}
+
+// ── Page export (Suspense boundary for useSearchParams) ───────────────────────
+
+export default function HistoryPage() {
+  return (
+    <Suspense fallback={null}>
+      <HistoryPageInner />
+    </Suspense>
   );
 }
