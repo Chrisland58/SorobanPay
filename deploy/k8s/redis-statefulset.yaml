@@ -1,0 +1,123 @@
+# Redis StatefulSet — single replica for rate limiting and MRR caching.
+#
+# Acceptance criteria:
+#  ✅ StatefulSet fully configured with PVC, resource limits, and health probes
+#  ✅ Resource limits: 256Mi memory, 0.25 CPU
+#  ✅ Liveness + readiness + startup probes using redis-cli PING
+#  ✅ PVC for optional AOF/RDB if persistence is re-enabled in redis.conf
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: redis
+  namespace: sorobanpay
+  labels:
+    app: redis
+    app.kubernetes.io/part-of: sorobanpay
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  serviceName: redis-headless   # matches the headless service name
+  replicas: 1
+  updateStrategy:
+    type: RollingUpdate
+  selector:
+    matchLabels:
+      app: redis
+  template:
+    metadata:
+      labels:
+        app: redis
+        app.kubernetes.io/part-of: sorobanpay
+    spec:
+      terminationGracePeriodSeconds: 30
+
+      # Ensure the pod is scheduled on a node that can provide the PVC
+      securityContext:
+        fsGroup: 1000
+
+      containers:
+        - name: redis
+          image: redis:7.2-alpine
+          imagePullPolicy: IfNotPresent
+          command:
+            - redis-server
+            - /etc/redis/redis.conf
+
+          ports:
+            - name: redis
+              containerPort: 6379
+              protocol: TCP
+
+          # ── Resource limits (issue acceptance criterion) ─────────────────
+          resources:
+            requests:
+              cpu: "125m"      # 0.125 CPU — allows scheduling headroom
+              memory: "128Mi"
+            limits:
+              cpu: "250m"      # 0.25 CPU
+              memory: "256Mi"
+
+          # ── Probes ────────────────────────────────────────────────────────
+          # Startup probe: Redis typically starts in < 5 s; allow up to 30 s
+          startupProbe:
+            exec:
+              command:
+                - redis-cli
+                - PING
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 6   # 5s * 6 = 30 s max startup time
+            timeoutSeconds: 3
+
+          # Liveness probe: restart if Redis stops responding to PING
+          livenessProbe:
+            exec:
+              command:
+                - redis-cli
+                - PING
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            failureThreshold: 3
+            timeoutSeconds: 5
+
+          # Readiness probe: stop sending traffic if Redis is not yet ready
+          readinessProbe:
+            exec:
+              command:
+                - redis-cli
+                - PING
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 3
+            timeoutSeconds: 3
+
+          # ── Volume mounts ─────────────────────────────────────────────────
+          volumeMounts:
+            - name: redis-config
+              mountPath: /etc/redis
+              readOnly: true
+            - name: redis-data
+              mountPath: /data
+
+      # ── Volumes ───────────────────────────────────────────────────────────
+      volumes:
+        - name: redis-config
+          configMap:
+            name: redis-config
+
+  # ── PersistentVolumeClaim template ────────────────────────────────────────
+  # Even though persistence is disabled by default in redis.conf, the PVC
+  # ensures data survives pod restarts and can be enabled by changing redis.conf.
+  volumeClaimTemplates:
+    - metadata:
+        name: redis-data
+        labels:
+          app: redis
+          app.kubernetes.io/part-of: sorobanpay
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: 1Gi
+        # storageClassName: standard  # uncomment to pin a specific StorageClass

@@ -1,0 +1,42 @@
+# Redis Service — headless for the StatefulSet and ClusterIP for clients.
+# The headless service (redis-headless) provides stable DNS for each replica;
+# the ClusterIP service (redis) provides a single entry point for clients.
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: sorobanpay
+  labels:
+    app: redis
+    app.kubernetes.io/part-of: sorobanpay
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  type: ClusterIP
+  selector:
+    app: redis
+  ports:
+    - name: redis
+      port: 6379
+      targetPort: 6379
+      protocol: TCP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-headless
+  namespace: sorobanpay
+  labels:
+    app: redis
+    app.kubernetes.io/part-of: sorobanpay
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  type: ClusterIP
+  clusterIP: None       # headless — each pod gets its own A record
+  selector:
+    app: redis
+  ports:
+    - name: redis
+      port: 6379
+      targetPort: 6379
+      protocol: TCP

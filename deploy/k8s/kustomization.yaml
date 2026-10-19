@@ -16,3 +16,8 @@ resources:
   - network-policy-indexer.yaml
   - network-policy-webhook-worker.yaml
   - network-policy-postgresql.yaml
+
+  # Redis — rate limiting and MRR analytics cache
+  - redis-config.yaml
+  - redis-service.yaml
+  - redis-statefulset.yaml

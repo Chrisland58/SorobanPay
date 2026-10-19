@@ -1,10 +1,15 @@
-# Kubernetes Network Policies — SorobanPay
+# Kubernetes Manifests — SorobanPay
 
-This directory contains [Kubernetes NetworkPolicy](https://kubernetes.io/docs/concepts/services-networking/network-policies/)
-resources that restrict pod-to-pod communication in the SorobanPay cluster
+This directory contains Kubernetes manifests for deploying SorobanPay backend
+services to a cluster.
+
+## Network Policies (issue #1441)
+
+[NetworkPolicy](https://kubernetes.io/docs/concepts/services-networking/network-policies/)
+resources restrict pod-to-pod communication in the `sorobanpay` namespace
 to only what is needed for the application to function.
 
-## Prerequisites
+### Prerequisites
 
 - A CNI (Container Network Interface) plugin that enforces NetworkPolicy,
   e.g. [Calico](https://docs.tigera.io/calico), [Cilium](https://cilium.io),
@@ -13,7 +18,7 @@ to only what is needed for the application to function.
 - `kubectl` configured against the target cluster.
 - [kustomize](https://kustomize.io) (built into `kubectl` ≥ 1.14).
 
-## Policy overview
+### Policy overview
 
 | Policy | Applies to | Ingress | Egress |
 |--------|-----------|---------|--------|
@@ -52,48 +57,32 @@ only the ports and destinations required for that workload.
                      External HTTPS (webhooks)
 ```
 
-## Apply
+### Apply
 
 ```bash
 kubectl apply -k deploy/k8s/
 ```
 
-Or, if you maintain a base `kustomization.yaml` higher in the tree, add the
-`deploy/k8s/` directory as a resource:
+### Verify
 
-```yaml
-# kustomization.yaml (top-level)
-resources:
-  - deploy/k8s/
-```
-
-### Namespace label
-
-The `default-deny-all` policy uses a namespace selector to allow DNS egress
-to the `kube-system` namespace. The CNI must populate the
-`kubernetes.io/metadata.name` label, which is standard for Calico and Cilium
-clusters running Kubernetes ≥ 1.21.
-
-## Verify
-
-### List policies
+#### List policies
 
 ```bash
 kubectl get networkpolicies -n sorobanpay
 ```
 
-### Describe a policy
+#### Describe a policy
 
 ```bash
 kubectl describe networkpolicy api-network-policy -n sorobanpay
 ```
 
-## Testing in minikube with Calico CNI
+### Testing in minikube with Calico CNI
 
 This section reproduces the acceptance criterion: _Tested in minikube with
 Calico CNI_.
 
-### 1. Start minikube with Calico
+#### 1. Start minikube with Calico
 
 ```bash
 minikube start --cni=calico --cpus=2 --memory=4096
@@ -105,14 +94,14 @@ Confirm Calico is running:
 kubectl get pods -n kube-system -l k8s-app=calico-node
 ```
 
-### 2. Create the `sorobanpay` namespace and label it
+#### 2. Create the `sorobanpay` namespace and label it
 
 ```bash
 kubectl create namespace sorobanpay
 kubectl label namespace sorobanpay kubernetes.io/metadata.name=sorobanpay
 ```
 
-### 3. Deploy test pods with matching labels
+#### 3. Deploy test pods with matching labels
 
 ```bash
 # PostgreSQL stub pod
@@ -141,13 +130,13 @@ kubectl run webhook-worker --image=busybox \
   --command -- sleep 3600
 ```
 
-### 4. Apply the network policies
+#### 4. Apply the network policies
 
 ```bash
 kubectl apply -k deploy/k8s/
 ```
 
-### 5. Verify allowed connectivity
+#### 5. Verify allowed connectivity
 
 ```bash
 # API → PostgreSQL should succeed (port 5432)
@@ -163,7 +152,7 @@ kubectl exec -n sorobanpay webhook-worker -- \
   nc -zv api 3001  # expected: timeout / connection refused
 ```
 
-### 6. Verify denied connectivity (default deny)
+#### 6. Verify denied connectivity (default deny)
 
 ```bash
 # API → Indexer should fail (no egress to indexer, no ingress on indexer)
@@ -175,19 +164,109 @@ kubectl exec -n sorobanpay api -- \
   nc -zv webhook-worker 3001  # expected: timeout / connection refused
 ```
 
-### 7. Clean up
+#### 7. Clean up
 
 ```bash
 minikube delete
 ```
 
-## Files
+---
+
+## Redis StatefulSet (issue #1444)
+
+Redis is used for:
+- **Distributed rate limiting** — `ioredis` + `rate-limiter-flexible` in the
+  backend so rate limits are shared across all backend replicas.
+- **MRR analytics caching** — Payout summary queries are cached in Redis to
+  reduce database load during report generation.
+
+### Files
 
 | File | Purpose |
 |------|---------|
-| `kustomization.yaml` | Kustomize manifest listing all NetworkPolicy resources |
+| `redis-config.yaml` | ConfigMap with `redis.conf` tuned for caching (256MB max, LRU eviction) |
+| `redis-service.yaml` | ClusterIP (`redis`) + headless (`redis-headless`) services |
+| `redis-statefulset.yaml` | StatefulSet with PVC, resource limits (256Mi / 0.25 CPU), health probes |
+
+### Resource limits
+
+Per the issue acceptance criteria:
+
+| Resource | Request | Limit |
+|----------|---------|-------|
+| CPU | 125m | 250m (0.25) |
+| Memory | 128Mi | 256Mi |
+
+### Health probes
+
+| Probe | Command | Initial Delay | Period | Failure Threshold |
+|-------|---------|--------------|--------|-------------------|
+| Startup | `redis-cli PING` | 5s | 5s | 6 (30s max) |
+| Liveness | `redis-cli PING` | 10s | 15s | 3 |
+| Readiness | `redis-cli PING` | 5s | 10s | 3 |
+
+### Configuration
+
+The Redis instance is configured via the `redis-config` ConfigMap. Key settings:
+
+| Setting | Value | Rationale |
+|---------|-------|-----------|
+| `maxmemory` | 256mb | Matches container memory limit |
+| `maxmemory-policy` | allkeys-lru | Evict least-recently-used keys; safe for ephemeral cache |
+| `save` | `""` (disabled) | No RDB persistence — cache data is not durable |
+| `appendonly` | no | No AOF — same reason |
+
+To enable persistence for disaster recovery, change `save` and `appendonly`
+in `redis-config.yaml` and increase the PVC size in `redis-statefulset.yaml`.
+
+### Apply
+
+```bash
+kubectl apply -k deploy/k8s/
+```
+
+### Verify
+
+```bash
+# Check the StatefulSet
+kubectl get statefulset redis -n sorobanpay
+
+# Check the pods
+kubectl get pods -n sorobanpay -l app=redis
+
+# Verify Redis responds
+kubectl exec -n sorobanpay redis-0 -- redis-cli PING
+# Expected: PONG
+```
+
+### Backend integration
+
+The backend connects to Redis using the `REDIS_URL` environment variable:
+
+```env
+REDIS_URL=redis://redis.sorobanpay.svc.cluster.local:6379
+```
+
+When `REDIS_URL` is set:
+- Rate limiting uses `rate-limiter-flexible` with `ioredis` (distributed)
+- MRR/summary queries are cached in Redis (60s TTL)
+- The `/health` endpoint reports Redis connectivity status
+
+When `REDIS_URL` is unset:
+- Rate limiting falls back to in-memory (per-replica, not shared)
+- Caching is disabled (all queries hit the database directly)
+- The `/health` endpoint reports `redis: "disabled"` (not a failure)
+
+## All files
+
+| File | Purpose |
+|------|---------|
+| `kustomization.yaml` | Kustomize manifest listing all resources |
 | `network-policy-default-deny.yaml` | Baseline deny-all ingress + egress for the namespace |
 | `network-policy-api.yaml` | API pod: ingress from ingress controller, egress to DB + RPC |
 | `network-policy-indexer.yaml` | Indexer pod: no ingress, egress to RPC + DB |
 | `network-policy-webhook-worker.yaml` | Webhook worker: no ingress, egress to DB + external HTTPS |
 | `network-policy-postgresql.yaml` | PostgreSQL: ingress from API, indexer, webhook-worker only |
+| `redis-config.yaml` | ConfigMap with redis.conf for caching |
+| `redis-service.yaml` | Redis ClusterIP + headless Services |
+| `redis-statefulset.yaml` | Redis StatefulSet with PVC, probes, resource limits |
