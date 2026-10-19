@@ -16,6 +16,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Kubernetes NetworkPolicy resources in `deploy/k8s/` restricting pod-to-pod
+  communication: default deny-all, API ingress from ingress controller only,
+  indexer pull-only egress to RPC and DB, webhook worker egress to DB and
+  external HTTPS, and PostgreSQL ingress limited to the three app pods.
+  Kustomize manifest and `deploy/k8s/README.md` with minikube + Calico test
+  instructions. Closes #1441.
+
 ### Changed
 
 ### Deprecated

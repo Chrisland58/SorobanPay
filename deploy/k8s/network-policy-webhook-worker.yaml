@@ -1,0 +1,55 @@
+# NetworkPolicy for the Webhook Worker pod.
+#
+# Ingress:  none — webhook worker processes queue jobs, never receives inbound
+# Egress:   allow PostgreSQL (5432) and external HTTPS (443) for outbound webhooks
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: webhook-worker-network-policy
+  namespace: sorobanpay
+  labels:
+    app.kubernetes.io/part-of: sorobanpay
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  podSelector:
+    matchLabels:
+      app: webhook-worker
+  policyTypes:
+    - Ingress
+    - Egress
+
+  ingress: []   # no ingress allowed — worker processes queue jobs
+
+  egress:
+    # Allow DNS resolution (CoreDNS in kube-system)
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+
+    # Allow connections to PostgreSQL (internal service)
+    - to:
+        - podSelector:
+            matchLabels:
+              app: postgresql
+      ports:
+        - protocol: TCP
+          port: 5432
+
+    # Allow outbound webhook delivery (external HTTPS)
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+      ports:
+        - protocol: TCP
+          port: 443
