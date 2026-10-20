@@ -21,7 +21,7 @@
  *   - Shows the transaction hash with a Stellar Expert explorer link on success.
  */
 
-import { useState, useCallback, type FormEvent } from 'react';
+import { useState, useCallback, useEffect, type FormEvent } from 'react';
 import { useWallet } from '@/hooks/useWallet';
 import { buildExplorerUrl } from '@/hooks/useTransactionPoller';
 import { buildAndSubmitUpdateSubscription } from '@/lib/transaction_builder';
@@ -85,6 +85,16 @@ function ConfirmModal({
   onCancel: () => void;
 }) {
   const days = Math.round(Number(interval) / 86400);
+
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        onCancel();
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [onCancel]);
   return (
     <div
       role="dialog"
