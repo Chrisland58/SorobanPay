@@ -23,6 +23,7 @@ This document provides comprehensive documentation for all events emitted by the
 | Event | Emitted by | Topics | Data | Condition |
 |-------|-----------|--------|------|-----------|
 | `subscribe` | `subscribe()` | `(sym, subscriber, merchant, token)` | `i128` amount | Always on success |
+| `subscription_transferred` | `transfer_subscription()` | `(sym, subscriber, old_merchant, new_merchant)` | `()` | Successful transfer |
 | `executed` | `execute_payment()`, `batch_execute_payment()` | `(sym, subscriber, merchant, token)` | `(i128 amount, u64 nonce)` | Successful transfer |
 | `expired` | `expire_subscription()` | `(sym, subscriber, merchant)` | `()` | Grace period elapsed |
 | `payment_transfer_failure` | `execute_payment()`, `batch_execute_payment()` | `(sym, subscriber, merchant)` | `i128` amount attempted | Insufficient subscriber balance |
@@ -301,6 +302,22 @@ events::emit_cancel(&env, &subscriber, &merchant);
   }
 }
 ```
+
+### `subscription_transferred`
+
+Emitted after `transfer_subscription()` successfully moves a subscription from the old
+merchant to the new merchant.
+
+**Topics**:
+- `Symbol("subscription_transferred")`
+- `Address` - Subscriber address
+- `Address` - Old merchant address
+- `Address` - New merchant address
+
+**Data**:
+- `()` - Empty unit type
+
+**When Emitted**: After the subscription storage and merchant indexes have been updated.
 
 ### 7. batch_execute_initiated
 

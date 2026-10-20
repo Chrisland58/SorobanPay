@@ -143,23 +143,22 @@ pub fn emit_contract_migrated(env: &Env, admin: &Address, new_version: u32) {
 /// Emit the `subscription_transferred` event after a subscription has been atomically
 /// moved from one merchant address to another.
 ///
-/// Topics:  (symbol("sub_transferred"), subscriber, old_merchant, new_merchant)
-/// Data:    amount (i128)
+/// Topics:  (symbol("subscription_transferred"), subscriber, old_merchant, new_merchant)
+/// Data:    ()
 pub fn emit_subscription_transferred(
     env: &Env,
     subscriber: &Address,
     old_merchant: &Address,
     new_merchant: &Address,
-    amount: i128,
 ) {
     env.events().publish(
         (
-            Symbol::new(env, "sub_transferred"),
+            Symbol::new(env, "subscription_transferred"),
             subscriber.clone(),
             old_merchant.clone(),
             new_merchant.clone(),
         ),
-        amount,
+        (),
     );
 }
 
