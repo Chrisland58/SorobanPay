@@ -19,11 +19,43 @@ import './globals.css';
  * via the icons/other fields so Next.js renders the correct <link>/<meta> tags.
  */
 export const metadata: Metadata = {
-  title: 'SorobanPay — Decentralized Recurring Payments',
+  metadataBase: new URL('https://sorobanpay.org'),
+  title: 'SorobanPay — Decentralized Subscription Payments',
   description:
     'Non-custodial subscription and recurring payment protocol built on Stellar Soroban.',
   manifest: '/manifest.json',
   applicationName: 'SorobanPay',
+  alternates: {
+    canonical: '/',
+  },
+  openGraph: {
+    title: 'SorobanPay — Decentralized Subscription Payments',
+    description:
+      'Non-custodial subscription and recurring payment protocol built on Stellar Soroban.',
+    url: 'https://sorobanpay.org',
+    siteName: 'SorobanPay',
+    images: [
+      {
+        url: '/og-image.png',
+        width: 1200,
+        height: 630,
+        alt: 'SorobanPay — Decentralized Subscription Payments',
+      },
+    ],
+    locale: 'en_US',
+    type: 'website',
+  },
+  twitter: {
+    card: 'summary_large_image',
+    title: 'SorobanPay — Decentralized Subscription Payments',
+    description:
+      'Non-custodial subscription and recurring payment protocol built on Stellar Soroban.',
+    images: ['/og-image.png'],
+  },
+  robots: {
+    index: true,
+    follow: true,
+  },
   appleWebApp: {
     capable: true,
     statusBarStyle: 'black-translucent',
