@@ -8,10 +8,14 @@
  */
 
 import { useState, useEffect, useRef } from 'react';
+import dynamic from 'next/dynamic';
 import SubscriptionForm from '@/components/SubscriptionForm';
 import ContractFooter from '@/components/ContractFooter';
 import OnboardingGuide from '@/components/OnboardingGuide';
-import ShortcutsHelpModal from '@/components/ShortcutsHelpModal';
+
+const ShortcutsHelpModal = dynamic(() => import('@/components/ShortcutsHelpModal'), {
+  ssr: false,
+});
 import { useWallet } from '@/hooks/useWallet';
 import { useKeyboardShortcuts, SECTION_IDS } from '@/hooks/useKeyboardShortcuts';
 import BottomNavBar from '@/components/BottomNavBar';

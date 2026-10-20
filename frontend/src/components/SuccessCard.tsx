@@ -24,6 +24,8 @@ export interface SuccessCardData {
   amount: string;
   /** Billing interval in seconds */
   interval: string;
+  /** Next payment timestamp or formatted date string */
+  nextPayment?: number | string;
 }
 
 export interface SuccessCardProps {
@@ -35,6 +37,12 @@ export interface SuccessCardProps {
 
 export function SuccessCard({ data, onReset }: SuccessCardProps) {
   const days = Math.round(Number(data.interval) / 86400);
+
+  const nextPaymentDate = data.nextPayment
+    ? typeof data.nextPayment === 'number'
+      ? new Date(data.nextPayment * 1000).toLocaleDateString(undefined, { year: 'numeric', month: 'long', day: 'numeric' })
+      : data.nextPayment
+    : new Date(Date.now() + (Number(data.interval) || 86400) * 1000).toLocaleDateString(undefined, { year: 'numeric', month: 'long', day: 'numeric' });
 
   return (
     <div
@@ -65,6 +73,8 @@ export function SuccessCard({ data, onReset }: SuccessCardProps) {
         <span className="font-medium">
           every {days} day{days !== 1 ? 's' : ''}
         </span>
+        <span className="text-gray-400 font-medium">Next Payment</span>
+        <span className="font-medium text-green-300">{nextPaymentDate}</span>
         <span className="text-gray-400 font-medium break-all">Merchant</span>
         <span className="break-all font-mono text-xs">{data.merchant}</span>
       </div>

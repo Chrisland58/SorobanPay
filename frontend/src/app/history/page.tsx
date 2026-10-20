@@ -20,11 +20,24 @@
  */
 
 import Link from 'next/link';
+import dynamic from 'next/dynamic';
 import { useCallback, useEffect, useState } from 'react';
 import { useWallet } from '@/hooks/useWallet';
 import { usePaymentHistory } from '@/hooks/usePaymentHistory';
-import PaymentHistoryTable from '@/components/PaymentHistoryTable';
 import { NETWORK_NAME } from '@/constants/network';
+
+const PaymentHistoryTable = dynamic(
+  () => import('@/components/PaymentHistoryTable'),
+  {
+    ssr: false,
+    loading: () => (
+      <div className="rounded-2xl border border-gray-800 bg-gray-900/60 p-6 animate-pulse" aria-hidden="true">
+        <div className="h-6 w-48 rounded bg-gray-800 mb-4" />
+        <div className="h-40 w-full rounded bg-gray-800" />
+      </div>
+    ),
+  },
+);
 
 const PAGE_SIZE = 20;
 

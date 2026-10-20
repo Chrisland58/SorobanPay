@@ -25,9 +25,13 @@
 
 import { useState, useEffect, useRef } from 'react';
 import Link from 'next/link';
+import dynamic from 'next/dynamic';
 import SubscriptionForm from '@/components/SubscriptionForm';
 import OnboardingGuide from '@/components/OnboardingGuide';
-import ShortcutsHelpModal from '@/components/ShortcutsHelpModal';
+
+const ShortcutsHelpModal = dynamic(() => import('@/components/ShortcutsHelpModal'), {
+  ssr: false,
+});
 import { SkeletonWallet, SkeletonForm } from '@/components/Skeleton';
 import { useWallet } from '@/hooks/useWallet';
 import { useKeyboardShortcuts, SECTION_IDS } from '@/hooks/useKeyboardShortcuts';

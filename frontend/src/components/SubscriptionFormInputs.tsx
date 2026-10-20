@@ -99,6 +99,15 @@ export function SubscriptionFormErrorSummary({
   );
 }
 
+export const INTERVAL_PRESETS = [
+  { label: 'Daily (1 day)', seconds: '86400', phrase: 'every day' },
+  { label: 'Weekly (7 days)', seconds: '604800', phrase: 'every week' },
+  { label: 'Monthly (30 days)', seconds: '2592000', phrase: 'every month' },
+  { label: 'Quarterly (90 days)', seconds: '7776000', phrase: 'every quarter' },
+  { label: 'Annual (365 days)', seconds: '31536000', phrase: 'every year' },
+  { label: 'Custom', seconds: 'custom', phrase: '' },
+];
+
 /**
  * Form inputs for subscription creation.
  * Displays merchant address, token, payment amount, and interval fields.
@@ -122,6 +131,16 @@ export function SubscriptionFormInputs({
   onTokenBlur,
   focusErrorSummaryRequest,
 }: SubscriptionFormInputsProps) {
+  const matchedPreset = INTERVAL_PRESETS.find((p) => p.seconds === interval);
+  const [isCustomMode, setIsCustomMode] = useState<boolean>(!matchedPreset);
+
+  const selectedPresetValue = isCustomMode ? 'custom' : matchedPreset ? matchedPreset.seconds : 'custom';
+
+  const summaryPhrase = matchedPreset && !isCustomMode
+    ? matchedPreset.phrase
+    : interval && Number(interval) > 0
+      ? `every ${interval} seconds`
+      : 'each billing cycle';
   return (
     <div className="space-y-4">
       <SubscriptionFormErrorSummary
@@ -252,41 +271,73 @@ export function SubscriptionFormInputs({
         )}
       </div>
 
-      {/* Interval */}
+      {/* Interval preset selector and custom input */}
       <div>
-        <label htmlFor="interval" className={labelCls}>
-          Interval{requiredMark}
+        <label htmlFor="interval-preset" className={labelCls}>
+          Billing cycle preset{requiredMark}
           <span className="sr-only">(required)</span>
           {" "}
           <HelpTooltip
-            content="Number of seconds between payment collections. Useful intervals: 86400 (1 day), 604800 (1 week), 2592000 (30 days)."
+            content="Choose a standard recurring payment interval or specify a custom duration in seconds."
             articleId="create-subscription"
           />
         </label>
-        <input
-          id="interval"
-          type="number"
-          inputMode="numeric"
-          pattern="[0-9]*"
-          min="86400"
-          step="1"
-          placeholder="86400"
-          autoComplete="off"
-          value={interval}
-          onChange={(e) => onIntervalChange(e.target.value)}
+        <select
+          id="interval-preset"
+          value={selectedPresetValue}
+          onChange={(e) => {
+            const val = e.target.value;
+            if (val === 'custom') {
+              setIsCustomMode(true);
+            } else {
+              setIsCustomMode(false);
+              onIntervalChange(val);
+            }
+          }}
           disabled={isDisabled}
-          required
-          aria-required="true"
-          aria-describedby={`help-interval${fieldErrors.interval ? " err-interval" : ""}`}
-          aria-invalid={!!fieldErrors.interval}
-          className={fieldClass(!!fieldErrors.interval)}
-        />
-        <p id="help-interval" className={hintCls}>
-          Seconds between payments. Minimum: 1 day (86400 seconds). Common intervals:{" "}
-          <code className="bg-gray-800 px-1 rounded text-gray-200 text-xs">86400</code> (daily),{" "}
-          <code className="bg-gray-800 px-1 rounded text-gray-200 text-xs">604800</code> (weekly),{" "}
-          <code className="bg-gray-800 px-1 rounded text-gray-200 text-xs">2592000</code> (monthly).
+          className={`${fieldClass(!!fieldErrors.interval)} mb-2`}
+          aria-label="Billing cycle preset selector"
+        >
+          {INTERVAL_PRESETS.map((preset) => (
+            <option key={preset.seconds} value={preset.seconds}>
+              {preset.label}
+            </option>
+          ))}
+        </select>
+
+        {isCustomMode && (
+          <div className="mt-2">
+            <label htmlFor="interval" className="block text-xs text-gray-400 mb-1">
+              Custom interval (in seconds, min 86,400)
+            </label>
+            <input
+              id="interval"
+              type="number"
+              inputMode="numeric"
+              pattern="[0-9]*"
+              min="86400"
+              step="1"
+              placeholder="86400"
+              autoComplete="off"
+              value={interval}
+              onChange={(e) => onIntervalChange(e.target.value)}
+              disabled={isDisabled}
+              required
+              aria-required="true"
+              aria-describedby={`help-interval${fieldErrors.interval ? " err-interval" : ""}`}
+              aria-invalid={!!fieldErrors.interval}
+              className={fieldClass(!!fieldErrors.interval)}
+            />
+          </div>
+        )}
+
+        {/* Dynamic Human-readable summary */}
+        <p className="mt-2 rounded-lg bg-blue-950/40 border border-blue-800/60 p-2.5 text-xs text-blue-200">
+          💡 <strong>Summary:</strong> You will be charged{' '}
+          <span className="text-white font-semibold">{amount ? `${amount} tokens` : 'tokens'}</span>{' '}
+          <span>{summaryPhrase}</span>.
         </p>
+
         {fieldErrors.interval && (
           <p
             id="err-interval"
