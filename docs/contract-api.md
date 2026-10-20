@@ -16,6 +16,7 @@ Full reference for all `SubscriptionProtocol` entry points, types, and error cod
    - [execute_payment](#execute_payment)
    - [batch_execute_payment](#batch_execute_payment)
    - [cancel](#cancel)
+   - [expire_subscription](#expire_subscription)
    - [get_subscription](#get_subscription)
    - [initialize](#initialize)
    - [migrate](#migrate)
@@ -448,6 +449,45 @@ fn test_cancel_removes_subscription() {
 
 ---
 
+### `expire_subscription`
+
+Expire a subscription once its unpaid grace period has fully elapsed (issue #contract-expire). When a payment transfer fails, `execute_payment` records `overdue_since` on the subscription; `expire_subscription` removes the subscription only after `overdue_since + grace_period` has passed.
+
+Calling it before the grace window has elapsed is rejected with `GracePeriodNotElapsed` (19) — the subscription is left untouched and no event is emitted.
+
+**Authorization:** `merchant` must sign.
+
+#### Parameters
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `subscriber` | `Address` | Subscriber whose subscription is being expired |
+| `merchant` | `Address` | Caller — must sign |
+
+#### Return value
+
+`Result<(), ContractError>` — returns `()` on success.
+
+#### Error codes
+
+| Error | Code | Trigger |
+|-------|------|---------|
+| `NoActiveSubscription` | 4 | No subscription found for this `(subscriber, merchant)` pair |
+| `GracePeriodNotElapsed` | 19 | `now < overdue_since + grace_period` (called too early), or the subscription is not overdue (`overdue_since` is `None`) |
+| `InvalidTimestamp` | 8 | `overdue_since + grace_period` overflows `u64` |
+
+#### Behaviour
+
+| Condition | Result |
+|-----------|--------|
+| Not overdue (`overdue_since == None`) | `Err(GracePeriodNotElapsed)` — subscription kept |
+| Overdue, `now < overdue_since + grace_period` | `Err(GracePeriodNotElapsed)` — subscription kept |
+| Overdue, `now >= overdue_since + grace_period` | `Ok` — subscription removed, `cancel` event with reason `grace_period_expired` (3) |
+
+> **Note:** `GracePeriodNotElapsed` (19) reuses the code formerly allocated to `GracePeriodActive`; the variant was renamed to reflect the `expire_subscription` semantics. The numeric code 19 is unchanged.
+
+---
+
 ### `get_subscription`
 
 Query active subscription details for a subscriber-merchant pair. This is a read-only call; it requires no authorization. As a side effect, it extends the entry's TTL if it is below the minimum threshold.
@@ -714,6 +754,7 @@ Complete table of all 17 error codes with trigger conditions, affected entry poi
 | 15 | `AlreadyMigrated` | `migrate` | Schema already at `CURRENT_SCHEMA_VERSION` | No action needed |
 | 16 | `NotAdmin` | `migrate` | Caller ≠ stored admin address | Use the admin identity set during `initialize` |
 | 17 | `NotInitialized` | `migrate` | `initialize` not yet called | Call `initialize(admin)` first |
+| 19 | `GracePeriodNotElapsed` | `expire_subscription` | `now < overdue_since + grace_period` (called before the grace window elapsed), or not overdue | Wait until `overdue_since + grace_period` has passed |
 
 ### Errors returned per entry point
 

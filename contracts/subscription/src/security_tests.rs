@@ -43,7 +43,7 @@ mod security_tests {
 
     use crate::{
         error::ContractError,
-        storage::{DataKey, MAX_AMOUNT},
+        storage::{DataKey, MAX_AMOUNT, SubscriptionData, subscription_key},
         SubscriptionProtocol, SubscriptionProtocolClient,
     };
 
@@ -959,6 +959,65 @@ mod security_tests {
             matches!(result, Err(Ok(ContractError::NotAdmin))),
             "set_protocol_fee by non-admin must return NotAdmin; got {:?}",
             result
+        );
+    }
+
+    // =========================================================================
+    // expire_subscription — grace-period enforcement (GracePeriodNotElapsed, 19)
+    // =========================================================================
+
+    /// `expire_subscription` must reject an early call made while the grace
+    /// period has not yet elapsed (`now < overdue_since + grace_period`),
+    /// returning `GracePeriodNotElapsed` (19) and leaving the subscription intact.
+    #[test]
+    fn expire_subscription_rejects_early_call_within_grace_period() {
+        let s = SecEnv::new_with_mock_auth();
+
+        // Subscribe with a 1-hour (3600 s) grace period. strict=false so no
+        // SEP-41 allowance is required for setup.
+        s.client.subscribe(
+            &s.subscriber,
+            &s.merchant,
+            &s.token,
+            &1_000_000_i128,
+            &86_400_u64,
+            &false,
+            &Some(3_600_u64),
+        );
+
+        // Mark the subscription overdue by writing `overdue_since` at the
+        // contract's computed storage key (same as execute_payment does on a
+        // failed transfer).
+        let hash = subscription_key(&s.env, &s.subscriber, &s.merchant);
+        let key = DataKey::Subscription(hash.clone());
+        let mut data: SubscriptionData = s
+            .env
+            .storage()
+            .persistent()
+            .get(&key)
+            .expect("subscription must be stored after subscribe");
+        let overdue_since = s.env.ledger().timestamp();
+        data.overdue_since = Some(overdue_since);
+        s.env.storage().persistent().set(&key, &data);
+
+        // Advance the ledger to just inside the grace window
+        // (overdue_since + grace_period - 1) — too early to expire.
+        s.env
+            .ledger()
+            .with_mut(|l| l.timestamp = overdue_since + 3_600 - 1);
+
+        let result = s.client.try_expire_subscription(&s.subscriber, &s.merchant);
+        assert!(
+            matches!(result, Err(Ok(ContractError::GracePeriodNotElapsed))),
+            "expire_subscription within the grace period must return \
+             GracePeriodNotElapsed (19); got {:?}",
+            result
+        );
+
+        // The subscription must NOT have been removed on the rejected call.
+        assert!(
+            s.env.storage().persistent().has(&key),
+            "subscription must remain after a GracePeriodNotElapsed rejection"
         );
     }
 

@@ -54,7 +54,12 @@ pub enum ContractError {
     /// `subscribe` called with `token` equal to the contract's own address
     InvalidTokenAddress   = 11,
     AmountExceedsLimit    = 18,
-    GracePeriodActive     = 19,
+    /// `expire_subscription` was called before the unpaid grace period has
+    /// elapsed — i.e. `now < overdue_since + grace_period`.  Also returned when
+    /// the subscription is not overdue at all (`overdue_since` is `None`).
+    /// The subscription is left untouched and no event is emitted.
+    /// See [`crate::SubscriptionProtocol::expire_subscription`].
+    GracePeriodNotElapsed = 19,
     /// `batch_execute_payment` called with an empty subscribers vector
     EmptyBatch            = 13,
     /// `batch_execute_payment` called with more than BATCH_MAX_SIZE (50) subscribers

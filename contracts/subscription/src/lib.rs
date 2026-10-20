@@ -939,6 +939,69 @@ impl SubscriptionProtocol {
         Ok(())
     }
 
+    /// Expire a subscription after its unpaid grace period has elapsed
+    /// (issue #contract-expire).
+    ///
+    /// When a payment transfer fails, [`execute_payment`](Self::execute_payment)
+    /// records `overdue_since` on the subscription.  A subscription may be
+    /// expired only once the per-subscription `grace_period` has fully elapsed
+    /// past `overdue_since`.  Calling `expire_subscription` before that window
+    /// has elapsed is rejected with [`ContractError::GracePeriodNotElapsed`].
+    ///
+    /// On success the subscription record is removed from persistent storage and
+    /// de-indexed, and a `cancel` event is emitted with reason `grace_period_expired`
+    /// (3 — see `events::emit_cancel_with_reason`).
+    ///
+    /// # Authorization
+    /// Requires a valid signature from `merchant`.
+    ///
+    /// # Errors
+    /// - `ContractError::NoActiveSubscription`  — no subscription exists for the pair.
+    /// - `ContractError::GracePeriodNotElapsed` — `now < overdue_since + grace_period`
+    ///   (called too early), or the subscription is not overdue (`overdue_since` is `None`).
+    /// - `ContractError::InvalidTimestamp`      — `overdue_since + grace_period` overflows `u64`.
+    pub fn expire_subscription(
+        env: Env,
+        subscriber: Address,
+        merchant: Address,
+    ) -> Result<(), ContractError> {
+        merchant.require_auth();
+
+        let hash = subscription_key(&env, &subscriber, &merchant);
+        let key = DataKey::Subscription(hash.clone());
+        let data: SubscriptionData = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .ok_or(ContractError::NoActiveSubscription)?;
+
+        let now = ledger_timestamp(&env)?;
+
+        // A subscription that is not overdue cannot be expired.
+        let overdue_since = data
+            .overdue_since
+            .ok_or(ContractError::GracePeriodNotElapsed)?;
+
+        // The grace window must have fully elapsed: `now < overdue_since + grace_period`
+        // => grace period not elapsed => reject the early call.
+        let grace_end = overdue_since
+            .checked_add(data.grace_period)
+            .ok_or(ContractError::InvalidTimestamp)?;
+        if now < grace_end {
+            return Err(ContractError::GracePeriodNotElapsed);
+        }
+
+        // Grace period elapsed: remove the subscription and de-index it.
+        env.storage().persistent().remove(&key);
+        index_remove(&env, &merchant, &hash);
+        roster_remove(&env, &merchant, &subscriber);
+
+        // 3 = grace_period_expired (see events::emit_cancel_with_reason reason codes).
+        events::emit_cancel_with_reason(&env, &subscriber, &merchant, 3);
+
+        Ok(())
+    }
+
     /// Atomically transfer an active subscription from one merchant to another.
     ///
     /// This is the canonical mechanism for merchant key rotation, account merges,
