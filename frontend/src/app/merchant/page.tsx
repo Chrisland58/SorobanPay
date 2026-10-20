@@ -36,7 +36,22 @@ import {
 } from '@/lib/transaction_builder';
 import { mapError } from '@/lib/errors';
 import { CONTRACT_ID, NETWORK_PASSPHRASE, NETWORK_NAME, RPC_URL } from '@/constants/network';
-import { truncateAddress } from '@/lib/utils';
+import { truncateAddress, stroopsToTokens } from '@/lib/utils';
+import { ErrorBoundary } from '@/components/ErrorBoundary';
+
+export interface BatchSummaryState {
+  currentBatch: number;
+  totalBatches: number;
+  totalCollected: bigint;
+  isProcessing: boolean;
+  results: Array<{
+    subscriber: string;
+    success: boolean;
+    amount: bigint;
+    txHash?: string;
+    error?: string;
+  }>;
+}
 
 // ── Page ──────────────────────────────────────────────────────────────────────
 
@@ -57,6 +72,7 @@ export default function MerchantPage() {
   // Per-row collection state
   const [collectingRows, setCollectingRows] = useState<Set<string>>(new Set());
   const [rowResults, setRowResults] = useState<Map<string, RowResult>>(new Map());
+  const [batchSummary, setBatchSummary] = useState<BatchSummaryState | null>(null);
 
   // ── Single collect ──────────────────────────────────────────────────────────
   const handleCollect = useCallback(
@@ -110,6 +126,8 @@ export default function MerchantPage() {
       if (!publicKey || !CONTRACT_ID || subscribers.length === 0) return;
 
       const merchant = publicKey;
+      const BATCH_SIZE = 50;
+      const totalBatches = Math.ceil(subscribers.length / BATCH_SIZE);
 
       // Map each selected subscriber to the token contract of their
       // subscription so the atomic on-chain batch_execute_payment call can be used.
@@ -130,40 +148,84 @@ export default function MerchantPage() {
         return next;
       });
 
-      const batchResult = await buildAndSubmitBatchExecutePayment(
-        subscribers.map((s) => ({
-          subscriber: s,
-          merchant,
-          token: tokenBySubscriber.get(s),
-        })),
-        CONTRACT_ID,
-        publicKey,
-        NETWORK_PASSPHRASE,
-        RPC_URL,
-      );
+      let accumulatedTotal = BigInt(0);
+      const allResults: BatchSummaryState['results'] = [];
 
-      // Apply per-entry results progressively
-      setRowResults((prev) => {
-        const next = new Map(prev);
-        for (const r of batchResult.results) {
-          if (r.txHash) {
-            next.set(r.subscriber, { txHash: r.txHash });
-          } else if (r.error) {
-            const mapped = mapError(new Error(r.error));
-            next.set(r.subscriber, { error: mapped.message });
+      setBatchSummary({
+        currentBatch: 1,
+        totalBatches,
+        totalCollected: BigInt(0),
+        isProcessing: true,
+        results: [],
+      });
+
+      try {
+        for (let batchIdx = 0; batchIdx < totalBatches; batchIdx++) {
+          const chunk = subscribers.slice(batchIdx * BATCH_SIZE, (batchIdx + 1) * BATCH_SIZE);
+          setBatchSummary((prev) => (prev ? { ...prev, currentBatch: batchIdx + 1 } : null));
+
+          const batchResult = await buildAndSubmitBatchExecutePayment(
+            chunk.map((s) => ({
+              subscriber: s,
+              merchant,
+              token: tokenBySubscriber.get(s),
+            })),
+            CONTRACT_ID,
+            publicKey,
+            NETWORK_PASSPHRASE,
+            RPC_URL,
+          );
+
+          for (const r of batchResult.results) {
+            const subObj = subscriptions.find((s) => s.subscriber === r.subscriber);
+            const subAmount = subObj?.amount ?? BigInt(0);
+            const isSuccess = Boolean(r.txHash);
+            if (isSuccess) {
+              accumulatedTotal += subAmount;
+            }
+            allResults.push({
+              subscriber: r.subscriber,
+              success: isSuccess,
+              amount: subAmount,
+              txHash: r.txHash,
+              error: r.error,
+            });
           }
+
+          // Apply per-entry results progressively
+          setRowResults((prev) => {
+            const next = new Map(prev);
+            for (const r of batchResult.results) {
+              if (r.txHash) {
+                next.set(r.subscriber, { txHash: r.txHash });
+              } else if (r.error) {
+                const mapped = mapError(new Error(r.error));
+                next.set(r.subscriber, { error: mapped.message });
+              }
+            }
+            return next;
+          });
+
+          setBatchSummary((prev) =>
+            prev
+              ? {
+                  ...prev,
+                  totalCollected: accumulatedTotal,
+                  results: [...allResults],
+                }
+              : null,
+          );
         }
-        return next;
-      });
+      } finally {
+        setCollectingRows((prev) => {
+          const next = new Set(prev);
+          for (const s of subscribers) next.delete(s);
+          return next;
+        });
 
-      setCollectingRows((prev) => {
-        const next = new Set(prev);
-        for (const s of subscribers) next.delete(s);
-        return next;
-      });
+        setBatchSummary((prev) => (prev ? { ...prev, isProcessing: false } : null));
 
-      // Refresh after batch completes
-      if (batchResult.successCount > 0) {
+        // Refresh after batch completes
         setTimeout(refresh, 2000);
       }
     },
@@ -349,6 +411,85 @@ export default function MerchantPage() {
         </div>
       )}
 
+      {/* ── Batch Progress & Results Summary ──────────────────────────── */}
+      {batchSummary && (
+        <div
+          role="region"
+          aria-label="Batch execution summary"
+          className="w-full max-w-5xl mb-6 rounded-2xl border border-blue-800 bg-blue-950/40 p-6 space-y-4"
+        >
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <h2 className="text-lg font-bold text-white flex items-center gap-2">
+                {batchSummary.isProcessing ? (
+                  <>
+                    <span className="inline-block h-4 w-4 rounded-full border-2 border-blue-400 border-t-transparent animate-spin" />
+                    Processing Batch {batchSummary.currentBatch} of {batchSummary.totalBatches}...
+                  </>
+                ) : (
+                  '✓ Batch Collection Completed'
+                )}
+              </h2>
+              <p className="text-sm text-blue-200 mt-1">
+                Total Collected:{' '}
+                <strong className="text-white font-semibold">
+                  {stroopsToTokens(batchSummary.totalCollected)} tokens
+                </strong>{' '}
+                across {batchSummary.results.filter((r) => r.success).length} successful payment
+                {batchSummary.results.filter((r) => r.success).length !== 1 ? 's' : ''}
+              </p>
+            </div>
+            {!batchSummary.isProcessing && (
+              <button
+                type="button"
+                onClick={() => setBatchSummary(null)}
+                className="rounded-lg border border-gray-700 bg-gray-800 px-3 py-1.5 text-xs text-gray-300 hover:bg-gray-700 hover:text-white"
+              >
+                Dismiss
+              </button>
+            )}
+          </div>
+
+          {/* Results table */}
+          {batchSummary.results.length > 0 && (
+            <div className="overflow-x-auto max-h-60 rounded-xl border border-gray-800 bg-gray-900/60 p-2">
+              <table className="w-full text-xs text-left">
+                <thead>
+                  <tr className="border-b border-gray-800 text-gray-400">
+                    <th className="p-2">Subscriber</th>
+                    <th className="p-2">Status</th>
+                    <th className="p-2">Amount</th>
+                    <th className="p-2">Details</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-800">
+                  {batchSummary.results.map((res) => (
+                    <tr key={res.subscriber} className="hover:bg-gray-800/40">
+                      <td className="p-2 font-mono text-gray-200">
+                        {truncateAddress(res.subscriber, 8)}
+                      </td>
+                      <td className="p-2">
+                        {res.success ? (
+                          <span className="text-green-400 font-semibold">Success</span>
+                        ) : (
+                          <span className="text-red-400 font-semibold">Failed</span>
+                        )}
+                      </td>
+                      <td className="p-2 text-gray-300">
+                        {stroopsToTokens(res.amount)}
+                      </td>
+                      <td className="p-2 text-gray-400 truncate max-w-xs font-mono">
+                        {res.txHash ? `Tx: ${res.txHash.slice(0, 12)}…` : res.error}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
+
       {/* ── Subscriptions table ────────────────────────────────────────── */}
       {publicKey && (
         <section
@@ -356,18 +497,20 @@ export default function MerchantPage() {
           aria-label="Subscriber list"
           aria-live="polite"
         >
-          <MerchantSubscriptionsTable
-            subscriptions={subscriptions}
-            isLoading={isLoading}
-            error={error}
-            onCollect={handleCollect}
-            onBatchCollect={handleBatchCollect}
-            collectingRows={collectingRows}
-            rowResults={rowResults}
-            onRefresh={refresh}
-            hasMore={hasMore}
-            onLoadMore={loadMore}
-          />
+          <ErrorBoundary name="MerchantPortal">
+            <MerchantSubscriptionsTable
+              subscriptions={subscriptions}
+              isLoading={isLoading}
+              error={error}
+              onCollect={handleCollect}
+              onBatchCollect={handleBatchCollect}
+              collectingRows={collectingRows}
+              rowResults={rowResults}
+              onRefresh={refresh}
+              hasMore={hasMore}
+              onLoadMore={loadMore}
+            />
+          </ErrorBoundary>
         </section>
       )}
 

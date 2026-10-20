@@ -2040,13 +2040,24 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
       {/* Progress indicator — Phase 1: awaiting Freighter signature */}
       {isSubmitting && (
         <motion.div
-          key="progress"
+          key="submitting-progress"
           variants={prefersReducedMotion ? reducedMotionVariants : fadeInVariants}
           initial="hidden"
           animate="visible"
           exit="exit"
         >
-          <ProgressBar phase="submitting" />
+          <TransactionProgressIndicator
+            title="Submitting Subscription"
+            description="Please review and approve the transaction in your Freighter wallet."
+            steps={[
+              { id: "prepare", label: "Preparing transaction", status: "completed" },
+              { id: "sign", label: "Waiting for Freighter signature", status: "in-progress" },
+              { id: "broadcast", label: "Broadcasting to network", status: "pending" },
+              { id: "confirm", label: "Confirmed", status: "pending" },
+            ]}
+            currentStepIndex={1}
+            estimatedTimeRemaining={5}
+          />
         </motion.div>
       )}
 
@@ -2063,14 +2074,17 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
             title="Confirming transaction"
             description="Your transaction was submitted and is awaiting on-chain confirmation."
             steps={[
-              { id: "submitted", label: "Transaction submitted", status: "completed" },
+              { id: "prepare", label: "Preparing transaction", status: "completed" },
+              { id: "sign", label: "Waiting for Freighter signature", status: "completed" },
+              { id: "broadcast", label: "Broadcasting to network", status: "completed" },
               {
-                id: "confirmation",
-                label: "On-chain confirmation",
+                id: "confirm",
+                label: "Confirmed",
                 status: pollerState.status === "timeout" ? "pending" : "in-progress",
               },
             ]}
-            currentStepIndex={1}
+            currentStepIndex={3}
+            estimatedTimeRemaining={5}
             showExplorerLink={Boolean(pollerState.explorerUrl)}
             explorerUrl={pollerState.explorerUrl ?? undefined}
             status={pollerState.status === "timeout" ? "unknown" : "loading"}

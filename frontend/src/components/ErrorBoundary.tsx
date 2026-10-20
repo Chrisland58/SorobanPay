@@ -5,6 +5,7 @@ import { styled } from '@mui/material/styles';
 interface Props {
     children: ReactNode;
     fallback?: ReactNode;
+    name?: string;
     onError?: (error: Error, errorInfo: ErrorInfo) => void;
 }
 
@@ -51,8 +52,9 @@ export class ErrorBoundary extends Component<Props, State> {
             errorInfo,
         });
 
-        // Log error to console
-        console.error('ErrorBoundary caught an error:', error, errorInfo);
+        // Log error to console with boundary name if provided
+        const prefix = this.props.name ? `ErrorBoundary [${this.props.name}]` : 'ErrorBoundary';
+        console.error(`${prefix} caught an error:`, error, errorInfo);
 
         // Call onError prop if provided
         if (this.props.onError) {

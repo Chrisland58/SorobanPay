@@ -24,6 +24,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { useWallet } from '@/hooks/useWallet';
 import { usePaymentHistory } from '@/hooks/usePaymentHistory';
 import PaymentHistoryTable from '@/components/PaymentHistoryTable';
+import { ErrorBoundary } from '@/components/ErrorBoundary';
 import { NETWORK_NAME } from '@/constants/network';
 
 const PAGE_SIZE = 20;
@@ -157,21 +158,23 @@ export default function HistoryPage() {
         aria-label="Payment history table"
         aria-live="polite"
       >
-        <PaymentHistoryTable
-          events={pageEvents}
-          isLoading={isLoading}
-          error={error}
-          hasMore={hasMore}
-          onLoadMore={loadMore}
-          onRefresh={refreshHistory}
-          currentPage={currentPage}
-          canGoPrevious={currentPage > 1}
-          canGoNext={canGoNext}
-          onPreviousPage={() => updatePageUrl(currentPage - 1)}
-          onNextPage={goToNextPage}
-          isConnected={!!publicKey}
-          networkName={NETWORK_NAME}
-        />
+        <ErrorBoundary name="PaymentHistory">
+          <PaymentHistoryTable
+            events={pageEvents}
+            isLoading={isLoading}
+            error={error}
+            hasMore={hasMore}
+            onLoadMore={loadMore}
+            onRefresh={refreshHistory}
+            currentPage={currentPage}
+            canGoPrevious={currentPage > 1}
+            canGoNext={canGoNext}
+            onPreviousPage={() => updatePageUrl(currentPage - 1)}
+            onNextPage={goToNextPage}
+            isConnected={!!publicKey}
+            networkName={NETWORK_NAME}
+          />
+        </ErrorBoundary>
       </section>
 
       {/* ── Footer note ─────────────────────────────────────────────────── */}
