@@ -290,7 +290,12 @@ impl SubscriptionProtocol {
     /// # Errors
     /// - `ContractError::NotInitialized` — `initialize` has not been called.
     /// - `ContractError::NotAdmin`       — caller is not the stored admin.
-    /// - `ContractError::FeeBpsTooHigh`  — `fee_bps > 500`.
+    /// - `ContractError::FeeTooHigh`     — `fee_bps > MAX_FEE_BPS` (500). Error code 24.
+    ///
+    /// # Boundary behaviour
+    /// `fee_bps == 500` is accepted (the maximum allowed rate, 5 %). `fee_bps == 501`
+    /// is rejected with `FeeTooHigh`. The cap is a hard ceiling: the admin cannot
+    /// extract more than 5 % of a payment as a protocol fee.
     pub fn set_protocol_fee(
         env: Env,
         admin: Address,
@@ -309,8 +314,9 @@ impl SubscriptionProtocol {
             return Err(ContractError::NotAdmin);
         }
 
+        // Hard cap: 500 bps (5 %). 500 is accepted, 501+ is rejected with FeeTooHigh (24).
         if fee_bps > MAX_FEE_BPS {
-            return Err(ContractError::FeeBpsTooHigh);
+            return Err(ContractError::FeeTooHigh);
         }
 
         set_protocol_fee_config(&env, ProtocolFeeConfig { fee_bps, fee_collector });

@@ -129,6 +129,9 @@ pub enum StorageVersionError {
 #[contracttype]
 pub enum DataKey {
     Subscription(Address, Address),
+    /// Singleton key (instance storage) holding the current
+    /// [`ProtocolFeeConfig`], set via `set_protocol_fee`.
+    ProtocolFee,
 }
 
 /// Persistent on-chain record for a subscription.
@@ -142,6 +145,47 @@ pub struct SubscriptionData {
     pub is_paused:    bool,      // true if subscription payments are suspended
 }
 
+/// Protocol fee configuration stored as a singleton under [`DataKey::ProtocolFee`]
+/// in instance storage.
+///
+/// Set by the admin via `set_protocol_fee` and read by `execute_payment` /
+/// `batch_execute_payment` to split each payment into a merchant portion and a
+/// protocol fee portion:
+///
+/// ```text
+/// fee             = amount * fee_bps / 10_000   (integer division, rounds down)
+/// merchant_amount = amount - fee
+/// ```
+///
+/// `fee_bps == 0` disables the fee entirely (no split, single transfer).
+/// `fee_bps` is bounded to `[0, MAX_FEE_BPS]` (i.e. `[0, 500]` == 0–5 %).
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct ProtocolFeeConfig {
+    /// Fee rate in basis points (1 bps == 0.01 %). Bounded to `[0, MAX_FEE_BPS]`.
+    pub fee_bps: u32,
+    /// Address that receives the protocol fee portion of each payment.
+    pub fee_collector: Address,
+}
+
+// ==================== Protocol Fee Storage ====================
+
+/// Read the current protocol fee configuration from instance storage, if set.
+///
+/// Returns `None` when no fee has been configured (the default), which
+/// `execute_payment` treats as "no fee split".
+pub fn get_protocol_fee_config(env: &Env) -> Option<ProtocolFeeConfig> {
+    env.storage().instance().get(&DataKey::ProtocolFee)
+}
+
+/// Persist the protocol fee configuration to instance storage.
+///
+/// Callers are responsible for enforcing the [`MAX_FEE_BPS`] cap (see
+/// `set_protocol_fee`) and admin authorization before writing.
+pub fn set_protocol_fee_config(env: &Env, config: ProtocolFeeConfig) {
+    env.storage().instance().set(&DataKey::ProtocolFee, &config);
+}
+
 /// Safe upper bound for a single subscription payment amount (1 × 10¹⁸ stroops).
 ///
 /// Stellar Asset Contract (SAC) balances are represented as i64 internally, so
@@ -153,6 +197,15 @@ pub struct SubscriptionData {
 ///   - keep the value human-readable (10¹² XLM at 10⁶ stroops/XLM — far beyond
 ///     any realistic subscription use-case).
 pub const MAX_AMOUNT: i128 = 1_000_000_000_000_000_000; // 1e18 stroops
+
+/// Maximum protocol fee rate, in basis points, that an admin may configure via
+/// [`crate::SubscriptionProtocol::set_protocol_fee`].  `500` bps == 5 %.
+///
+/// This is a **hard cap**: any `fee_bps > MAX_FEE_BPS` is rejected with
+/// [`crate::error::ContractError::FeeTooHigh`] before the fee configuration is
+/// written, so an admin can never extract more than 5 % of a payment as a
+/// protocol fee.  The value `500` (the boundary) is accepted; `501` is rejected.
+pub const MAX_FEE_BPS: u32 = 500;
 
 /// ~30 days at 5-second ledger close time (518_400 ledgers)
 pub const MIN_TTL_LEDGERS: u32 = 30 * 24 * 60 * 60 / 5;

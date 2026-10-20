@@ -963,6 +963,58 @@ mod security_tests {
     }
 
     // =========================================================================
+    // CATEGORY 9b — set_protocol_fee fee-cap boundary (500 bps == 5 %)
+    // The protocol fee rate is hard-capped at 500 bps; the admin cannot extract
+    // more than 5 % of a payment. 500 is accepted, 501 is rejected (FeeTooHigh, 24).
+    // =========================================================================
+
+    /// BOUNDARY: `set_protocol_fee` with `fee_bps == 500` (the maximum) must succeed.
+    /// The 5 % cap is inclusive at the boundary: 500 bps is accepted and persisted.
+    #[test]
+    fn sec_set_protocol_fee_boundary_500_succeeds() {
+        let s = SecEnv::new_with_mock_auth();
+        let admin = Address::generate(&s.env);
+        let collector = Address::generate(&s.env);
+
+        s.client.initialize(&admin);
+
+        // 500 bps == 5 %: on the boundary, must be accepted.
+        let result = s.client.set_protocol_fee(&admin, &500, &collector);
+        assert!(
+            result.is_ok(),
+            "set_protocol_fee with fee_bps=500 must succeed; got {:?}",
+            result
+        );
+
+        // The config must be persisted and readable.
+        let cfg = s
+            .client
+            .get_protocol_fee()
+            .expect("fee config must be stored after a successful set_protocol_fee");
+        assert_eq!(cfg.fee_bps, 500, "stored fee_bps must equal 500");
+        assert_eq!(cfg.fee_collector, collector, "stored fee_collector must match");
+    }
+
+    /// BOUNDARY: `set_protocol_fee` with `fee_bps == 501` (just over the cap) must
+    /// be rejected with `FeeTooHigh` (error code 24). The admin cannot exceed 5 %.
+    #[test]
+    fn sec_set_protocol_fee_501_returns_fee_too_high() {
+        let s = SecEnv::new_with_mock_auth();
+        let admin = Address::generate(&s.env);
+        let collector = Address::generate(&s.env);
+
+        s.client.initialize(&admin);
+
+        // 501 bps > MAX_FEE_BPS (500): must be rejected with FeeTooHigh (24).
+        let result = s.client.try_set_protocol_fee(&admin, &501, &collector);
+        assert!(
+            matches!(result, Err(Ok(ContractError::FeeTooHigh))),
+            "set_protocol_fee with fee_bps=501 must return FeeTooHigh; got {:?}",
+            result
+        );
+    }
+
+    // =========================================================================
     // CATEGORY 10 — batch_execute_payment authorization
     // =========================================================================
 

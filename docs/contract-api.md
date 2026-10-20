@@ -19,6 +19,8 @@ Full reference for all `SubscriptionProtocol` entry points, types, and error cod
    - [get_subscription](#get_subscription)
    - [initialize](#initialize)
    - [migrate](#migrate)
+   - [set_protocol_fee](#set_protocol_fee)
+   - [get_protocol_fee](#get_protocol_fee)
    - [get_version](#get_version)
    - [get_schema_version](#get_schema_version)
    - [compute_subscription_key](#compute_subscription_key)
@@ -617,6 +619,84 @@ Upgrade the on-chain schema version to `CURRENT_SCHEMA_VERSION`. Returns `Alread
 
 ---
 
+### `set_protocol_fee`
+
+Configure the protocol fee: a basis-points rate skimmed from every `execute_payment` / `batch_execute_payment` transfer and routed to a designated `fee_collector`. `fee_bps == 0` disables the fee (single transfer, no split).
+
+**Authorization:** `admin` (the address stored by `initialize`) must sign.
+
+**Hard cap:** 500 bps (5 %). The admin **cannot** configure a fee above 5 % — this enforces the cap documented in the README. `fee_bps == 500` is accepted (on the boundary); `fee_bps >= 501` is rejected with `FeeTooHigh` (code 24).
+
+#### Parameters
+
+| Parameter | Type | Constraints | Description |
+|-----------|------|-------------|-------------|
+| `admin` | `Address` | must match stored admin | Caller — must be the initialized admin |
+| `fee_bps` | `u32` | `[0, 500]` | Fee rate in basis points (1 bps = 0.01 %). `0` disables the fee; `500` is the maximum (5 %). |
+| `fee_collector` | `Address` | SEP-41 capable | Address that receives the protocol fee portion of each payment |
+
+#### Return value
+
+`Result<(), ContractError>` — returns `()` on success.
+
+#### Error codes
+
+| Error | Code | Trigger |
+|-------|------|---------|
+| `NotInitialized` | 17 | `initialize` has not been called |
+| `NotAdmin` | 16 | `admin` does not match the stored admin address |
+| `FeeTooHigh` | 24 | `fee_bps > 500` (exceeds the 5 % hard cap) |
+
+#### Boundary behaviour
+
+| `fee_bps` | Result |
+|-----------|--------|
+| `0` | `Ok` — fee disabled |
+| `500` | `Ok` — maximum allowed rate (5 %), accepted on the boundary |
+| `501` | `Err(FeeTooHigh)` — rejected, just over the cap |
+| `1000` | `Err(FeeTooHigh)` — rejected |
+
+#### CLI example
+
+```bash
+stellar contract invoke \
+  --id $CONTRACT_ID \
+  --source admin \
+  --network testnet \
+  -- set_protocol_fee \
+  --admin         GADMIN...ADDRESS \
+  --fee_bps       500 \
+  --fee_collector GFEEC...COLLECTOR
+```
+
+---
+
+### `get_protocol_fee`
+
+Return the current protocol fee configuration, or `None` if no fee has been configured (the default — equivalent to `fee_bps == 0`, no split). Read-only; no authorization required.
+
+**Authorization:** None required.
+
+#### Return value
+
+`Option<ProtocolFeeConfig>` where:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `fee_bps` | `u32` | Current fee rate in basis points, bounded to `[0, 500]` |
+| `fee_collector` | `Address` | Address receiving the protocol fee portion of each payment |
+
+#### CLI example
+
+```bash
+stellar contract invoke \
+  --id $CONTRACT_ID --source any-account --network testnet \
+  -- get_protocol_fee
+# Returns: { fee_bps: "500", fee_collector: "GFEEC...COLLECTOR" } or null
+```
+
+---
+
 ### `get_version`
 
 Return the contract semantic version string (e.g. `"1.0.0"`). This is a compile-time constant — no storage read occurs.
@@ -714,6 +794,7 @@ Complete table of all 17 error codes with trigger conditions, affected entry poi
 | 15 | `AlreadyMigrated` | `migrate` | Schema already at `CURRENT_SCHEMA_VERSION` | No action needed |
 | 16 | `NotAdmin` | `migrate` | Caller ≠ stored admin address | Use the admin identity set during `initialize` |
 | 17 | `NotInitialized` | `migrate` | `initialize` not yet called | Call `initialize(admin)` first |
+| 24 | `FeeTooHigh` | `set_protocol_fee` | `fee_bps > 500` (exceeds the 5 % hard cap) | Use `fee_bps ≤ 500`; `500` is the maximum allowed |
 
 ### Errors returned per entry point
 
@@ -725,6 +806,7 @@ Complete table of all 17 error codes with trigger conditions, affected entry poi
 | `cancel` | 4 |
 | `get_subscription` | _(none — returns `Option`)_ |
 | `migrate` | 15, 16, 17 |
+| `set_protocol_fee` | 16, 17, 24 |
 
 ---
 
@@ -861,8 +943,9 @@ Returns `Vec<BytesN<32>>`. Returns an empty vector if the merchant has no subscr
 | 15 | `AlreadyMigrated` | Schema already at current version in `migrate` |
 | 16 | `NotAdmin` | Caller is not the stored admin in `migrate` |
 | 17 | `NotInitialized` | `initialize` was never called |
+| 24 | `FeeTooHigh` | `set_protocol_fee` called with `fee_bps > 500` (exceeds the 5 % cap) |
 
-Error codes 1–17 are **stable** — they will never be reassigned. New codes will use numbers ≥ 18.
+Error codes 1–17 are **stable** — they will never be reassigned. New codes will use numbers ≥ 18. `FeeTooHigh` (24) is the first code allocated to the protocol-fee subsystem.
 
 ---
 
