@@ -1677,7 +1677,7 @@ npm run storybook:build
 
 ## Contributing
 
-We welcome contributions! Whether you want to report a bug, suggest an enhancement, or submit code changes, here's how to get started.
+We welcome contributions! Whether you want to report a bug, suggest an enhancement, or submit code changes, please read our full **[Contributor Guide (CONTRIBUTING.md)](CONTRIBUTING.md)** and **[Code of Conduct (CODE_OF_CONDUCT.md)](CODE_OF_CONDUCT.md)** to get started.
 
 ### Filing Issues
 
