@@ -193,13 +193,21 @@ jobs:
         run: bash scripts/benchmark.sh
         continue-on-error: true   # Network issues must not block CI
 
-      - name: Check for regressions against baseline
+      - name: Warn on regressions against baseline (+20%)
         if: steps.benchmark.outcome == 'success'
         env:
           BASELINE_PATH: docs/performance-baseline.json
           CURRENT_PATH: /tmp/benchmark-current.json
         run: bash scripts/check_regression.sh
-        # Exit 0 always — regressions are warnings, not failures
+        # Exit 0 always — this step emits warnings but never fails the build
+
+      - name: Budget check — fail if any entry point exceeds baseline by >25%
+        if: steps.benchmark.outcome == 'success'
+        env:
+          BASELINE_PATH: docs/performance-baseline.json
+          CURRENT_PATH: /tmp/benchmark-current.json
+        run: bash scripts/check_regression.sh --fail-on-regression
+        # Exit non-zero if any metric exceeds the hard-fail threshold (+25%)
 
       - name: Upload benchmark results as artifact
         if: steps.benchmark.outcome == 'success'
