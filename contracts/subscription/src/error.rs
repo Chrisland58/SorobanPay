@@ -31,15 +31,16 @@ pub enum ContractError {
     Unauthorized          = 6,
     /// `execute_payment` or `batch_execute_payment` token transfer failed.
     ///
-    /// This error is returned when either of the two pre-transfer checks fails:
-    /// 1. **Insufficient balance**: `token.balance(subscriber) < amount` — the subscriber
-    ///    does not have enough tokens to cover the payment amount.
-    /// 2. **Insufficient allowance**: `token.allowance(subscriber, contract) < amount` —
-    ///    the subscriber has revoked or never set the SEP-41 allowance for this contract.
+    /// This error is returned when the balance pre-check fails:
+    /// **Insufficient balance**: `token.balance(subscriber) < amount` — the subscriber
+    /// does not have enough tokens to cover the payment amount.
     ///
-    /// In both cases a `payment_transfer_failure` event is emitted before returning this
-    /// error, and the subscription state (`next_payment`) is NOT advanced, keeping the
+    /// A `payment_transfer_failure` event is emitted before returning this error,
+    /// and the subscription state (`next_payment`) is NOT advanced, keeping the
     /// subscription eligible for retry on the next payment cycle.
+    ///
+    /// Note: insufficient allowance is caught earlier and returns `InsufficientAllowance`
+    /// (code 25) before this check is reached.
     ///
     /// Note: if `transfer` itself panics for a reason not caught by the pre-checks
     /// (e.g. a token contract bug), the host aborts the transaction entirely and this
@@ -59,8 +60,15 @@ pub enum ContractError {
     EmptyBatch            = 13,
     /// `batch_execute_payment` called with more than BATCH_MAX_SIZE (50) subscribers
     BatchTooLarge         = 14,
-    /// `subscribe` called with allowance < amount in strict mode
-    InsufficientAllowance = 15,
+    /// `subscribe` (strict mode) or `execute_payment` called with allowance < amount.
+    ///
+    /// In `subscribe`: returned when `strict = true` and
+    /// `token.allowance(subscriber, contract) < amount`.  When `strict = false` the
+    /// contract emits a `low_allowance` warning event instead and proceeds normally.
+    ///
+    /// In `execute_payment`: returned when the pre-transfer allowance check fails
+    /// (the subscriber has revoked or never set the SEP-41 allowance for this contract).
+    InsufficientAllowance = 25,
     /// `migrate` called when contract is already at the current schema version
     AlreadyMigrated       = 16,
     /// `migrate` called by an address that is not the stored admin
