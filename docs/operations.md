@@ -986,3 +986,273 @@ The dashboard surfaces:
 - `backend/src/routes/health.ts` — health check implementation
 - [Backend API Cookbook](./api-cookbook.md) — recipe examples using `req.log`
 - [Kubernetes Deployment](../README.md#kubernetes-deployment-backend-services) — pod annotations and HPA config
+
+---
+
+## 8. Monitoring Dashboard Setup
+
+This section describes how to set up the pre-built Grafana dashboard and configure
+TTL-specific alerts so your team is notified before subscriptions expire.
+
+### 8.1 Prerequisites
+
+| Tool | Required version | Notes |
+|---|---|---|
+| Prometheus | ≥ 2.40 | Scrapes `/metrics` on port 3001 |
+| Grafana | ≥ 9.0 | Imports the pre-built dashboard JSON |
+| Alertmanager | ≥ 0.25 | Routes alerts to PagerDuty, Slack, email |
+
+Prometheus pod annotations are already set in all three Kubernetes deployments (see
+`deploy/k8s/api-deployment.yaml`, `indexer-deployment.yaml`,
+`webhook-worker-deployment.yaml`):
+
+```yaml
+annotations:
+  prometheus.io/scrape: "true"
+  prometheus.io/port:   "3001"
+  prometheus.io/path:   "/metrics"
+```
+
+### 8.2 Import the Grafana dashboard
+
+The pre-built dashboard is at `deploy/grafana/sorobanpay-dashboard.json`.
+
+**Grafana UI:**
+
+1. Open your Grafana instance and log in.
+2. Click **Dashboards → Import** in the left sidebar.
+3. Click **Upload JSON file** and select `deploy/grafana/sorobanpay-dashboard.json`.
+4. Select your Prometheus data source from the drop-down.
+5. Click **Import**.
+
+**Grafana HTTP API (automated / CI):**
+
+```bash
+curl -s -X POST \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $GRAFANA_API_KEY" \
+  --data-binary @deploy/grafana/sorobanpay-dashboard.json \
+  "https://grafana.example.com/api/dashboards/import"
+# Expected: {"status":"success","slug":"sorobanpay-overview","uid":"..."}
+```
+
+### 8.3 Dashboard panels
+
+The imported dashboard includes the following panels:
+
+| Panel | Metric | Description |
+|---|---|---|
+| RPC poll latency | `sorobanpay_rpc_poll_duration_seconds` | p50 / p95 / p99 histogram |
+| Events indexed/min | `sorobanpay_events_indexed_total` | Rate by event type (`subscribe`, `executed`, `cancel`) |
+| HTTP error rate | `sorobanpay_http_request_duration_seconds` | 4xx / 5xx percentage |
+| HTTP latency heatmap | `sorobanpay_http_request_duration_seconds` | Full latency distribution |
+| Reconciliation repairs | `sorobanpay_reconciliation_repairs_total` | Repairs applied per indexer run |
+| Pod CPU / memory | `process_cpu_seconds_total`, container memory metrics | Requires `metrics-server` |
+
+### 8.4 TTL health alert rules
+
+Add the following Prometheus alert rules to your `prometheus.yml` or a
+`PrometheusRule` CRD (if using the Prometheus Operator):
+
+```yaml
+# deploy/prometheus/ttl-alerts.yaml
+groups:
+  - name: sorobanpay-ttl
+    rules:
+      # WARN: /health/ttl endpoint returning 503
+      - alert: SorobanPayTTLAtRisk
+        expr: |
+          probe_success{job="sorobanpay-ttl-health"} == 0
+        for: 5m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "SorobanPay: one or more subscriptions are at-risk of TTL expiry"
+          description: >
+            The /health/ttl endpoint on {{ $labels.instance }} is returning 503.
+            At least one monitored subscription has fewer than 622,080 ledgers (~36 days) remaining.
+            Trigger a TTL refresh via subscribe() with existing values.
+          runbook_url: "https://github.com/Chrisland58/SorobanPay/blob/main/docs/operations.md#3-programmatic-ttl-extension"
+
+      # CRITICAL: /health/ttl has been unhealthy for more than 1 hour
+      - alert: SorobanPayTTLCritical
+        expr: |
+          probe_success{job="sorobanpay-ttl-health"} == 0
+        for: 1h
+        labels:
+          severity: critical
+          team: platform
+        annotations:
+          summary: "SorobanPay: TTL at-risk alert has been active for over 1 hour"
+          description: >
+            A subscription TTL has remained below the WARN threshold for 1+ hours.
+            Remaining time may now be below the CRITICAL threshold (~6 days).
+            Page on-call and follow the emergency TTL extension runbook.
+          runbook_url: "https://github.com/Chrisland58/SorobanPay/blob/main/docs/storage-ttl.md#7-emergency-ttl-extension-procedure"
+
+      # INFO: no payment collected from merchant in 293+ days
+      - alert: SorobanPayMerchantInactive
+        expr: |
+          increase(sorobanpay_events_indexed_total{type="executed"}[293d]) == 0
+        for: 1d
+        labels:
+          severity: info
+          team: platform
+        annotations:
+          summary: "SorobanPay: merchant has had no payment collected in 293+ days"
+          description: >
+            No 'executed' events have been indexed for merchant {{ $labels.merchant }}
+            in the past 293 days. The subscription TTL may be below the INFO threshold.
+            Notify the merchant to collect payment or trigger a TTL refresh.
+```
+
+Apply the alert rules:
+
+```bash
+# Kubernetes Prometheus Operator
+kubectl apply -f deploy/prometheus/ttl-alerts.yaml -n sorobanpay
+
+# Standalone Prometheus: add to prometheus.yml rule_files and reload
+curl -X POST http://localhost:9090/-/reload
+```
+
+### 8.5 Blackbox probe for the TTL health endpoint
+
+Configure Prometheus Blackbox Exporter to probe `/health/ttl` and feed
+`probe_success` into the alert rules above:
+
+```yaml
+# Blackbox exporter config (blackbox.yml)
+modules:
+  http_2xx:
+    prober: http
+    timeout: 10s
+    http:
+      valid_http_versions: ["HTTP/1.1", "HTTP/2.0"]
+      valid_status_codes: [200]  # 503 → probe_success = 0
+      method: GET
+```
+
+Add a scrape job to Prometheus:
+
+```yaml
+# prometheus.yml scrape_configs
+- job_name: sorobanpay-ttl-health
+  metrics_path: /probe
+  params:
+    module: [http_2xx]
+  static_configs:
+    - targets:
+        - http://sorobanpay-api.sorobanpay.svc.cluster.local:3001/health/ttl
+  relabel_configs:
+    - source_labels: [__address__]
+      target_label: __param_target
+    - source_labels: [__param_target]
+      target_label: instance
+    - target_label: __address__
+      replacement: blackbox-exporter:9115
+```
+
+### 8.6 Alertmanager routing
+
+Route TTL alerts to the platform team's on-call channel:
+
+```yaml
+# alertmanager.yml
+route:
+  group_by: [alertname, severity]
+  receiver: default
+  routes:
+    - match:
+        alertname: SorobanPayTTLCritical
+      receiver: pagerduty-platform
+    - match:
+        alertname: SorobanPayTTLAtRisk
+      receiver: slack-platform
+
+receivers:
+  - name: pagerduty-platform
+    pagerduty_configs:
+      - routing_key: "$PAGERDUTY_ROUTING_KEY"
+
+  - name: slack-platform
+    slack_configs:
+      - api_url: "$SLACK_WEBHOOK_URL"
+        channel: "#sorobanpay-alerts"
+        text: "{{ range .Alerts }}{{ .Annotations.description }}\nRunbook: {{ .Annotations.runbook_url }}{{ end }}"
+```
+
+---
+
+## 9. Expired Subscription Recovery Runbook
+
+Use this runbook when a subscription entry has already expired (TTL reached zero)
+and `execute_payment` is returning `ContractError::NoActiveSubscription`.
+
+### Confirm the subscription has expired (not cancelled)
+
+1. Check your off-chain event index for a `cancel` event for the
+   `(subscriber, merchant)` pair. If a `cancel` event exists, the subscription was
+   intentionally cancelled — do not attempt recovery without subscriber consent.
+
+2. Query the ledger entry directly:
+
+   ```bash
+   # If getLedgerEntries returns no entry, the subscription has expired
+   node scripts/check-ttl.mjs "$SUBSCRIBER_ADDRESS" "$MERCHANT_ADDRESS"
+   # Output: "No entry found (subscription does not exist or has expired)."
+   ```
+
+3. Check that `get_subscription` returns `None`:
+
+   ```bash
+   stellar contract invoke \
+     --id "$CONTRACT_ID" \
+     --network "$STELLAR_NETWORK" \
+     -- get_subscription \
+     --subscriber "$SUBSCRIBER_ADDRESS" \
+     --merchant   "$MERCHANT_ADDRESS" \
+     --token      "$TOKEN_ADDRESS"
+   # Output: null / None → confirmed expired
+   ```
+
+### Recovery path
+
+Because Soroban archives the entry permanently when TTL reaches zero, **there is no
+way to restore the original subscription record**. Recovery always means creating a
+new subscription.
+
+| Step | Action | Who does it |
+|---|---|---|
+| 1 | Notify the subscriber that their subscription has expired and they must re-subscribe | Merchant / application layer |
+| 2 | Subscriber re-approves the SEP-41 token allowance for the contract address | Subscriber |
+| 3 | Subscriber calls `subscribe()` with the same or updated terms | Subscriber |
+| 4 | Merchant confirms the new subscription via `get_subscription` | Merchant |
+| 5 | Merchant resumes collecting via `execute_payment` after `next_payment` window opens | Merchant |
+| 6 | Update off-chain database: mark old subscription as expired; insert new subscription record | Backend / indexer |
+
+> **Billing cycle note:** The new subscription sets `next_payment = now + interval`.
+> Depending on how long the entry was expired, there may be a gap in billing. This
+> is an application-layer concern — the contract does not backfill missed payments.
+
+### Prevent recurrence
+
+After recovery, ensure the subscription is covered by the TTL monitoring setup
+in [§8](#8-monitoring-dashboard-setup). If the subscription expired because payments
+were never collected (e.g., an annual subscription where the merchant missed the
+payment window), configure a proactive TTL refresh using the procedure in
+[§3 — Programmatic TTL Extension](#3-programmatic-ttl-extension).
+
+---
+
+### See Also (updated)
+
+- [Storage TTL Guide](./storage-ttl.md) — TTL constants, cost implications, and the emergency extension procedure
+- [Network Configuration Guide](./networks.md) — testnet vs. mainnet RPC and passphrase values
+- [Backend API Cookbook](./api-cookbook.md) — Recipe 8: Monitor subscription TTL health
+- `contracts/subscription/src/storage.rs` — TTL constant definitions
+- [Soroban RPC getLedgerEntries spec](https://developers.stellar.org/docs/data/rpc/api-reference/methods/getLedgerEntries)
+- [Soroban Storage and TTL](https://developers.stellar.org/docs/build/smart-contracts/storage/ttl)
+- `deploy/grafana/sorobanpay-dashboard.json` — pre-built Grafana dashboard
+- `deploy/prometheus/` — Prometheus scrape config and alert rules
