@@ -13,6 +13,8 @@
  *  - A button to create another subscription
  */
 
+import { CopyButton } from './CopyButton';
+
 export interface SuccessCardData {
   /** Stellar transaction hash (hex or base64) */
   txHash: string;
@@ -51,7 +53,10 @@ export function SuccessCard({ data, onReset }: SuccessCardProps) {
 
       {/* Tx hash */}
       <div className="bg-gray-800/50 rounded-lg p-3 border border-gray-700/50">
-        <p className="text-gray-400 text-xs mb-1.5 font-medium">Transaction hash</p>
+        <div className="flex items-center justify-between mb-1.5">
+          <p className="text-gray-400 text-xs font-medium">Transaction hash</p>
+          <CopyButton text={data.txHash} label="Copy tx hash" />
+        </div>
         <p className="text-gray-200 break-all font-mono text-xs leading-relaxed">
           {data.txHash}
         </p>
@@ -66,7 +71,10 @@ export function SuccessCard({ data, onReset }: SuccessCardProps) {
           every {days} day{days !== 1 ? 's' : ''}
         </span>
         <span className="text-gray-400 font-medium break-all">Merchant</span>
-        <span className="break-all font-mono text-xs">{data.merchant}</span>
+        <div className="flex items-center gap-1 min-w-0">
+          <span className="break-all font-mono text-xs truncate">{data.merchant}</span>
+          <CopyButton text={data.merchant} label="Copy merchant address" />
+        </div>
       </div>
 
       {/* Next steps */}
