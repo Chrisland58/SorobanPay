@@ -371,13 +371,29 @@ impl SubscriptionProtocol {
         // 1. Authorization — subscriber controls their own subscription terms.
         subscriber.require_auth();
 
-        // 2. Verify subscription exists.
-        let key = DataKey::Subscription(subscriber.clone(), merchant.clone());
-        let mut data: SubscriptionData = env
+        // 2. Resolve the pair's hashed storage key using the merchant index.
+        let index_key = DataKey::MerchantIndex(merchant.clone());
+        let hashes: Vec<BytesN<32>> = env
             .storage()
-            .persistent()
-            .get(&key)
-            .ok_or(ContractError::NoActiveSubscription)?;
+            .temporary()
+            .get(&index_key)
+            .unwrap_or_else(|| Vec::new(&env));
+        let mut found = None;
+        for hash in hashes.iter() {
+            let candidate_key = DataKey::Subscription(hash.clone());
+            if let Some(candidate) = env
+                .storage()
+                .persistent()
+                .get::<_, SubscriptionData>(&candidate_key)
+            {
+                if subscription_key(&env, &subscriber, &merchant, &candidate.token) == hash {
+                    found = Some((hash, candidate));
+                    break;
+                }
+            }
+        }
+        let (hash, mut data) = found.ok_or(ContractError::NoActiveSubscription)?;
+        let key = DataKey::Subscription(hash);
 
         // 3. Validate new amount (same rules as subscribe()).
         if new_amount <= 0 {
@@ -396,12 +412,13 @@ impl SubscriptionProtocol {
         }
 
         // 5. Capture old values for the event before overwriting.
-        let old_amount   = data.amount;
+        let old_amount = data.amount;
         let old_interval = data.interval;
+        let token = data.token.clone();
 
         // 6. Update in-place — deliberately do NOT touch next_payment so the
         //    subscriber's current billing cycle continues uninterrupted.
-        data.amount   = new_amount;
+        data.amount = new_amount;
         data.interval = new_interval;
 
         // 7. Persist.
@@ -417,9 +434,10 @@ impl SubscriptionProtocol {
             &env,
             &subscriber,
             &merchant,
+            &token,
             old_amount,
-            new_amount,
             old_interval,
+            new_amount,
             new_interval,
         );
 

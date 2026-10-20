@@ -679,6 +679,50 @@ fn test_subscribe_event_topics_and_data() {
 }
 
 #[test]
+fn test_update_subscription_emits_updated_event_with_old_and_new_terms() {
+    let t = T::new();
+    let old_amount = 100_000_i128;
+    let old_interval = 86_400_u64;
+    let new_amount = 250_000_i128;
+    let new_interval = 172_800_u64;
+
+    t.client.subscribe(
+        &t.subscriber,
+        &t.merchant,
+        &t.token,
+        &old_amount,
+        &old_interval,
+        &false,
+    );
+    t.client.update_subscription(
+        &t.subscriber,
+        &t.merchant,
+        &new_amount,
+        &new_interval,
+    );
+
+    let all = t.env.events().all();
+    let expected_topics = (
+        Symbol::new(&t.env, "updated"),
+        t.subscriber.clone(),
+        t.merchant.clone(),
+        t.token.clone(),
+    )
+        .into_val(&t.env);
+    let update_events: Vec<_> = all
+        .iter()
+        .filter(|event| event.0 == t.contract_id && event.1 == expected_topics)
+        .collect();
+    assert_eq!(update_events.len(), 1, "one updated event must be emitted");
+
+    let expected_data = (old_amount, old_interval, new_amount, new_interval).into_val(&t.env);
+    assert_eq!(
+        update_events[0].2, expected_data,
+        "updated event must contain old and new amount and interval"
+    );
+}
+
+#[test]
 fn test_execute_payment_emits_event() {
     let t = T::new();
     t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &500_i128, &86_400_u64, &false);

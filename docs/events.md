@@ -23,6 +23,7 @@ This document provides comprehensive documentation for all events emitted by the
 | Event | Emitted by | Topics | Data | Condition |
 |-------|-----------|--------|------|-----------|
 | `subscribe` | `subscribe()` | `(sym, subscriber, merchant, token)` | `i128` amount | Always on success |
+| `updated` | `update_subscription()` | `(sym, subscriber, merchant, token)` | `(i128 old_amount, u64 old_interval, i128 new_amount, u64 new_interval)` | Successful update |
 | `executed` | `execute_payment()`, `batch_execute_payment()` | `(sym, subscriber, merchant, token)` | `(i128 amount, u64 nonce)` | Successful transfer |
 | `expired` | `expire_subscription()` | `(sym, subscriber, merchant)` | `()` | Grace period elapsed |
 | `payment_transfer_failure` | `execute_payment()`, `batch_execute_payment()` | `(sym, subscriber, merchant)` | `i128` amount attempted | Insufficient subscriber balance |
@@ -177,6 +178,25 @@ function decodeSubscribeEvent(event) {
   };
 }
 ```
+
+### `updated`
+
+Emitted after `update_subscription()` successfully changes an active subscription's
+amount and/or billing interval.
+
+**Topics**:
+- `Symbol("updated")`
+- `Address` - Subscriber address
+- `Address` - Merchant address
+- `Address` - Token contract address
+
+**Data**:
+- `i128` - Previous payment amount
+- `u64` - Previous interval in seconds
+- `i128` - New payment amount
+- `u64` - New interval in seconds
+
+**When Emitted**: After the updated subscription has been stored successfully.
 
 ### 3. executed
 

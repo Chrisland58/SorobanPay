@@ -29,6 +29,31 @@ pub fn emit_subscribe(env: &Env, subscriber: &Address, merchant: &Address, token
     );
 }
 
+/// Emit the `updated` event after a subscription's amount and interval have been changed.
+///
+/// Topics:  (symbol("updated"), subscriber, merchant, token)
+/// Data:    (old_amount, old_interval, new_amount, new_interval)
+pub fn emit_updated(
+    env: &Env,
+    subscriber: &Address,
+    merchant: &Address,
+    token: &Address,
+    old_amount: i128,
+    old_interval: u64,
+    new_amount: i128,
+    new_interval: u64,
+) {
+    env.events().publish(
+        (
+            Symbol::new(env, "updated"),
+            subscriber.clone(),
+            merchant.clone(),
+            token.clone(),
+        ),
+        (old_amount, old_interval, new_amount, new_interval),
+    );
+}
+
 /// Emit the `payment_transfer_success` event after a payment transfer has been successfully
 /// completed and the next_payment timestamp has been updated.
 ///
