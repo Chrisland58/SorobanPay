@@ -2,11 +2,78 @@
 @tailwind components;
 @tailwind utilities;
 
+/**
+ * SorobanPay design-system CSS layer — Issue #1427
+ *
+ * Custom properties map the Tailwind color tokens to CSS variables so that
+ * plain CSS (e.g. in third-party libs) can consume the same palette.
+ *
+ * Dark mode is the default; light-mode overrides live under `.light`.
+ */
+
 @layer base {
-  /* Ensure sufficient contrast baseline for the dark theme */
+  :root {
+    /* ── Brand (Stellar blue) ────────────────────────────────────────── */
+    --color-brand-50:  theme('colors.brand.50');
+    --color-brand-100: theme('colors.brand.100');
+    --color-brand-200: theme('colors.brand.200');
+    --color-brand-300: theme('colors.brand.300');
+    --color-brand-400: theme('colors.brand.400');
+    --color-brand-500: theme('colors.brand.500');
+    --color-brand-600: theme('colors.brand.600');
+    --color-brand-700: theme('colors.brand.700');
+    --color-brand-800: theme('colors.brand.800');
+    --color-brand-900: theme('colors.brand.900');
+    --color-brand-950: theme('colors.brand.950');
+
+    /* ── Success ─────────────────────────────────────────────────────── */
+    --color-success-400: theme('colors.success.400');
+    --color-success-500: theme('colors.success.500');
+    --color-success-600: theme('colors.success.600');
+
+    /* ── Warning ─────────────────────────────────────────────────────── */
+    --color-warning-400: theme('colors.warning.400');
+    --color-warning-500: theme('colors.warning.500');
+    --color-warning-600: theme('colors.warning.600');
+
+    /* ── Error ───────────────────────────────────────────────────────── */
+    --color-error-400: theme('colors.error.400');
+    --color-error-500: theme('colors.error.500');
+    --color-error-600: theme('colors.error.600');
+
+    /* ── Neutral (dark-first defaults) ───────────────────────────────── */
+    --color-neutral-0:   theme('colors.neutral.0');
+    --color-neutral-50:  theme('colors.neutral.50');
+    --color-neutral-100: theme('colors.neutral.100');
+    --color-neutral-400: theme('colors.neutral.400');
+    --color-neutral-500: theme('colors.neutral.500');
+    --color-neutral-700: theme('colors.neutral.700');
+    --color-neutral-800: theme('colors.neutral.800');
+    --color-neutral-900: theme('colors.neutral.900');
+    --color-neutral-950: theme('colors.neutral.950');
+
+    /* ── Semantic tokens (dark-first) ────────────────────────────────── */
+    --color-bg:           var(--color-neutral-950);  /* page background */
+    --color-surface:      var(--color-neutral-900);  /* card background */
+    --color-surface-2:    var(--color-neutral-800);  /* input background */
+    --color-border:       var(--color-neutral-700);  /* default border */
+    --color-text:         var(--color-neutral-50);   /* primary text */
+    --color-text-muted:   var(--color-neutral-400);  /* secondary/placeholder text */
+    --color-focus-ring:   var(--color-brand-400);    /* global focus ring */
+    --color-primary:      var(--color-brand-600);    /* primary button */
+    --color-primary-hover: var(--color-brand-500);   /* primary button hover */
+  }
+
+  /* ─── Base element styles ──────────────────────────────────────────────── */
+
   body {
-    background-color: #030712; /* gray-950 — darker than gray-900 for better card contrast */
-    color: #f9fafb;            /* gray-50 — 16.7:1 on gray-950, exceeds WCAG AAA */
+    /**
+     * Use the neutral-950 token (#030712) — darker than gray-900 for better
+     * card contrast. Falls back to the hex so the page never flashes white.
+     * WCAG contrast: #f9fafb on #030712 = 16.7:1 (exceeds AAA).
+     */
+    background-color: var(--color-bg, #030712);
+    color: var(--color-text, #f9fafb);
   }
 
   /*
@@ -14,13 +81,15 @@
    * interactive elements regardless of component-level styling omissions.
    * Components that define their own focus-visible styles take precedence
    * via CSS specificity.
+   *
+   * brand-400 (#60a5fa) meets WCAG 3:1 minimum on neutral-900 (#111827).
    */
   :focus-visible {
-    outline: 2px solid #60a5fa; /* blue-400 — meets WCAG 3:1 on gray-900 */
+    outline: 2px solid var(--color-focus-ring, #60a5fa);
     outline-offset: 2px;
   }
 
-  /* Remove the browser default outline only when we know JS focus-visible is active */
+  /* Remove the browser default outline only when focus-visible is active */
   :focus:not(:focus-visible) {
     outline: none;
   }
