@@ -11,6 +11,7 @@
 import { useState } from 'react';
 import SubscriptionForm from '@/components/SubscriptionForm';
 import OnboardingGuide from '@/components/OnboardingGuide';
+import OnboardingWizard from '@/components/OnboardingWizard';
 import { useWallet } from '@/hooks/useWallet';
 
 function OnboardingCard({ freighterInstalled }: { freighterInstalled: boolean }) {
@@ -112,6 +113,9 @@ export default function Home() {
     <main className="min-h-screen flex flex-col items-center px-4 py-12">
       {/* Onboarding guide */}
       <OnboardingGuide isConnected={!!publicKey} />
+
+      {/* Issue #1428 — 5-step onboarding wizard for first-time users */}
+      <OnboardingWizard freighterInstalled={freighterInstalled} />
 
       {/* Header */}
       <div className="w-full max-w-lg mb-8 text-center">
