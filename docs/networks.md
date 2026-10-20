@@ -294,11 +294,174 @@ Keep old contract addresses in `deployments.json` with a `deprecated_at` field f
 
 ---
 
+## 6. How to verify you're on the correct network
+
+Run these checks any time you suspect a network mismatch between your environment
+variables, Freighter, and the deployed contract.
+
+### 6.1 Verify the RPC endpoint
+
+```bash
+# Should return 200 OK and a JSON health status
+curl -s -X POST \
+  -H "Content-Type: application/json" \
+  --data '{"jsonrpc":"2.0","id":1,"method":"getHealth"}' \
+  "$RPC_URL" | jq .result
+# Testnet expected: {"status":"healthy"}
+# Mainnet expected: {"status":"healthy"}
+# Wrong URL / offline: connection error or non-JSON response
+```
+
+### 6.2 Verify the network passphrase
+
+The passphrase is embedded in every signed transaction. Use this quick check to
+confirm your configured passphrase matches the target network:
+
+```typescript
+import { Networks } from "@stellar/stellar-sdk";
+
+const configured = process.env.NEXT_PUBLIC_NETWORK_PASSPHRASE;
+const testnet  = Networks.TESTNET;  // "Test SDF Network ; September 2015"
+const mainnet  = Networks.PUBLIC;   // "Public Global Stellar Network ; September 2015"
+
+if (configured === testnet) {
+  console.log("✅ Configured for TESTNET");
+} else if (configured === mainnet) {
+  console.log("✅ Configured for MAINNET");
+} else {
+  console.error("❌ UNKNOWN passphrase — check NEXT_PUBLIC_NETWORK_PASSPHRASE");
+}
+```
+
+### 6.3 Verify Freighter is on the correct network
+
+```typescript
+import { getNetworkDetails } from "@stellar/freighter-api";
+
+const details = await getNetworkDetails();
+const expected = process.env.NEXT_PUBLIC_NETWORK_PASSPHRASE;
+
+if (details.networkPassphrase !== expected) {
+  alert(
+    `Freighter is on the wrong network.\n` +
+    `Expected: ${expected}\n` +
+    `Freighter: ${details.networkPassphrase}\n\n` +
+    `Please switch networks in the Freighter extension.`
+  );
+}
+```
+
+### 6.4 Verify the contract is deployed on this network
+
+```bash
+stellar contract invoke \
+  --id "$CONTRACT_ID" \
+  --network "$STELLAR_NETWORK" \
+  -- get_version
+# Expected: "1.0.0" (or whatever the deployed version is)
+# Wrong network / wrong address: "ERROR: contract not found" or RPC error
+```
+
+### 6.5 Check the deployed address registry
+
+```bash
+cat deploy/deployments.json | jq ".${STELLAR_NETWORK}.contract_id"
+# Expected: your contract address for that network
+# Mismatch: CONTRACT_ID env var doesn't match what was deployed
+```
+
+### Quick-reference checklist
+
+| Check | Command / tool | Expected result |
+|---|---|---|
+| RPC reachable | `curl ... getHealth` | `{"status":"healthy"}` |
+| Network passphrase | SDK `Networks.*` comparison | Matches `NEXT_PUBLIC_NETWORK_PASSPHRASE` |
+| Freighter network | `getNetworkDetails()` | Passphrase matches env var |
+| Contract deployed | `stellar contract invoke ... get_version` | Version string returned |
+| Contract address correct | `deploy/deployments.json` | Address matches `CONTRACT_ID` env var |
+
+---
+
+## 7. Mainnet funding instructions
+
+Mainnet requires **real XLM**. There is no Friendbot; every account must be funded
+by an existing funded account or by purchasing XLM on an exchange.
+
+### Minimum balance requirements
+
+| Use | Minimum XLM | Reason |
+|---|---|---|
+| Identity (deployer) account | 2 XLM | 1 XLM base reserve + 1 XLM for transaction fees and contract upload |
+| Subscriber account | 0.5 XLM | Transaction fee per `subscribe` + `execute_payment` call |
+| Merchant account | 0.5 XLM | Transaction fee per `execute_payment` |
+
+> These are minimums. For production, fund deployer accounts with at least 10 XLM
+> to cover multiple deployments, fee spikes, and unexpected transactions.
+
+### Step 1 — Create a Stellar mainnet identity
+
+```bash
+# Generate a new keypair (one-time, per role)
+stellar keys generate prod-deployer
+stellar keys generate prod-subscriber  # for testing subscriber flows
+
+# Print the public key to fund it
+stellar keys show prod-deployer
+# Output: G<56-character Stellar public key>
+```
+
+### Step 2 — Acquire XLM
+
+Purchase XLM from a regulated exchange (Coinbase, Kraken, Binance, etc.) or have
+another funded account send XLM to your public key. The minimum to activate an
+account is **1 XLM** (the Stellar base reserve).
+
+> **Security:** Never share your secret key. The public key (starting with `G`) is
+> safe to share and is what you send XLM to.
+
+### Step 3 — Send XLM to your identity
+
+From an exchange withdrawal or another wallet, send XLM to the public key printed
+in Step 1. Wait for the transaction to confirm on-chain (usually within 5 seconds).
+
+### Step 4 — Verify the account is funded
+
+```bash
+# Check via Stellar CLI
+stellar account info "$(stellar keys show prod-deployer)" --network mainnet
+
+# Or via Horizon REST API
+curl "https://horizon.stellar.org/accounts/$(stellar keys show prod-deployer)" | jq .balances
+# Expected: at least one entry with asset_type "native" and balance >= "1.0000000"
+```
+
+### Step 5 — Verify on Stellar Expert
+
+Paste your public key into [Stellar Expert](https://stellar.expert/explorer/public)
+(mainnet explorer) and confirm the account is active with sufficient XLM balance.
+
+### Funding via Friendbot — testnet only
+
+On testnet you can skip the above entirely and use Friendbot:
+
+```bash
+stellar keys fund "$IDENTITY" --network testnet
+# Or via curl:
+curl "https://friendbot.stellar.org?addr=$(stellar keys show $IDENTITY)"
+```
+
+Friendbot funds with 10,000 XLM on testnet. **Friendbot does not exist on mainnet.**
+
+---
+
 ## See Also
 
 - [Storage TTL Management Guide](./operations.md) — alert thresholds, TTL detection scripts
+- [Versioning and Migration Guide](./versioning.md) — updating contract addresses after a new deployment
 - [Backend API Cookbook](./api-cookbook.md) — recipes for all API operations
 - `deploy/deploy.sh` — network-aware deployment script
+- `deploy/deployments.json` — per-network contract address registry
 - `frontend/.env.example` — environment variable template
 - [Stellar Documentation — Networks](https://developers.stellar.org/docs/learn/fundamentals/networks)
+- [Stellar Expert (mainnet explorer)](https://stellar.expert/explorer/public)
 - [Freighter API](https://docs.freighter.app)
