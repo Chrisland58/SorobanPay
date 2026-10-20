@@ -14,6 +14,7 @@ This document provides comprehensive documentation on how SorobanPay manages sto
 8. [Developer Considerations](#developer-considerations)
 9. [Diagrams and Examples](#diagrams-and-examples)
 10. [Frequently Asked Questions](#frequently-asked-questions)
+11. [Data Inventory, Retention, and Deletion](#data-inventory-retention-and-deletion)
 
 ## What is Soroban Storage TTL
 
@@ -532,6 +533,62 @@ TTL:    365 days   336 days   365 days   336 days   307 days
 **A:** Stellar mainnet targets ~5 seconds per ledger, but actual times vary. TTL calculations are approximate in wall-clock time but precise in ledgers.
 
 ---
+
+## Data Inventory, Retention, and Deletion
+
+This section inventories data represented in the repository. It is not a retention schedule: no configured retention period or automated tenant-wide deletion job was found for PostgreSQL, application logs, or backups. Production operators must identify the deployed schema and external logging/backup policies before promising deletion dates. Do not infer a retention period from a table's `created_at` column.
+
+### Inventory
+
+| Store | Data and tenant scope | Observed lifetime / deletion behavior |
+|---|---|---|
+| Soroban persistent contract storage | Subscription state keyed by subscriber and merchant; publicly observable chain state | Contract constants set a maximum TTL of 6,307,200 ledgers (about 365 days). Expiration/archival is protocol-controlled; it is not a tenant erasure mechanism and does not erase public transaction history. |
+| Soroban temporary storage | Merchant subscription index and short-lived contract data | The contract documentation describes an approximately 24-hour lifetime. Verify the deployed contract version and network behavior before relying on it. |
+| PostgreSQL indexed events and indexer state | Event rows include merchant, subscriber, token, amount, and ledger; the indexer cursor supports resumable ingestion. Migrations include `tenant_id` for events/subscriptions, defaulting existing rows to `default`. | No age-based cleanup is configured. Event rows are source material for derived state; deletion can prevent or impair rebuild/reconciliation. |
+| PostgreSQL payment, audit, retry, and summaries | Payment/audit transaction hashes, addresses, token, amount, ledger/status/time; retry state/errors; merchant payout summaries. See `backend/prisma/schema.prisma` and `backend/migrations/`. | No retention or tenant-erasure schedule is configured. Audit records are operational evidence, not automatically immutable: apply approved access controls and legal holds before any deletion. |
+| PostgreSQL webhook configuration and delivery history | Endpoint URL and (where enabled) signing secret; per-attempt URL, event payload, status, and error. These fields can contain customer or endpoint data. | No retention schedule is configured. The webhook idempotency migration uses `ON DELETE SET NULL` for a deleted endpoint, so its delivery rows remain. Confirm endpoint deletion behavior for the deployed API/schema. |
+| PostgreSQL notification preferences | Email address, optional subscriber/merchant address, unsubscribe token, and preferences, represented in the Prisma schema. | No retention schedule is configured. Include email and unsubscribe-token records in a subject/tenant inventory where deployed. |
+| Redis cache and authentication challenge | Tenant-namespaced derived cache; SEP-10 challenge data. Defaults in `backend/src/lib/redis.ts` are 60 seconds for subscription lists, 300 seconds for analytics, and 30 seconds for subscription detail; `backend/src/services/authService.ts` sets challenge TTL to 300 seconds. | Cache entries expire at their configured TTL; challenge keys expire after five minutes. These lifetimes do not apply to BullMQ jobs, retry state, Redis persistence, snapshots, or external backups. Never use `FLUSHALL` for one tenant. |
+| Application and container logs | Structured backend output and runtime/container logs may include operational identifiers and errors. | Pino writes to stdout; this repository does not configure log-collector retention or deletion. Docker/Kubernetes/cloud log retention is controlled by the deployment. Restrict access and avoid exporting secrets or raw customer payloads. |
+| Database and Redis backups | Persistent database/Redis volumes and any operator-managed snapshots or exports can contain the same tenant data as their source stores. The local Compose file defines `pgdata` and `redisdata` volumes, not a backup schedule. | No backup retention or tenant-level purge procedure is configured here. A live-row deletion does not remove copies from backups; track backup expiry and restore access separately. |
+| Derived data | Payout summaries, subscription read models, caches, retry/delivery queues, and other projections derived from chain events or database rows. | PostgreSQL projections have no configured TTL. Cache defaults are listed above; queue/job retention is deployment-dependent and not specified as a tenant deletion policy. Purging source events may make derived data impossible to reconstruct. |
+
+The canonical files to review are `backend/prisma/schema.prisma`, `backend/migrations/`, `backend/src/lib/redis.ts`, `backend/src/services/authService.ts`, `backend/src/lib/logger.ts`, `backend/audit-trail/`, and `docker-compose.yml`. Prisma models and SQL migrations have evolved separately; confirm the live database schema rather than assuming every model/table name in these files matches a given deployment.
+
+### Inspect before changing retention
+
+Use the configured database connection without printing it or placing its value in shell history. The following read-only commands report the live table inventory and recent container logs:
+
+```bash
+psql "$DATABASE_URL" -X -v ON_ERROR_STOP=1 -c "SELECT table_schema, table_name FROM information_schema.tables WHERE table_schema = current_schema() AND table_type = 'BASE TABLE' ORDER BY table_name;"
+docker compose ps
+docker compose logs --since=24h indexer
+```
+
+Expected: `psql` lists the tables actually present; the log command shows only the runtime window still available from the container logging driver. Compare table names with `backend/migrations/` and inspect each tenant-bearing table's columns and migration history before counting or changing rows. If the database is unreachable, a query fails, or logs have already rotated, stop the deletion request, preserve the sanitized error and incident time, restore authorized read access or retrieve logs from the configured central collector, and do not treat missing output as proof of deletion.
+
+Before any approved retention run, take and verify a restricted backup using the deployment's approved destination and access controls. Example for an operator-controlled path:
+
+```bash
+umask 077
+pg_dump "$DATABASE_URL" --format=custom --no-owner --no-acl --file="$BACKUP_FILE"
+pg_restore --list "$BACKUP_FILE" >/dev/null
+```
+
+Expected: both commands exit successfully and the backup file is readable by `pg_restore`. This verifies archive readability, not recoverability; restore it to an isolated database and verify representative records before relying on it. If backup creation or verification fails, keep the existing source data and prior valid backups, fix the access/storage issue, and repeat. Never use `docker compose down -v` as a tenant deletion or retention command: it removes the entire local Compose volumes, not one tenant's data.
+
+### Tenant deletion and retention checklist
+
+There is no repository-supported, atomic tenant-erasure command. Treat a deletion request as an operator-controlled workflow, not a hand-written `DELETE` against one table:
+
+1. Authenticate and scope the request to the merchant/tenant identifiers in the deployed schema. Include subscriber-linked preferences and records, webhook endpoints and deliveries, payment idempotency/retry rows, audit records, logs, exports, caches, queues, and backups where present. Confirm whether a legal, financial, or security hold requires retaining or restricting specific records.
+2. Inventory affected rows read-only in each verified live table using the same tenant predicate intended for deletion. Review counts and table dependencies with a second operator. Stop if tenant ownership is ambiguous, the schema differs from the reviewed migration, or counts include unrelated merchants; correct the mapping and repeat the read-only inventory.
+3. Preserve only the evidence and records required by an approved retention/legal policy. Record the approval, scope, expected exceptions, backup identifiers and expiry, operator, and time. Do not export credentials, webhook secrets, full payloads, or unnecessary personal data into the ticket.
+4. Disable the tenant's webhook endpoints and scheduled work using the deployed service's supported controls. Remove tenant-specific cache keys and queue jobs through their owning service/admin interface; never flush a shared Redis instance. Do not delete indexed events before deciding how payments, audit history, reconciliation, and derived summaries will be retained or rebuilt.
+5. Execute only a reviewed, tenant-scoped deletion/anonymization procedure that accounts for foreign keys and audit requirements. The repository does not provide such a procedure. If no approved procedure exists, stop and escalate to the data owner rather than inventing SQL or deleting rows manually.
+6. Verify the approved result with read-only counts in every in-scope live store, check that shared tenants remain present, confirm access to required retained evidence, and track when backups and centralized logs containing the deleted data expire. Keep a minimal, access-controlled completion record without copying the deleted data into it.
+
+If a deletion batch partially fails, stop further batches, retain the error and affected table/count, and do not claim completion. Use the approved rollback/restore plan against an isolated database first; request data-owner review before restoring or replaying any production data, since restoration can reintroduce records that were meant to be erased.
 
 ## Related Documentation
 

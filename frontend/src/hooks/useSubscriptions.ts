@@ -10,6 +10,8 @@
  *   4. Calling get_subscription() (via simulateTransaction) for each active pair
  *      to retrieve amount, interval, and next_payment timestamp
  *
+ * Transient RPC reads receive a bounded retry with exponential backoff. A
+ * failed refresh leaves the last successful result available to the dashboard.
  * Returns loading, error, subscriptions array, and a refetch function.
  *
  * Dashboard feature – subscriber view
@@ -76,11 +78,56 @@ function toStr(v: unknown): string {
 // Maximum ledger range for getEvents – Stellar RPC caps at 4320 ledgers (~6 hours)
 // For a broader history we paginate; here we use 4000 to stay under the cap.
 const LEDGER_WINDOW = 4000;
+const READ_RETRY_DELAYS_MS = [200, 400];
+
+function abortRead(): Error {
+  const error = new Error('Read cancelled');
+  error.name = 'AbortError';
+  return error;
+}
+
+function waitForRetry(delayMs: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    if (signal.aborted) {
+      resolve();
+      return;
+    }
+
+    const finish = () => {
+      clearTimeout(timeout);
+      signal.removeEventListener('abort', finish);
+      resolve();
+    };
+    const timeout = setTimeout(finish, delayMs);
+    signal.addEventListener('abort', finish, { once: true });
+  });
+}
+
+async function readWithRetry<T>(
+  read: () => Promise<T>,
+  signal: AbortSignal,
+): Promise<T> {
+  for (let attempt = 0; ; attempt += 1) {
+    if (signal.aborted) throw abortRead();
+
+    try {
+      const result = await read();
+      if (signal.aborted) throw abortRead();
+      return result;
+    } catch (error) {
+      if (signal.aborted) throw abortRead();
+      const delay = READ_RETRY_DELAYS_MS[attempt];
+      if (delay === undefined) throw error;
+      await waitForRetry(delay, signal);
+    }
+  }
+}
 
 // ─── Main hook ────────────────────────────────────────────────────────────────
 
 export function useSubscriptions(publicKey: string | null): UseSubscriptionsReturn {
   const [subscriptions, setSubscriptions] = useState<Subscription[]>([]);
+  const [dataPublicKey, setDataPublicKey] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -94,9 +141,14 @@ export function useSubscriptions(publicKey: string | null): UseSubscriptionsRetu
   }, []);
 
   useEffect(() => {
-    if (!publicKey || !CONTRACT_ID) return;
+    if (!publicKey || !CONTRACT_ID) {
+      setIsLoading(false);
+      setError(null);
+      return;
+    }
 
-    let cancelled = false;
+    const controller = new AbortController();
+    const { signal } = controller;
 
     async function load() {
       if (!publicKey) return;
@@ -108,14 +160,14 @@ export function useSubscriptions(publicKey: string | null): UseSubscriptionsRetu
         const server = new SorobanRpc.Server(RPC_URL, { allowHttp: false });
 
         // ── 1. Get the current ledger number ───────────────────────────────
-        const latestLedger = await server.getLatestLedger();
+        const latestLedger = await readWithRetry(() => server.getLatestLedger(), signal);
         const endLedger = latestLedger.sequence;
         // Clamp to a valid window; RPC minimum start ledger is 1
         const startLedger = Math.max(1, endLedger - LEDGER_WINDOW);
 
         // ── 2. Fetch subscribe events for this subscriber ──────────────────
         // Topic filter: [symbol("subscribe"), subscriber_address]
-        const subscribeEventsResponse = await server.getEvents({
+        const subscribeEventsResponse = await readWithRetry(() => server.getEvents({
           startLedger,
           filters: [
             {
@@ -131,12 +183,12 @@ export function useSubscriptions(publicKey: string | null): UseSubscriptionsRetu
               ],
             },
           ],
-        });
+        }), signal);
 
-        if (cancelled) return;
+        if (signal.aborted) return;
 
         // ── 3. Fetch cancel events for this subscriber ─────────────────────
-        const cancelEventsResponse = await server.getEvents({
+        const cancelEventsResponse = await readWithRetry(() => server.getEvents({
           startLedger,
           filters: [
             {
@@ -150,9 +202,9 @@ export function useSubscriptions(publicKey: string | null): UseSubscriptionsRetu
               ],
             },
           ],
-        });
+        }), signal);
 
-        if (cancelled) return;
+        if (signal.aborted) return;
 
         // ── 4. Build the set of cancelled (merchant) addresses ─────────────
         const cancelledMerchants = new Set<string>();
@@ -192,16 +244,16 @@ export function useSubscriptions(publicKey: string | null): UseSubscriptionsRetu
           ({ merchant }) => !cancelledMerchants.has(merchant),
         );
 
-        if (cancelled) return;
+        if (signal.aborted) return;
 
         // ── 6. Fetch on-chain subscription details for each active pair ────
         const contract = new Contract(CONTRACT_ID);
-        const account = await server.getAccount(publicKey);
+        const account = await readWithRetry(() => server.getAccount(publicKey), signal);
 
         const results: Subscription[] = [];
 
         for (const { merchant, token } of activePairs) {
-          if (cancelled) return;
+          if (signal.aborted) return;
 
           try {
             // Build a get_subscription query tx for simulation
@@ -219,7 +271,10 @@ export function useSubscriptions(publicKey: string | null): UseSubscriptionsRetu
               .setTimeout(30)
               .build();
 
-            const simResult = await server.simulateTransaction(tx);
+            const simResult = await readWithRetry(
+              () => server.simulateTransaction(tx),
+              signal,
+            );
 
             if (
               SorobanRpc.Api.isSimulationSuccess(simResult) &&
@@ -258,22 +313,22 @@ export function useSubscriptions(publicKey: string | null): UseSubscriptionsRetu
                 cancelledAt: null,
               });
             }
-          } catch {
-            // Subscription may have been cancelled on-chain after events window —
-            // silently skip this pair rather than failing the entire load.
+          } catch (error: unknown) {
+            if (signal.aborted) return;
+            throw error;
           }
         }
 
-        if (!cancelled) {
+        if (!signal.aborted) {
           setSubscriptions(results);
+          setDataPublicKey(publicKey);
         }
       } catch (err: unknown) {
-        if (!cancelled) {
-          const msg = err instanceof Error ? err.message : String(err);
-          setError(`Failed to load subscriptions: ${msg}`);
+        if (!signal.aborted) {
+          setError('Failed to load the latest subscriptions after several attempts.');
         }
       } finally {
-        if (!cancelled) {
+        if (!signal.aborted) {
           setIsLoading(false);
         }
       }
@@ -281,7 +336,7 @@ export function useSubscriptions(publicKey: string | null): UseSubscriptionsRetu
 
     load();
     return () => {
-      cancelled = true;
+      controller.abort();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [publicKey, fetchTick]);
@@ -302,7 +357,7 @@ export function useSubscriptions(publicKey: string | null): UseSubscriptionsRetu
   // useSubscriptionsWithUpdater is the public API; this file just exports
   // the base hook.
   return {
-    subscriptions,
+    subscriptions: dataPublicKey === publicKey ? subscriptions : [],
     isLoading,
     error,
     refetch,

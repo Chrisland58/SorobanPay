@@ -216,6 +216,10 @@ make clean
 
 Equivalent to `cargo clean --manifest-path contracts/subscription/Cargo.toml`.
 
+### Pull-request quality checks
+
+Pull requests run the native contract build/tests in the main CI workflow and run `cargo fmt --check` plus `cargo audit` in the contract quality workflow. If the contract lockfile is not present yet, the audit workflow creates a temporary one for that run. These checks need no wallet, deployment identity, or repository secrets. If a workflow change blocks CI unexpectedly, revert that workflow change; the existing contract build and tests remain in the main CI workflow.
+
 ---
 
 ## Frontend Workflow

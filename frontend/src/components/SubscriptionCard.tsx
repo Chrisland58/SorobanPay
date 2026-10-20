@@ -99,7 +99,7 @@ export default function SubscriptionCard({
 
     try {
       await buildAndSubmitCancel(
-        { subscriber, merchant },
+        { subscriber, merchant, token },
         CONTRACT_ID,
         subscriber,
         NETWORK_PASSPHRASE,

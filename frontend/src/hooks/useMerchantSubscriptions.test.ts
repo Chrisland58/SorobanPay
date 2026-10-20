@@ -204,6 +204,48 @@ describe('useMerchantSubscriptions: event fetching', () => {
     await waitFor(() => expect(result.current.isLoading).toBe(false));
   });
 
+  it('fetches one cursor page at a time and advances only when loadMore is called', async () => {
+    mockGetEvents
+      .mockResolvedValueOnce({ events: Array.from({ length: 100 }, () => ({ topic: [] })), cursor: 'page-2' })
+      .mockResolvedValueOnce({ events: [], cursor: null });
+
+    const { result } = renderHook(() =>
+      useMerchantSubscriptions({ publicKey: MERCHANT, contractId: CONTRACT_ID, rpcUrl: RPC_URL }),
+    );
+
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+    expect(mockGetEvents).toHaveBeenCalledTimes(1);
+    expect(result.current.hasMore).toBe(true);
+
+    act(() => result.current.loadMore());
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+
+    expect(mockGetEvents).toHaveBeenCalledTimes(2);
+    expect(mockGetEvents.mock.calls[1][0]).toMatchObject({ cursor: 'page-2' });
+    expect(result.current.hasMore).toBe(false);
+  });
+
+  it('ignores an in-flight page after the merchant wallet disconnects', async () => {
+    let resolveEvents!: (value: { events: object[]; cursor: null }) => void;
+    mockGetEvents.mockImplementationOnce(
+      () => new Promise((resolve) => { resolveEvents = resolve; }),
+    );
+
+    const { result, rerender } = renderHook(
+      ({ publicKey }: { publicKey: string | null }) =>
+        useMerchantSubscriptions({ publicKey, contractId: CONTRACT_ID, rpcUrl: RPC_URL }),
+      { initialProps: { publicKey: MERCHANT } },
+    );
+
+    expect(result.current.isLoading).toBe(true);
+    rerender({ publicKey: null });
+    resolveEvents({ events: [], cursor: null });
+
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+    expect(result.current.subscriptions).toEqual([]);
+    expect(result.current.hasMore).toBe(false);
+  });
+
   it('returns empty subscriptions when no events found', async () => {
     mockGetEvents.mockResolvedValueOnce({ events: [], cursor: null });
 
@@ -224,7 +266,7 @@ describe('useMerchantSubscriptions: event fetching', () => {
     );
 
     await waitFor(() => expect(result.current.isLoading).toBe(false));
-    expect(result.current.error).toMatch(/rpc connection refused/i);
+    expect(result.current.error).toBe('Failed to load subscriptions. Please retry.');
     expect(result.current.subscriptions).toHaveLength(0);
   });
 });

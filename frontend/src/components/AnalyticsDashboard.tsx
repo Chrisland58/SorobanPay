@@ -21,6 +21,7 @@ import {
   SubscriberDataPoint,
   SuccessRateData,
 } from '@/hooks/useAnalyticsData';
+import SkeletonCard from '@/components/SkeletonCard';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -38,14 +39,17 @@ function fmtAmount(stroops: number): string {
 }
 
 // ─── Chart skeleton ────────────────────────────────────────────────────────────
+// Issue #824: thin wrapper around the shared SkeletonCard so chart loading
+// states are dark/light-mode aware and match the reusable component used
+// for metric cards elsewhere in the app, instead of a locally hardcoded
+// dark-only pulse block.
 
 function ChartSkeleton({ height = 160 }: { height?: number }) {
   return (
-    <div
-      className="animate-pulse rounded-xl bg-slate-800/60 w-full"
+    <SkeletonCard
+      className="rounded-xl w-full"
       style={{ height }}
-      role="status"
-      aria-label="Loading chart…"
+      label="Loading chart…"
     />
   );
 }
@@ -353,7 +357,7 @@ function PaymentSuccessDonut({ data, isLoading }: DonutChartProps) {
   if (isLoading) {
     return (
       <div className="flex justify-center">
-        <div className="animate-pulse rounded-full bg-slate-800/60 w-36 h-36" />
+        <SkeletonCard className="rounded-full w-36 h-36" label="Loading chart…" />
       </div>
     );
   }

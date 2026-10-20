@@ -109,13 +109,13 @@ describe('extractFailureMessage', () => {
     expect(msg).toContain('contract error #4');
   });
 
-  it('returns truncated XDR when no code pattern matches', () => {
+  it('does not expose raw XDR when no code pattern matches', () => {
     const response = {
       status: 'FAILED',
       resultMetaXdr: 'AAABBBCCC',
     } as unknown as SorobanRpc.Api.GetTransactionResponse;
     const msg = extractFailureMessage(response);
-    expect(msg).toContain('AAABBBCCC');
+    expect(msg).toBe('Transaction failed on-chain (details unavailable)');
   });
 });
 
@@ -310,6 +310,22 @@ describe('useTransactionPoller', () => {
     });
     expect(result.current.state.status).toBe('idle');
     expect(result.current.state.txHash).toBeNull();
+  });
+
+  it('cancels the scheduled RPC poll when unmounted', async () => {
+    const server = makeServer(() => new Promise(() => {}));
+    const { result, unmount } = renderHook(() => useTransactionPoller());
+
+    act(() => {
+      result.current.startPolling(MOCK_TX_HASH, server);
+    });
+    unmount();
+
+    await act(async () => {
+      jest.advanceTimersByTime(2_000);
+      await Promise.resolve();
+    });
+    expect(server.getTransaction).not.toHaveBeenCalled();
   });
 
   it('explorerUrl is set to testnet URL during confirming', () => {

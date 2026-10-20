@@ -311,6 +311,65 @@ export function EmptyWebhookList({
   );
 }
 
+/** Filtered Results — search/filter produced no matches */
+export function EmptyFilteredResults({
+  onClearFilters,
+  onResetSearch,
+}: {
+  onClearFilters: () => void;
+  onResetSearch?: () => void;
+}) {
+  return (
+    <EmptyState
+      illustration={<IllustrationSubscriptions />}
+      title="No matching records found"
+      description="Try broadening your search or clearing applied filters to see all available records."
+      ctaLabel="Clear Filters"
+      onCta={onClearFilters}
+      secondaryLabel={onResetSearch ? 'Reset Search' : undefined}
+      onSecondaryCta={onResetSearch}
+    />
+  );
+}
+
+/** Subscription Plans — merchant has not created any plans */
+export function EmptyPlansList({
+  onCreatePlan,
+  onImportTemplates,
+}: {
+  onCreatePlan: () => void;
+  onImportTemplates?: () => void;
+}) {
+  return (
+    <EmptyState
+      illustration={<IllustrationSubscriptions />}
+      title="No pricing plans yet"
+      description="Create flexible recurring subscription plans or tiers to start billing your customers."
+      ctaLabel="Create New Plan"
+      onCta={onCreatePlan}
+      secondaryLabel={onImportTemplates ? 'Browse Templates' : undefined}
+      onSecondaryCta={onImportTemplates}
+    />
+  );
+}
+
+/** Analytics — no metric data recorded */
+export function EmptyAnalyticsState({
+  onGetStarted,
+}: {
+  onGetStarted: () => void;
+}) {
+  return (
+    <EmptyState
+      illustration={<IllustrationPaymentHistory />}
+      title="No analytics data available"
+      description="Analytics metrics will populate once payment volume and subscription events are recorded."
+      ctaLabel="Integration Guide"
+      onCta={onGetStarted}
+    />
+  );
+}
+
 // ─── Skeleton loader — visually distinct from empty states ───────────────────
 
 /**

@@ -73,7 +73,7 @@ struct UpgradeFixture {
     contract_id: Address,
 }
 
-impl UpgradeFixture {
+impl U {
     fn new() -> Self {
         let env = Env::default();
         env.mock_all_auths();

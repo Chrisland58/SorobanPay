@@ -11,6 +11,22 @@ info:
     4. Include `Authorization: Bearer <token>` on all protected endpoints
 
     Rate limit: **100 requests / minute per IP** (HTTP 429 on breach).
+
+    ## Structured error codes (#1074)
+
+    All 4xx/5xx responses return an `ApiError` envelope:
+    ```json
+    {
+      "error": "Human-readable message safe for clients",
+      "code": "VALIDATION_ERROR",
+      "correlationId": "req_01HXK8MZAB",
+      "details": null
+    }
+    ```
+    Stable machine-readable `code` values: `VALIDATION_ERROR`, `UNAUTHORIZED`,
+    `FORBIDDEN`, `NOT_FOUND`, `RATE_LIMITED`, `INTERNAL_ERROR`,
+    `DEPENDENCY_UNAVAILABLE`, `IDEMPOTENCY_CONFLICT`.
+    Use `correlationId` when filing support requests or tracing logs.
   version: 1.0.0
   contact:
     name: SorobanPay
@@ -212,6 +228,38 @@ components:
         error:
           type: string
 
+    # ── Structured API error envelope (#1074) ─────────────────────────────────
+    ApiError:
+      type: object
+      required: [error, code, correlationId]
+      properties:
+        error:
+          type: string
+          description: Human-readable error message safe for clients
+          example: "Merchant address is missing"
+        code:
+          type: string
+          description: Stable machine-readable error code
+          enum:
+            - VALIDATION_ERROR
+            - UNAUTHORIZED
+            - FORBIDDEN
+            - NOT_FOUND
+            - RATE_LIMITED
+            - INTERNAL_ERROR
+            - DEPENDENCY_UNAVAILABLE
+            - IDEMPOTENCY_CONFLICT
+          example: "VALIDATION_ERROR"
+        correlationId:
+          type: string
+          description: Request correlation ID for log tracing — include when filing support requests
+          example: "req_01HXK8MZAB"
+        details:
+          type: object
+          nullable: true
+          description: Optional structured details (field errors, retry hints, existing request ID)
+          additionalProperties: true
+
     PaginatedMeta:
       type: object
       properties:
@@ -288,7 +336,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Error"
+                $ref: "#/components/schemas/ApiError"
 
   /api/v1/auth/token:
     post:
@@ -323,13 +371,13 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Error"
+                $ref: "#/components/schemas/ApiError"
         "401":
           description: Signature verification failed
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Error"
+                $ref: "#/components/schemas/ApiError"
 
   # ── Subscriptions ────────────────────────────────────────────────────────────
   /api/v1/subscriptions:
@@ -360,13 +408,13 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Error"
+                $ref: "#/components/schemas/ApiError"
         "401":
           description: Unauthorized
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Error"
+                $ref: "#/components/schemas/ApiError"
 
   /api/v1/subscriptions/{subscriber}/{merchant}:
     get:
@@ -398,9 +446,13 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Error"
+                $ref: "#/components/schemas/ApiError"
         "401":
           description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
 
   # ── Payments ────────────────────────────────────────────────────────────────
   /api/v1/payments:
