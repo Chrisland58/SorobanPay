@@ -190,6 +190,15 @@ pub struct SubscriptionProtocol;
 
 #[contractimpl]
 impl SubscriptionProtocol {
+    // ── Authorization convention (see docs/security.md §3) ─────────────────
+    // Every RESTRICTED (state-mutating) entry point MUST call `<party>.require_auth()`
+    // as its FIRST statement — before any storage read, log, or cross-contract call.
+    // Read-only entry points (get_subscription, get_version, get_protocol_fee,
+    // get_merchant_subscriptions, get_subscription_count, …) intentionally have
+    // NO auth. The bootstrap constructor `initialize` is the sole mutating
+    // exception (one-time, guarded by the `DataKey::Admin` already-initialized
+    // panic) — see docs/security.md §3 "Full require_auth-first audit". Do NOT
+    // add new mutating entry points that defer `require_auth` past a state read.
     // =========================================================================
     // Admin / Versioning
     // =========================================================================
