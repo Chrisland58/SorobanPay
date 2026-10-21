@@ -37,6 +37,7 @@ import {
 import { mapError } from '@/lib/errors';
 import { CONTRACT_ID, NETWORK_PASSPHRASE, NETWORK_NAME, RPC_URL } from '@/constants/network';
 import { truncateAddress } from '@/lib/utils';
+import { useToast } from '@/components/Toast';
 
 // ── Page ──────────────────────────────────────────────────────────────────────
 
@@ -53,6 +54,8 @@ export default function MerchantPage() {
   const { subscriptions, isLoading, error, hasMore, loadMore, refresh } = useMerchantSubscriptions({
     publicKey,
   });
+
+  const { showToast } = useToast();
 
   // Per-row collection state
   const [collectingRows, setCollectingRows] = useState<Set<string>>(new Set());
@@ -84,6 +87,7 @@ export default function MerchantPage() {
           next.set(subscriber, { txHash });
           return next;
         });
+        showToast({ variant: 'success', message: 'Payment collected' });
         // Refresh the list after a successful collection so status updates
         setTimeout(refresh, 2000);
       } catch (err) {
@@ -93,6 +97,7 @@ export default function MerchantPage() {
           next.set(subscriber, { error: mapped.message });
           return next;
         });
+        showToast({ variant: 'error', message: mapped.message, action: mapped.action });
       } finally {
         setCollectingRows((prev) => {
           const next = new Set(prev);
@@ -164,6 +169,10 @@ export default function MerchantPage() {
 
       // Refresh after batch completes
       if (batchResult.successCount > 0) {
+        showToast({
+          variant: 'success',
+          message: `Payment collected from ${batchResult.successCount} subscriber${batchResult.successCount === 1 ? '' : 's'}`,
+        });
         setTimeout(refresh, 2000);
       }
     },
