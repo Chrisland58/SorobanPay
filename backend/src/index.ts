@@ -18,7 +18,7 @@ import { PaymentScheduler } from './services/paymentScheduler';
 import { createRetryScheduler } from './services/retryScheduler';
 import { retryQueue } from './services/retryQueue';
 import { startWebhookWorker, shutdownWebhookWorker } from './services/webhookQueue'; // BE-53
-import { apiLimiter } from './middleware/rateLimiter';
+import { apiLimiter, selectiveRateLimiter } from './middleware/rateLimiter';
 import { versionMiddleware } from './middleware/versioning';
 import summariesRouter from './routes/summaries';
 import reconcileRouter from './routes/reconcile';
@@ -155,7 +155,7 @@ try {
   if (tenantAuthMiddleware) app.use(tenantAuthMiddleware);
 } catch (e) {}
 
-app.use(apiLimiter);
+app.use(selectiveRateLimiter); // #1380: 100 req/min GET, 20 req/min POST
 app.use(versionMiddleware);   // BE-69: attach version info + deprecation headers
 
 // Dynamic extended health check routes (GET /health, /health/ready, /health/live)
