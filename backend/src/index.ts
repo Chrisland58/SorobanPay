@@ -38,6 +38,7 @@ import { PrismaSubscriptionDB, fetchChainEventsFromDB } from './services/reconci
 import { getPrometheusMetrics } from './services/metricsService';
 import retriesRouter from './routes/retries';
 import { startRetryWorker, shutdownRetryWorker } from './services/retryQueue';
+import webhookRegistrationsRouter from './routes/webhookRegistrations';  // #1376: webhook registration
 
 // ─── Migration startup guard (#1078) ─────────────────────────────────────────
 
@@ -194,6 +195,7 @@ app.use('/api/v1/auth',          authRouter);                             // BE-
 app.use('/api/v1/subscriptions', requireMerchant, subscriptionsRouter);  // BE-55: protected
 app.use('/api/v1/subscriptions/:subscriber/:merchant/retries', retriesRouter);
 app.use('/api/v1/webhooks',      webhooksRouter);
+app.use('/api/v1/webhook-registrations', requireMerchant, webhookRegistrationsRouter);  // #1376: merchant webhook CRUD
 app.use('/api/v1/summaries',     summariesRouter);
 app.use('/api/v1/reconcile',     reconcileRouter);
 app.use('/api/v1/notifications', notificationsRouter);  // BE-68
@@ -211,6 +213,7 @@ app.get('/metrics', (_req, res) => {
 app.use('/api/subscriptions', subscriptionsRouter);
 app.use('/api/subscriptions/:subscriber/:merchant/retries', retriesRouter);
 app.use('/api/webhooks',      webhooksRouter);
+app.use('/api/webhook-registrations', webhookRegistrationsRouter);  // #1376: backward-compat alias
 app.use('/api/summaries',     summariesRouter);
 app.use('/api/reconcile',     reconcileRouter);
 app.use('/api/notifications', notificationsRouter);
