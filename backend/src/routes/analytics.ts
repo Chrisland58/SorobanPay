@@ -54,6 +54,50 @@ function monthKeyToLabel(key: string): string {
 }
 
 // GET /v1/analytics/revenue?merchant=...&period=30d|90d|all
+/**
+ * @openapi
+ * /api/v1/analytics/revenue:
+ *   get:
+ *     operationId: getRevenueAnalytics
+ *     summary: Get MRR and revenue metrics for a merchant
+ *     tags: [Analytics]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - name: merchant
+ *         in: query
+ *         required: true
+ *         schema:
+ *           $ref: "#/components/schemas/Address"
+ *         description: Merchant Stellar address
+ *       - name: period
+ *         in: query
+ *         required: false
+ *         schema:
+ *           type: string
+ *           enum: [30d, 90d, all]
+ *           default: 30d
+ *         description: Reporting period
+ *     responses:
+ *       "200":
+ *         description: Revenue analytics data
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: "#/components/schemas/RevenueAnalytics"
+ *       "400":
+ *         description: Invalid parameters
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: "#/components/schemas/Error"
+ *       "401":
+ *         description: Unauthorized
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: "#/components/schemas/Error"
+ */
 router.get('/revenue', async (req: Request, res: Response) => {
   const merchant = req.query.merchant as string | undefined;
   const period = (req.query.period as string) || '30d';

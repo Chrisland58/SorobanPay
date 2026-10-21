@@ -204,4 +204,97 @@ router.get('/metrics', (_req: Request, res: Response) => {
   res.send(getPrometheusMetrics());
 });
 
+/**
+ * @openapi
+ * /api/v1/admin/indexer:
+ *   get:
+ *     operationId: getIndexerMetrics
+ *     summary: Get indexer health metrics
+ *     tags: [Admin]
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       "200":
+ *         description: Indexer metrics
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 lastCursor:
+ *                   type: string
+ *                   nullable: true
+ *                 lastPollAt:
+ *                   type: string
+ *                   nullable: true
+ *                 eventsProcessedToday:
+ *                   type: integer
+ *                 lagSeconds:
+ *                   type: integer
+ *                   nullable: true
+ *       "401":
+ *         description: Unauthorized
+ * /api/v1/admin/webhooks:
+ *   get:
+ *     operationId: getWebhookMetrics
+ *     summary: Get webhook delivery metrics
+ *     tags: [Admin]
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       "200":
+ *         description: Webhook metrics
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 totalDeliveries:
+ *                   type: integer
+ *                 successCount:
+ *                   type: integer
+ *                 failureCount:
+ *                   type: integer
+ *                 failureRate:
+ *                   type: number
+ *                 pendingRetries:
+ *                   type: integer
+ *                 last24hDeliveries:
+ *                   type: integer
+ *                 last24hFailures:
+ *                   type: integer
+ * /api/v1/admin/ttl-health:
+ *   get:
+ *     operationId: getTtlHealth
+ *     summary: Get subscriptions at risk of TTL expiry
+ *     description: |
+ *       Identifies active subscriptions where the last successful payment was
+ *       300+ days ago (MEDIUM risk) or 350+ days ago (HIGH risk).
+ *       Results are cached in-process for 1 hour.
+ *     tags: [Admin]
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       "200":
+ *         description: List of at-risk subscriptions
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 atRisk:
+ *                   type: array
+ *                   items:
+ *                     $ref: "#/components/schemas/TtlHealthEntry"
+ *                 total:
+ *                   type: integer
+ *                 checkedAt:
+ *                   type: string
+ *                   format: date-time
+ *       "401":
+ *         description: Unauthorized
+ *       "500":
+ *         description: Internal error running TTL check
+ */
+
 export default router;
