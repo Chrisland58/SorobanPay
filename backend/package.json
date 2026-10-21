@@ -8,6 +8,7 @@
     "test:all": "jest",
     "test:pact": "jest tests/pact/api.provider.pact.test.ts --verbose",
     "test:watch": "jest --watch",
+    "test:coverage": "jest --testPathPattern='(?<!integration)\\.test\\.ts$' --coverage --coverageThreshold='{\"global\":{\"lines\":80}}'",
     "type-check": "tsc --noEmit"
   },
   "devDependencies": {
