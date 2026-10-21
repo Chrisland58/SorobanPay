@@ -202,9 +202,18 @@ app.use('/api/v1/analytics',     requireMerchant, analyticsRouter);  // FE-50: r
 app.use('/api/v1/reports',       requireMerchant, reportsRouter);    // BE-58 / #798: payment reports export
 
 // ─── Prometheus metrics (unauthenticated — restrict to internal network) ─────
-app.get('/metrics', (_req, res) => {
-  res.set('Content-Type', 'text/plain; version=0.0.4');
-  res.send(getPrometheusMetrics());
+// #1383: Uses prom-client for full Prometheus text format with default Node.js metrics.
+// Falls back to the legacy metrics service if prom-client is unavailable.
+app.get('/metrics', async (_req, res) => {
+  try {
+    const { getMetricsContentType, collectMetrics } = await import('./services/promMetricsService');
+    res.set('Content-Type', getMetricsContentType());
+    res.send(await collectMetrics());
+  } catch {
+    // Fallback to lightweight legacy service if prom-client fails to load
+    res.set('Content-Type', 'text/plain; version=0.0.4');
+    res.send(getPrometheusMetrics());
+  }
 });
 
 // ─── Backward-compatible aliases — /api/ (no version prefix) ─────────────────
