@@ -90,13 +90,13 @@ jobs:
           CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
 
       - name: Upload HTML coverage report
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: contract-coverage-html
           path: contracts/target/coverage-html/
 
       - name: Upload LCOV report
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: contract-coverage-lcov
           path: contracts/target/lcov.info
@@ -146,7 +146,7 @@ jobs:
           CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
 
       - name: Upload coverage HTML report
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: frontend-coverage-html
           path: frontend/coverage/
@@ -244,7 +244,7 @@ jobs:
 
       - name: Upload cargo audit report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: security-cargo-audit
           path: /tmp/cargo-audit-ci.json
@@ -270,7 +270,7 @@ jobs:
 
       - name: Upload frontend npm audit report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: security-npm-audit-frontend
           path: /tmp/npm-audit-frontend-ci.json
@@ -289,7 +289,7 @@ jobs:
 
       - name: Upload backend npm audit report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: security-npm-audit-backend
           path: /tmp/npm-audit-backend-ci.json
@@ -350,13 +350,13 @@ jobs:
           CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
 
       - name: Upload HTML report as artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: contract-coverage-html-badge
           path: contracts/target/coverage-html/
 
       - name: Upload LCOV report as artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: contract-coverage-lcov-badge
           path: contracts/target/lcov.info
@@ -427,7 +427,7 @@ jobs:
 
       - name: Upload Playwright report on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: playwright-report
           path: frontend/playwright-report/
@@ -512,7 +512,7 @@ jobs:
 
       - name: Upload benchmark results
         if: steps.benchmark.outcome == 'success'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: benchmark-results-${{ github.sha }}
           path: |
@@ -575,7 +575,7 @@ jobs:
 
       - name: Upload load test results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: load-test-results
           path: results/
@@ -613,7 +613,7 @@ jobs:
 
       - name: Upload gas estimation report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: gas-estimation-report
           path: gas-estimation-report.md
