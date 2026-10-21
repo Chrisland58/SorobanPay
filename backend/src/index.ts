@@ -37,6 +37,7 @@ import { reconcile } from './services/reconciler';
 import { PrismaSubscriptionDB, fetchChainEventsFromDB } from './services/reconciler';
 import { getPrometheusMetrics } from './services/metricsService';
 import { startRetryWorker, shutdownRetryWorker } from './services/retryQueue';
+import { runTtlHealthCheck } from './services/ttlHealthMonitor'; // #1391
 
 // ─── Config ─────────────────────────────────────────────────────────────────
 const config = validateConfig();
@@ -157,6 +158,14 @@ cron.schedule('* * * * *', async () => {
 cron.schedule('0 1 * * *', async () => {
   console.log('[cron] Generating daily summaries...');
   await summaryGenerator.generateDailySummaries();
+});
+
+// #1391: TTL health check — runs every 24 hours at 03:00 UTC
+cron.schedule('0 3 * * *', async () => {
+  console.log('[cron] Running TTL health check...');
+  await runTtlHealthCheck().catch((err) =>
+    console.error('[cron] TTL health check error:', err),
+  );
 });
 
 cron.schedule('0 2 * * 0', async () => {

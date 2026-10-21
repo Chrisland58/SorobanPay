@@ -204,4 +204,69 @@ router.get('/metrics', (_req: Request, res: Response) => {
   res.send(getPrometheusMetrics());
 });
 
+// ---------------------------------------------------------------------------
+// GET /api/v1/admin/ttl-health  (#1391)
+// ---------------------------------------------------------------------------
+/**
+ * Returns the list of subscriptions currently flagged as at risk of Soroban
+ * storage TTL expiry (no successful payment in the last 300+ days).
+ *
+ * Response 200:
+ * {
+ *   atRiskCount: number,
+ *   thresholdDays: number,   // TTL_RISK_DAYS constant (300)
+ *   subscriptions: TtlAtRiskEntry[]
+ * }
+ *
+ * @openapi
+ * /api/v1/admin/ttl-health:
+ *   get:
+ *     operationId: getTtlHealth
+ *     summary: List subscriptions at risk of Soroban storage TTL expiry
+ *     description: |
+ *       Returns subscriptions that have not had a successful payment in the
+ *       last 300 days. Soroban persistent storage has a maximum TTL of ~365
+ *       days; these subscriptions are at risk of on-chain expiry before the
+ *       next collection attempt.
+ *
+ *       Requires admin JWT (`role: "admin"`).
+ *     tags: [Admin]
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       "200":
+ *         description: At-risk subscription list
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 atRiskCount:
+ *                   type: integer
+ *                 thresholdDays:
+ *                   type: integer
+ *                   example: 300
+ *                 subscriptions:
+ *                   type: array
+ *                   items:
+ *                     $ref: "#/components/schemas/TtlAtRiskEntry"
+ *       "401":
+ *         description: Missing or invalid admin JWT
+ *       "500":
+ *         description: Internal server error
+ */
+router.get('/ttl-health', async (_req: Request, res: Response) => {
+  try {
+    const { findAtRiskSubscriptions, TTL_RISK_DAYS } = await import('../services/ttlHealthMonitor');
+    const subscriptions = await findAtRiskSubscriptions();
+    res.json({
+      atRiskCount: subscriptions.length,
+      thresholdDays: TTL_RISK_DAYS,
+      subscriptions,
+    });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to compute TTL health data' });
+  }
+});
+
 export default router;
