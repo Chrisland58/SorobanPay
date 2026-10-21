@@ -25,6 +25,7 @@ import {
 } from 'react';
 import { useNotificationsPaginated } from '@/hooks/useNotificationsPaginated';
 import type { NotificationType, Notification } from '@/types/notifications';
+import { EmptyNotifications } from '@/components/EmptyState';
 
 // ─── Relative time formatter ──────────────────────────────────────────────────
 function formatRelativeTime(ts: number): string {
@@ -280,17 +281,7 @@ export default function NotificationCenter() {
           {/* Notification list */}
           <div className="max-h-96 overflow-y-auto" role="region" aria-label="Notification list">
             {notifications.length === 0 ? (
-              <div className="flex flex-col items-center justify-center gap-2 px-4 py-10 text-center">
-                <span className="text-2xl" aria-hidden="true">{isLoading ? '⏳' : '🔔'}</span>
-                <p className="text-sm text-gray-400">
-                  {isLoading ? 'Loading notifications...' : 'No notifications yet'}
-                </p>
-                <p className="text-xs text-gray-600">
-                  {isLoading
-                    ? 'Please wait...'
-                    : 'Payment events and subscription alerts will appear here.'}
-                </p>
-              </div>
+              <EmptyNotifications />
             ) : (
               <ul role="list" aria-label="Notifications">
                 {notifications.map((n) => (

@@ -195,6 +195,39 @@ const IllustrationMerchantPortal = () => (
   </svg>
 );
 
+const IllustrationNotifications = () => (
+  <svg
+    width="120"
+    height="96"
+    viewBox="0 0 120 96"
+    fill="none"
+    xmlns="http://www.w3.org/2000/svg"
+    className="text-content-secondary"
+  >
+    {/* Bell body */}
+    <path
+      d="M60 12 C42 12 30 26 30 44 L30 60 L18 68 L102 68 L90 60 L90 44 C90 26 78 12 60 12 Z"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinejoin="round"
+      fill="none"
+    />
+    {/* Bell clapper */}
+    <path
+      d="M52 68 Q52 80 60 80 Q68 80 68 68"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      fill="none"
+    />
+    {/* Bell top stem */}
+    <line x1="60" y1="4" x2="60" y2="12" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+    {/* Muted lines crossing the bell */}
+    <line x1="40" y1="76" x2="80" y2="20" stroke="currentColor" strokeWidth="1.5" strokeOpacity="0.3" strokeLinecap="round" />
+    <line x1="36" y1="72" x2="76" y2="16" stroke="currentColor" strokeWidth="1.5" strokeOpacity="0.15" strokeLinecap="round" />
+  </svg>
+);
+
 const IllustrationWebhooks = () => (
   <svg
     width="120"
@@ -235,7 +268,7 @@ const IllustrationWebhooks = () => (
 
 // ─── Pre-composed empty state variants ───────────────────────────────────────
 
-/** Dashboard — no active subscriptions */
+/** My Subscriptions — no active subscriptions */
 export function EmptySubscriptions({
   onCreate,
   onBrowse,
@@ -246,8 +279,8 @@ export function EmptySubscriptions({
   return (
     <EmptyState
       illustration={<IllustrationSubscriptions />}
-      title="No active subscriptions yet"
-      description="Subscribe to a service to set up your first recurring on-chain payment."
+      title="You have no active subscriptions"
+      description="You have no active subscriptions. Create one above."
       ctaLabel="Create Subscription"
       onCta={onCreate}
       secondaryLabel={onBrowse ? 'Browse Services' : undefined}
@@ -265,8 +298,8 @@ export function EmptyPaymentHistory({
   return (
     <EmptyState
       illustration={<IllustrationPaymentHistory />}
-      title="No payment history yet"
-      description="Your payment history will appear here after your first on-chain payment is collected."
+      title="No payments yet"
+      description="No payments yet. Create your first subscription above."
       ctaLabel="Create Subscription"
       onCta={onCreateSubscription}
     />
@@ -285,8 +318,8 @@ export function EmptyMerchantSubscribers({
     <EmptyState
       illustration={<IllustrationMerchantPortal />}
       title="No subscribers yet"
-      description="Share your payment link to start collecting recurring payments from your customers."
-      ctaLabel="Share Payment Link"
+      description="No subscribers yet. Share your merchant address to get started."
+      ctaLabel="Share Merchant Address"
       onCta={onShareLink}
       secondaryLabel={onViewQR ? 'Show QR Code' : undefined}
       onSecondaryCta={onViewQR}
@@ -307,6 +340,23 @@ export function EmptyWebhookList({
       description="Set up a webhook endpoint to receive real-time notifications when payments are collected."
       ctaLabel="Add Webhook"
       onCta={onAddWebhook}
+    />
+  );
+}
+
+/** Notifications — no notifications */
+export function EmptyNotifications({
+  onExplore,
+}: {
+  onExplore?: () => void;
+}) {
+  return (
+    <EmptyState
+      illustration={<IllustrationNotifications />}
+      title="No notifications"
+      description="No notifications. You're all caught up — new payment events will appear here."
+      ctaLabel="View Subscriptions"
+      onCta={onExplore ?? (() => {})}
     />
   );
 }
