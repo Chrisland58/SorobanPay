@@ -13,7 +13,7 @@
  *  - A button to create another subscription
  */
 
-import { stellarExpertUrl } from '@/lib/utils';
+import { CopyButton } from './CopyButton';
 
 export interface SuccessCardData {
   /** Stellar transaction hash (hex or base64) */
@@ -26,8 +26,6 @@ export interface SuccessCardData {
   amount: string;
   /** Billing interval in seconds */
   interval: string;
-  /** Next payment timestamp or formatted date string */
-  nextPayment?: number | string;
 }
 
 export interface SuccessCardProps {
@@ -39,12 +37,6 @@ export interface SuccessCardProps {
 
 export function SuccessCard({ data, onReset }: SuccessCardProps) {
   const days = Math.round(Number(data.interval) / 86400);
-
-  const nextPaymentDate = data.nextPayment
-    ? typeof data.nextPayment === 'number'
-      ? new Date(data.nextPayment * 1000).toLocaleDateString(undefined, { year: 'numeric', month: 'long', day: 'numeric' })
-      : data.nextPayment
-    : new Date(Date.now() + (Number(data.interval) || 86400) * 1000).toLocaleDateString(undefined, { year: 'numeric', month: 'long', day: 'numeric' });
 
   return (
     <div
@@ -61,16 +53,13 @@ export function SuccessCard({ data, onReset }: SuccessCardProps) {
 
       {/* Tx hash */}
       <div className="bg-gray-800/50 rounded-lg p-3 border border-gray-700/50">
-        <p className="text-gray-400 text-xs mb-1.5 font-medium">Transaction hash</p>
-        <a
-          href={stellarExpertUrl('tx', data.txHash)}
-          target="_blank"
-          rel="noopener noreferrer"
-          aria-label={`View transaction ${data.txHash} on Stellar Expert`}
-          className="text-blue-400 hover:text-blue-300 hover:underline break-all font-mono text-xs leading-relaxed inline-block"
-        >
-          {data.txHash} ↗
-        </a>
+        <div className="flex items-center justify-between mb-1.5">
+          <p className="text-gray-400 text-xs font-medium">Transaction hash</p>
+          <CopyButton text={data.txHash} label="Copy tx hash" />
+        </div>
+        <p className="text-gray-200 break-all font-mono text-xs leading-relaxed">
+          {data.txHash}
+        </p>
       </div>
 
       {/* Summary */}
@@ -81,10 +70,11 @@ export function SuccessCard({ data, onReset }: SuccessCardProps) {
         <span className="font-medium">
           every {days} day{days !== 1 ? 's' : ''}
         </span>
-        <span className="text-gray-400 font-medium">Next Payment</span>
-        <span className="font-medium text-green-300">{nextPaymentDate}</span>
         <span className="text-gray-400 font-medium break-all">Merchant</span>
-        <span className="break-all font-mono text-xs">{data.merchant}</span>
+        <div className="flex items-center gap-1 min-w-0">
+          <span className="break-all font-mono text-xs truncate">{data.merchant}</span>
+          <CopyButton text={data.merchant} label="Copy merchant address" />
+        </div>
       </div>
 
       {/* Next steps */}

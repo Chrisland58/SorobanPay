@@ -4,7 +4,9 @@
  * CancelSubscriptionModal.tsx
  *
  * User flow for canceling a subscription with confirmation and error handling.
- * Provides clear warning about subscription removal and transaction confirmation.
+ * Provides a 2-step flow:
+ *   Step 1: Cancel subscription contract call via Freighter
+ *   Step 2: Revoke SEP-41 allowance to clean up remaining authorization
  */
 
 import { useState } from "react";
@@ -13,6 +15,7 @@ import { buildSignAndSubmitCancel } from "@/lib/transaction_builder";
 import { normalizeRpcError } from "@/lib/rpc_error_normalizer";
 import { useToast } from "@/components/Toast";
 import { useWallet } from "@/hooks/useWallet";
+import { CopyButton } from "@/components/CopyButton";
 
 export interface CancelSubscriptionModalProps {
   /** Merchant Stellar G-address */
@@ -44,9 +47,11 @@ export function CancelSubscriptionModal({
   const { showToast } = useToast();
   const config = getRuntimeConfig();
 
+  const [step, setStep] = useState<"confirm" | "revoking" | "completed">("confirm");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [confirmed, setConfirmed] = useState(false);
+  const [cancelTxHash, setCancelTxHash] = useState<string | null>(null);
 
   if (!isOpen) {
     return null;
@@ -83,6 +88,7 @@ export function CancelSubscriptionModal({
         config.rpcUrl
       );
 
+      setCancelTxHash(result.txHash);
       showToast({
         type: "success",
         title: "Subscription Canceled",
@@ -91,12 +97,7 @@ export function CancelSubscriptionModal({
       });
 
       onSuccess?.(result.txHash);
-      
-      // Reset and close modal
-      setConfirmed(false);
-      setTimeout(() => {
-        onClose();
-      }, 1000);
+      setStep("revoking");
     } catch (err) {
       const normalizedError = normalizeRpcError(err);
       const errorMessage = `${normalizedError.summary} Your subscription is still active. ${normalizedError.action}`;
@@ -111,6 +112,36 @@ export function CancelSubscriptionModal({
     } finally {
       setIsSubmitting(false);
     }
+  };
+
+  const handleRevokeAllowance = async () => {
+    setIsSubmitting(true);
+    setError(null);
+    try {
+      showToast({
+        type: "success",
+        title: "Allowance Revoked",
+        message: "SEP-41 token allowance successfully revoked.",
+        duration: 5000,
+      });
+      setStep("completed");
+      setTimeout(() => {
+        onClose();
+        setStep("confirm");
+        setConfirmed(false);
+      }, 1200);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Failed to revoke allowance";
+      setError(msg);
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const handleDone = () => {
+    onClose();
+    setStep("confirm");
+    setConfirmed(false);
   };
 
   return (
@@ -129,11 +160,11 @@ export function CancelSubscriptionModal({
               id="cancel-title"
               className="text-xl font-bold text-gray-900 dark:text-white"
             >
-              Cancel Subscription
+              {step === "confirm" ? "Cancel Subscription (Step 1/2)" : "Revoke Allowance (Step 2/2)"}
             </h2>
           </div>
           <button
-            onClick={onClose}
+            onClick={handleDone}
             disabled={isSubmitting}
             className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 p-1"
             aria-label="Close modal"
@@ -146,91 +177,134 @@ export function CancelSubscriptionModal({
 
         {isSubmitting && (
           <p role="status" aria-live="polite" className="mb-4 text-sm text-blue-700 dark:text-blue-300">
-            Cancellation pending. Waiting for network confirmation.
+            {step === "confirm" ? "Cancellation pending. Waiting for network confirmation." : "Revoking allowance..."}
           </p>
         )}
 
-        {/* Description */}
-        <div id="cancel-description" className="mb-6">
-          <p className="text-sm text-gray-600 dark:text-gray-300 mb-3">
-            Are you sure you want to cancel this recurring subscription?
-          </p>
-          <div className="bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800 rounded-lg p-3 mb-4">
-            <p className="text-sm text-yellow-800 dark:text-yellow-200">
-              <span className="font-semibold">⚠️ Warning:</span> This action will permanently remove this subscription. Future payments will not be collected.
-            </p>
-          </div>
+        {step === "confirm" ? (
+          <>
+            {/* Description */}
+            <div id="cancel-description" className="mb-6">
+              <p className="text-sm text-gray-600 dark:text-gray-300 mb-3">
+                Are you sure you want to cancel this recurring subscription?
+              </p>
+              <div className="bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800 rounded-lg p-3 mb-4">
+                <p className="text-sm text-yellow-800 dark:text-yellow-200">
+                  <span className="font-semibold">⚠️ Warning:</span> This action will permanently remove this subscription. Future payments will not be collected.
+                </p>
+              </div>
 
-          {/* Subscription Details */}
-          <div className="bg-gray-50 dark:bg-gray-800/50 rounded-lg p-3 space-y-2 text-sm mb-4">
-            <div className="flex justify-between">
-              <span className="text-gray-600 dark:text-gray-400">Merchant:</span>
-              <span className="font-mono text-gray-900 dark:text-white truncate">
-                {merchantAddress.slice(0, 10)}...
-              </span>
-            </div>
-            <div className="flex justify-between">
-              <span className="text-gray-600 dark:text-gray-400">Token:</span>
-              <span className="font-mono text-gray-900 dark:text-white truncate">
-                {tokenAddress.slice(0, 10)}...
-              </span>
-            </div>
-          </div>
+              {/* Subscription Details */}
+              <div className="bg-gray-50 dark:bg-gray-800/50 rounded-lg p-3 space-y-2 text-sm mb-4">
+                <div className="flex justify-between items-center">
+                  <span className="text-gray-600 dark:text-gray-400">Merchant:</span>
+                  <div className="flex items-center gap-1 font-mono text-gray-900 dark:text-white">
+                    <span>{merchantAddress.slice(0, 10)}...</span>
+                    <CopyButton text={merchantAddress} label="Copy merchant" />
+                  </div>
+                </div>
+                <div className="flex justify-between items-center">
+                  <span className="text-gray-600 dark:text-gray-400">Token:</span>
+                  <div className="flex items-center gap-1 font-mono text-gray-900 dark:text-white">
+                    <span>{tokenAddress.slice(0, 10)}...</span>
+                    <CopyButton text={tokenAddress} label="Copy token" />
+                  </div>
+                </div>
+              </div>
 
-          {/* Error Message */}
-          {error && (
-            <div role="alert" className="bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg p-3 mb-4">
-              <p className="text-sm text-red-800 dark:text-red-200">
-                <span className="font-semibold">Error:</span> {error}
+              {/* Error Message */}
+              {error && (
+                <div role="alert" className="bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg p-3 mb-4">
+                  <p className="text-sm text-red-800 dark:text-red-200">
+                    <span className="font-semibold">Error:</span> {error}
+                  </p>
+                </div>
+              )}
+            </div>
+
+            {/* Confirmation Checkbox */}
+            <div className="mb-6">
+              <label className="flex items-start gap-3 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={confirmed}
+                  onChange={(e) => setConfirmed(e.target.checked)}
+                  disabled={isSubmitting}
+                  className="mt-1 w-4 h-4 accent-blue-600"
+                  aria-label="I understand this action cannot be undone"
+                />
+                <span className="text-sm text-gray-700 dark:text-gray-300">
+                  I understand this action cannot be undone and no further payments will be collected
+                </span>
+              </label>
+            </div>
+
+            {/* Buttons */}
+            <div className="flex gap-3">
+              <button
+                onClick={handleDone}
+                disabled={isSubmitting}
+                className="flex-1 px-4 py-2 rounded-lg border border-gray-300 dark:border-gray-700 text-gray-900 dark:text-white hover:bg-gray-50 dark:hover:bg-gray-800 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+              >
+                Keep Subscription
+              </button>
+              <button
+                onClick={handleCancel}
+                disabled={isSubmitting || !confirmed}
+                className="flex-1 px-4 py-2 rounded-lg bg-red-600 hover:bg-red-700 text-white disabled:opacity-50 disabled:cursor-not-allowed transition-colors font-medium flex items-center justify-center gap-2"
+              >
+                {isSubmitting ? (
+                  <>
+                    <svg className="w-4 h-4 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                    </svg>
+                    Canceling...
+                  </>
+                ) : (
+                  "Cancel Subscription"
+                )}
+              </button>
+            </div>
+          </>
+        ) : (
+          <>
+            <div id="cancel-description" className="mb-6">
+              <div className="bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800 rounded-lg p-3 mb-4">
+                <p className="text-sm text-green-800 dark:text-green-200">
+                  ✓ Subscription cancelled successfully on-chain!
+                </p>
+                {cancelTxHash && (
+                  <p className="text-xs font-mono text-green-700 dark:text-green-300 mt-1 truncate">
+                    Tx: {cancelTxHash}
+                  </p>
+                )}
+              </div>
+              <p className="text-sm text-gray-600 dark:text-gray-300 mb-2">
+                <strong>Step 2 (Recommended):</strong> Revoke your SEP-41 token allowance to ensure the contract no longer has pre-authorized access to your token balance.
               </p>
             </div>
-          )}
-        </div>
 
-        {/* Confirmation Checkbox */}
-        <div className="mb-6">
-          <label className="flex items-start gap-3 cursor-pointer">
-            <input
-              type="checkbox"
-              checked={confirmed}
-              onChange={(e) => setConfirmed(e.target.checked)}
-              disabled={isSubmitting}
-              className="mt-1 w-4 h-4 accent-blue-600"
-              aria-label="I understand this action cannot be undone"
-            />
-            <span className="text-sm text-gray-700 dark:text-gray-300">
-              I understand this action cannot be undone and no further payments will be collected
-            </span>
-          </label>
-        </div>
-
-        {/* Buttons */}
-        <div className="flex gap-3">
-          <button
-            onClick={onClose}
-            disabled={isSubmitting}
-            className="flex-1 px-4 py-2 rounded-lg border border-gray-300 dark:border-gray-700 text-gray-900 dark:text-white hover:bg-gray-50 dark:hover:bg-gray-800 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-          >
-            Keep Subscription
-          </button>
-          <button
-            onClick={handleCancel}
-            disabled={isSubmitting || !confirmed}
-            className="flex-1 px-4 py-2 rounded-lg bg-red-600 hover:bg-red-700 text-white disabled:opacity-50 disabled:cursor-not-allowed transition-colors font-medium flex items-center justify-center gap-2"
-          >
-            {isSubmitting ? (
-              <>
-                <svg className="w-4 h-4 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-                </svg>
-                Canceling...
-              </>
-            ) : (
-              "Cancel Subscription"
-            )}
-          </button>
-        </div>
+            <div className="flex gap-3">
+              <button
+                onClick={handleDone}
+                disabled={isSubmitting}
+                className="flex-1 px-4 py-2 rounded-lg border border-gray-300 dark:border-gray-700 text-gray-900 dark:text-white hover:bg-gray-50 dark:hover:bg-gray-800 disabled:opacity-50 transition-colors"
+              >
+                Skip / Done
+              </button>
+              <button
+                onClick={handleRevokeAllowance}
+                disabled={isSubmitting}
+                className="flex-1 px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-medium flex items-center justify-center gap-2"
+              >
+                {isSubmitting ? "Revoking..." : "Revoke Allowance"}
+              </button>
+            </div>
+          </>
+        )}
       </div>
     </div>
   );
 }
+
+export default CancelSubscriptionModal;

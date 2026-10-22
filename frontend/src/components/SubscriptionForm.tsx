@@ -35,6 +35,8 @@ import { SubscriptionFormErrorSummary } from "@/components/SubscriptionFormInput
 
 import { useState, useEffect, useCallback, useRef, type FormEvent } from "react";
 import { useWallet } from "@/hooks/useWallet";
+import { useNetworkMismatch } from "@/hooks/useNetworkMismatch";
+import { NetworkMismatchBanner } from "@/components/NetworkMismatchBanner";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { SkeletonForm } from "@/components/Skeleton";
 import { downloadReceipt, type ReceiptData } from "@/components/SubscriptionReceipt";
@@ -1428,6 +1430,7 @@ export interface SubscriptionFormProps {
 
 export default function SubscriptionForm({ initialValues }: SubscriptionFormProps = {}) {
   const { publicKey, isCheckingFreighter, freighterInstalled } = useWallet();
+  const { isMismatch: isNetworkMismatch } = useNetworkMismatch();
   const { showToast } = useToast();
 
   // All hooks must be declared before any early return (rules-of-hooks)
@@ -2338,6 +2341,11 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
 
           {/* Submit */}
           <div>
+            {isNetworkMismatch && (
+              <div className="mb-3">
+                <NetworkMismatchBanner />
+              </div>
+            )}
             {!publicKey && (
               <p
                 id="hint-wallet"
@@ -2347,10 +2355,19 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
                 Connect your Freighter wallet to enable submission.
               </p>
             )}
+            {publicKey && isNetworkMismatch && (
+              <p
+                id="hint-network-mismatch"
+                className="mb-3 text-xs text-amber-400 font-medium"
+                role="status"
+              >
+                Switch Freighter network to match the application before submitting.
+              </p>
+            )}
             <button
               type="submit"
-              disabled={isSubmitting || isConfirming || !publicKey}
-              aria-describedby={!publicKey ? "hint-wallet" : undefined}
+              disabled={isSubmitting || isConfirming || !publicKey || isNetworkMismatch}
+              aria-describedby={!publicKey ? "hint-wallet" : isNetworkMismatch ? "hint-network-mismatch" : undefined}
               aria-busy={isSubmitting || isConfirming}
               className="w-full flex items-center justify-center gap-2 rounded-lg bg-blue-600
                          hover:bg-blue-500 active:bg-blue-700 disabled:opacity-50
