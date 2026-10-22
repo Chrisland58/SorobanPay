@@ -1392,3 +1392,67 @@ Step 7 means that even if a bug in route logic omits a WHERE clause, the service
 - Swagger UI: `https://api.sorobanpay.example.com/docs`
 - GraphQL Playground: `https://api.sorobanpay.example.com/graphql` (disabled in production)
 - SEP-10 Spec: https://github.com/stellar/stellar-protocol/blob/master/ecosystem/sep-0010.md
+
+---
+
+## Rate Limiting (#1380)
+
+All REST API endpoints are protected by a method-aware rate limiter to prevent abuse and protect the Soroban RPC from excessive polling.
+
+### Default limits
+
+| Method type | Limit | Env variable |
+|---|---|---|
+| GET / HEAD (read) | 100 req/min per IP | `RATE_LIMIT_DEFAULT_MAX` |
+| POST / PUT / PATCH / DELETE (write) | 20 req/min per IP | `RATE_LIMIT_POST_MAX` |
+| Window duration | 60 seconds | `RATE_LIMIT_WINDOW_MS` |
+
+### Configuration
+
+Set these environment variables to override the defaults:
+
+```env
+# Max requests per window for GET/HEAD endpoints (default: 100)
+RATE_LIMIT_DEFAULT_MAX=100
+
+# Max requests per window for POST/PUT/PATCH/DELETE endpoints (default: 20)
+RATE_LIMIT_POST_MAX=20
+
+# Rate limit window in milliseconds (default: 60000 = 1 minute)
+RATE_LIMIT_WINDOW_MS=60000
+
+# Optional: bypass rate limiting for specific IPs (e.g., internal monitoring)
+RATE_LIMIT_ALLOWLIST=10.0.0.1,10.0.0.2
+```
+
+### Response headers
+
+Every response includes standard rate limit headers (RFC draft-7):
+
+```
+RateLimit-Limit: 100
+RateLimit-Remaining: 99
+RateLimit-Reset: 1700000060
+```
+
+### 429 Too Many Requests
+
+When a limit is exceeded the server responds with:
+
+```http
+HTTP/1.1 429 Too Many Requests
+Retry-After: 60
+Content-Type: application/json
+
+{
+  "error": "Too Many Requests",
+  "retryAfter": 60,
+  "message": "Rate limit exceeded. Please wait 60 seconds before retrying."
+}
+```
+
+Clients should respect the `Retry-After` header and back off accordingly.
+
+### Redis-backed distributed limiting
+
+When `REDIS_URL` is set, rate limit counters are stored in Redis and shared across all backend replicas. Without `REDIS_URL`, an in-process memory store is used (limits are per-instance).
