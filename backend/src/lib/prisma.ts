@@ -28,11 +28,35 @@ import { PrismaClient } from '../generated/prisma';
 
 // ─── Singleton base client ────────────────────────────────────────────────────
 
+/**
+ * Connection pool settings mirrored from src/db/pool.ts so both pg and Prisma
+ * use consistent limits.
+ *   connection_limit=10  — max simultaneous Prisma connections per process
+ *   pool_timeout=10      — seconds to wait for a connection before throwing
+ */
+function buildDatasourceUrl(): string | undefined {
+  const base = process.env.DATABASE_URL;
+  if (!base) return undefined;
+  // Only append pool params if the URL does not already include them
+  if (base.includes('connection_limit')) return base;
+  const separator = base.includes('?') ? '&' : '?';
+  return `${base}${separator}connection_limit=10&pool_timeout=10`;
+}
+
 const prisma = new PrismaClient({
-  datasourceUrl: process.env.DATABASE_URL,
+  datasourceUrl: buildDatasourceUrl(),
 });
 
 export default prisma;
+
+/**
+ * Disconnect the Prisma client cleanly.
+ * Call this during graceful shutdown after in-flight requests have drained
+ * to release all database connections held by the connection pool.
+ */
+export async function disconnectPrisma(): Promise<void> {
+  await prisma.$disconnect();
+}
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 

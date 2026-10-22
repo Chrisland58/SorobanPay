@@ -27,7 +27,12 @@ jest.mock('@stellar/freighter-api', () => ({
   signTransaction: (...args: unknown[]) => mockSignTransaction(...args),
 }));
 
-import { detectFreighter, connectWallet, signTx } from '@/lib/wallet_manager';
+import {
+  detectFreighter,
+  connectWallet,
+  restoreWalletSession,
+  signTx,
+} from '@/lib/wallet_manager';
 
 // ── detectFreighter ────────────────────────────────────────────────────────
 
@@ -97,6 +102,38 @@ describe('connectWallet', () => {
   it('throws when getAddress returns an empty address', async () => {
     mockGetAddress.mockResolvedValueOnce({ address: '', error: null });
     await expect(connectWallet()).rejects.toThrow(/empty public key/i);
+  });
+});
+
+// ── restoreWalletSession ───────────────────────────────────────────────────
+
+describe('restoreWalletSession', () => {
+  const PUBLIC_KEY = 'G' + 'A'.repeat(55);
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockGetAddress.mockResolvedValue({ address: PUBLIC_KEY, error: null });
+  });
+
+  it('returns the active public key without prompting for access', async () => {
+    expect(await restoreWalletSession()).toBe(PUBLIC_KEY);
+    expect(mockSetAllowed).not.toHaveBeenCalled();
+    expect(mockRequestAccess).not.toHaveBeenCalled();
+  });
+
+  it('returns null when Freighter returns an error', async () => {
+    mockGetAddress.mockResolvedValueOnce({ address: '', error: 'not allowed' });
+    expect(await restoreWalletSession()).toBeNull();
+  });
+
+  it('returns null when Freighter returns an empty address', async () => {
+    mockGetAddress.mockResolvedValueOnce({ address: '', error: null });
+    expect(await restoreWalletSession()).toBeNull();
+  });
+
+  it('returns null when getAddress throws', async () => {
+    mockGetAddress.mockRejectedValueOnce(new Error('extension unavailable'));
+    expect(await restoreWalletSession()).toBeNull();
   });
 });
 

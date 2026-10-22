@@ -14,11 +14,22 @@ import { Router, Request, Response } from 'express';
 import { rpc, xdr } from '@stellar/stellar-sdk';
 import { DEFAULT_VERSION } from '../middleware/versioning';
 
-export function buildHealthRouter(rpcUrl: string, contractId: string): Router {
+export function buildHealthRouter(
+  rpcUrl: string,
+  contractId: string,
+  /** Optional callback; if it returns true the endpoint responds 503 immediately. */
+  isShuttingDown?: () => boolean,
+): Router {
   const router = Router();
   const server = new rpc.Server(rpcUrl);
 
   router.get('/', async (_req: Request, res: Response) => {
+    // #1387: return 503 during graceful shutdown so Kubernetes stops routing traffic
+    if (isShuttingDown?.()) {
+      res.status(503).json({ status: 'shutting_down' });
+      return;
+    }
+
     const checks: Record<string, string> = {};
     let healthy = true;
 
@@ -58,6 +69,12 @@ export function buildHealthRouter(rpcUrl: string, contractId: string): Router {
 
   // Dedicated readiness probe for Kubernetes
   router.get('/ready', async (_req: Request, res: Response) => {
+    // Return not-ready immediately during graceful shutdown
+    if (isShuttingDown?.()) {
+      res.status(503).json({ status: 'not_ready', reason: 'shutting_down' });
+      return;
+    }
+
     const checks: Record<string, string> = {};
     let ready = true;
 

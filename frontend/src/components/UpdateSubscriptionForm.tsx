@@ -28,6 +28,7 @@ import { buildAndSubmitUpdateSubscription } from '@/lib/transaction_builder';
 import { isValidGAddress, MIN_INTERVAL_SECONDS, MAX_INTERVAL_SECONDS } from '@/lib/validation';
 import { CONTRACT_ID, NETWORK_PASSPHRASE, NETWORK_NAME, RPC_URL } from '@/constants/network';
 import { mapError } from '@/lib/errors';
+import { useToast } from '@/components/Toast';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -144,6 +145,7 @@ export default function UpdateSubscriptionForm({
   initialValues,
 }: UpdateSubscriptionFormProps = {}) {
   const { publicKey, isCheckingFreighter, freighterInstalled, connect } = useWallet();
+  const { showToast } = useToast();
 
   const [merchantAddress, setMerchantAddress] = useState(
     initialValues?.merchantAddress ?? '',
@@ -305,9 +307,11 @@ export default function UpdateSubscriptionForm({
         RPC_URL,
       );
       setSuccessTxHash(result.txHash);
+      showToast({ variant: 'success', message: 'Subscription updated' });
     } catch (err) {
       const mapped = mapError(err);
       setTxError(mapped.message);
+      showToast({ variant: 'error', message: mapped.message, action: mapped.action });
     } finally {
       setIsSubmitting(false);
     }

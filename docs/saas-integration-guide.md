@@ -76,6 +76,105 @@ The simplest integration: embed the SorobanPay frontend in an iframe or link to 
 
 For deeper customization, use the Stellar SDK directly in your own frontend (see Step 2 for SDK usage patterns).
 
+### 1.4 Subscriber onboarding flow
+
+The end-to-end subscriber onboarding involves both frontend (UI + wallet) and backend (indexer) steps. Here is the complete flow:
+
+```
+1. User creates an account on your SaaS platform (traditional auth — email, OAuth, etc.)
+2. User navigates to the billing page and selects a plan
+3. Your frontend builds a `subscribe` transaction with the plan parameters:
+   - merchant = your product's Stellar address
+   - token = the SEP-41 token you accept (e.g., USDC)
+   - amount = plan price in token base units
+   - interval = billing period in seconds (e.g., 2_592_000 for monthly)
+4. User's Freighter wallet prompts for signature
+5. User approves — transaction is submitted to Soroban RPC
+6. Your backend indexer detects the `subscribe` event:
+   - Maps the subscriber's Stellar address to their platform user account
+   - Creates a subscription record in your database
+   - Grants access to the product
+7. User is redirected to the product dashboard with access enabled
+```
+
+**Frontend — building the subscribe transaction:**
+
+```js
+// frontend/onboarding.js
+import * as StellarSdk from "@stellar/stellar-sdk";
+
+async function buildSubscribeTransaction(
+  subscriberAddress,
+  merchantAddress,
+  tokenAddress,
+  amount,
+  interval,
+  { rpcUrl, contractId, networkPassphrase }
+) {
+  const server = new StellarSdk.SorobanRpc.Server(rpcUrl);
+  const account = await server.getAccount(subscriberAddress);
+  const contract = new StellarSdk.Contract(contractId);
+
+  const tx = new StellarSdk.TransactionBuilder(account, {
+    fee: StellarSdk.BASE_FEE,
+    networkPassphrase,
+  })
+    .addOperation(
+      contract.call(
+        "subscribe",
+        StellarSdk.nativeToScVal(subscriberAddress, { type: "address" }),
+        StellarSdk.nativeToScVal(merchantAddress, { type: "address" }),
+        StellarSdk.nativeToScVal(tokenAddress, { type: "address" }),
+        StellarSdk.nativeToScVal(BigInt(amount), { type: "i128" }),
+        StellarSdk.nativeToScVal(interval, { type: "u64" }),
+        StellarSdk.nativeToScVal(false, { type: "bool" }),   // strict mode
+        StellarSdk.nativeToScVal(null)                        // no grace period
+      )
+    )
+    .setTimeout(30)
+    .build();
+
+  const prepared = await server.prepareTransaction(tx);
+  return prepared.toXDR(); // Send to Freighter for signing
+}
+```
+
+**Backend — linking Stellar address to platform user:**
+
+```js
+// backend/onboarding.js
+
+/**
+ * When a user links their Stellar wallet to their platform account,
+ * store the mapping so the indexer can provision access when a
+ * subscribe event arrives.
+ */
+async function linkWalletAddress(userId, stellarAddress) {
+  await db.updateUser(userId, { stellar_address: stellarAddress });
+  console.log(`Linked ${stellarAddress} to user ${userId}`);
+}
+
+// In your event handler (see Step 2.3):
+if (eventName === "subscribe") {
+  const user = await db.findUserByStellarAddress(subscriber);
+  if (!user) {
+    console.warn(`Unknown subscriber ${subscriber} — ask them to link their wallet`);
+    return;
+  }
+  await db.createSubscription({
+    userId: user.id,
+    subscriber,
+    merchant,
+    amount: Number(data),
+    interval: await getSubscriptionInterval(subscriber, merchant),
+  });
+  await provisionAccess(user.id);
+  console.log(`Access provisioned for ${user.email}`);
+}
+```
+
+> **Token allowance reminder:** The subscriber must also call `token.approve(contract_id, amount)` to grant the SorobanPay contract a SEP-41 allowance. Your frontend should prompt for this as part of the onboarding flow, either as a separate transaction or batched with the subscribe call.
+
 ---
 
 ## Step 2: Integrate the Backend Indexer for Event-Driven Access Provisioning
@@ -358,28 +457,26 @@ app.listen(3000);
 
 ## Step 4: Handle Plan Upgrades and Downgrades
 
-Plan changes in SorobanPay are implemented by calling `subscribe` again with the new `amount` and/or `interval`. The contract treats this as an upsert on the existing subscription record.
+Plan changes in SorobanPay are implemented by calling `update_subscription(subscriber, merchant, new_amount, new_interval)` — a dedicated entry point that modifies the amount and/or interval in-place **without resetting the billing cycle**. The subscriber must sign this transaction.
 
-### 4.1 Upgrade flow (subscriber pays more)
+### 4.1 Update flow (upgrade or downgrade)
 
 ```js
 // plan-change.js
 import * as StellarSdk from "@stellar/stellar-sdk";
 
 /**
- * Update a subscription's plan by calling subscribe() with new parameters.
+ * Update a subscription's plan by calling update_subscription().
  * The subscriber must sign this transaction.
  *
  * @param {string} subscriberAddress - The subscriber's public key
- * @param {string} merchantAddress - The merchant's public key
- * @param {string} tokenAddress - The SEP-41 token contract address
- * @param {number} newAmount - New payment amount in token base units
- * @param {number} newInterval - New interval in seconds
+ * @param {string} merchantAddress  - The merchant's public key
+ * @param {number} newAmount         - New payment amount in token base units
+ * @param {number} newInterval       - New interval in seconds
  */
-async function updateSubscription(
+async function updateSubscriptionPlan(
   subscriberAddress,
   merchantAddress,
-  tokenAddress,
   newAmount,
   newInterval,
   { rpcUrl, contractId, networkPassphrase }
@@ -394,11 +491,10 @@ async function updateSubscription(
   })
     .addOperation(
       contract.call(
-        "subscribe",
+        "update_subscription",
         StellarSdk.nativeToScVal(subscriberAddress, { type: "address" }),
         StellarSdk.nativeToScVal(merchantAddress, { type: "address" }),
-        StellarSdk.nativeToScVal(tokenAddress, { type: "address" }),
-        StellarSdk.nativeToScVal(newAmount, { type: "i128" }),
+        StellarSdk.nativeToScVal(BigInt(newAmount), { type: "i128" }),
         StellarSdk.nativeToScVal(newInterval, { type: "u64" })
       )
     )
@@ -412,24 +508,41 @@ async function updateSubscription(
   return xdr;
 }
 
-// Example: upgrade from $10/month (30 days) to $20/month
-const xdr = await updateSubscription(
+// Example: upgrade from $10/month to $20/month (same 30-day interval)
+const xdr = await updateSubscriptionPlan(
   subscriberPublicKey,
   merchantPublicKey,
-  usdcContractAddress,
   20_000_000,  // $20 in USDC (7 decimal places)
-  2_592_000,   // 30 days in seconds
+  2_592_000,   // 30 days in seconds (unchanged)
   { rpcUrl, contractId, networkPassphrase }
 );
 
 // Send xdr to the frontend for Freighter signing
 ```
 
-### 4.2 Important notes on plan changes
+### 4.2 Handling the `updated` event
 
-- The `next_payment` timestamp is **not reset** by a plan update — the next collection happens on the original schedule.
+The contract emits an `updated` event with old and new values on every successful `update_subscription` call. Your indexer should listen for it to sync your database:
+
+```js
+// In your event handler (see Step 2)
+if (eventName === "updated") {
+  // Event data contains: old_amount, new_amount, old_interval, new_interval
+  console.log(`Plan changed: ${data.old_amount} → ${data.new_amount}`);
+  await db.updateSubscription(subscriber, merchant, {
+    amount: data.new_amount,
+    interval: data.new_interval,
+  });
+}
+```
+
+### 4.3 Important notes on plan changes
+
+- The `next_payment` timestamp is **preserved** by `update_subscription` — the subscriber is not charged immediately and the billing cycle continues uninterrupted.
 - For upgrades, some SaaS platforms charge a prorated amount immediately. Implement this as a separate one-off payment via the Stellar SDK (`payment` operation), not via the subscription contract.
-- For downgrades, apply the new amount at the start of the next billing cycle to avoid confusion.
+- For downgrades, the new amount takes effect at the next scheduled collection — no proration on-chain.
+- The subscriber must grant a new SEP-41 token allowance if the new amount exceeds the current allowance.
+- Validation rules still apply: `new_amount` must be > 0 and ≤ 10¹⁸, `new_interval` must be between 86,400 and 31,536,000 seconds.
 
 ---
 
@@ -439,40 +552,51 @@ Cancellations can be initiated by the subscriber (on-chain `cancel` call) or by 
 
 ### 5.1 Subscriber-initiated cancellation
 
-The subscriber calls `cancel(subscriber, merchant)` on the contract — this removes the subscription storage entry. Your indexer detects the absence of future `executed` events or listens for the transaction.
+The subscriber calls `cancel(subscriber, merchant, token)` on the contract — this removes the subscription storage entry and emits a `cancel` event. Your indexer listens for the `cancel` event to immediately mark the subscription as inactive.
 
 ```js
-// Detect cancellation by watching for cancel() calls to your contract
-// (There is no explicit "cancelled" event in the current contract — 
-//  detect by polling the subscription storage or monitoring for cancel() calls)
+// Detect cancellation by watching for the "cancel" contract event.
+// The contract emits: topics = (symbol("cancel"), subscriber, merchant), data = ()
 
 async function checkSubscriptionActive(subscriberAddress, merchantAddress) {
-  // If execute_payment returns error code 4 (NoActiveSubscription),
-  // the subscription has been cancelled
-  try {
-    // Simulate the call (read-only simulation, does not submit)
-    const server = new StellarSdk.SorobanRpc.Server(rpcUrl);
-    const account = await server.getAccount(merchantKeypair.publicKey());
-    const contract = new StellarSdk.Contract(contractId);
+  const server = new StellarSdk.SorobanRpc.Server(rpcUrl);
+  const contract = new StellarSdk.Contract(contractId);
 
-    const tx = new StellarSdk.TransactionBuilder(account, { fee: "100", networkPassphrase })
-      .addOperation(
-        contract.call(
-          "execute_payment",
-          StellarSdk.nativeToScVal(subscriberAddress, { type: "address" }),
-          StellarSdk.nativeToScVal(merchantAddress, { type: "address" })
-        )
+  // Read-only simulation — call get_subscription to check if it still exists
+  const account = await server.getAccount(merchantKeypair.publicKey());
+
+  const tx = new StellarSdk.TransactionBuilder(account, { fee: "100", networkPassphrase })
+    .addOperation(
+      contract.call(
+        "get_subscription",
+        StellarSdk.nativeToScVal(subscriberAddress, { type: "address" }),
+        StellarSdk.nativeToScVal(merchantAddress, { type: "address" }),
+        StellarSdk.nativeToScVal(tokenAddress, { type: "address" })
       )
-      .setTimeout(30)
-      .build();
+    )
+    .setTimeout(30)
+    .build();
 
-    const simResult = await server.simulateTransaction(tx);
-    // If simulation succeeds (or returns PaymentNotDue), subscription is active
-    return true;
-  } catch (err) {
-    if (err.message?.includes("NoActiveSubscription")) return false;
-    throw err;
+  const simResult = await server.simulateTransaction(tx);
+
+  if (StellarSdk.SorobanRpc.Api.isSimulationSuccess(simResult) && simResult.result) {
+    const sub = StellarSdk.scValToNative(simResult.result.retval);
+    // Returns the SubscriptionData struct if active, or null if cancelled/expired
+    return sub !== null;
   }
+
+  return false;
+}
+```
+
+Alternatively, listen for the `cancel` event in your indexer:
+
+```js
+// In your event handler (see Step 2)
+if (eventName === "cancel") {
+  console.log(`Subscription cancelled: ${subscriber} → ${merchant}`);
+  await db.markSubscriptionCancelled(subscriber, merchant);
+  await revokeAccess(subscriber);
 }
 ```
 
@@ -633,6 +757,52 @@ const subs = await db.getActiveSubscriptions(merchantPublicKey);
 const mrr = calculateMRR(subs);
 console.log(`Current MRR: ${mrr} token units`);
 ```
+
+### 6.4 Churn rate calculation
+
+Churn is the rate at which subscribers cancel over a given period. Calculate it by comparing the number of subscriptions at the start and end of a period, accounting for new sign-ups.
+
+```js
+/**
+ * Calculate churn rate for a given period.
+ *
+ * @param {number} startCount - Active subscriptions at start of period
+ * @param {number} endCount   - Active subscriptions at end of period
+ * @param {number} newSignups - New subscriptions added during the period
+ * @returns {number} Churn rate as a percentage (e.g., 5.2 = 5.2%)
+ */
+function calculateChurnRate(startCount, endCount, newSignups) {
+  if (startCount === 0) return 0;
+  // Lost = start + new - end
+  const lost = startCount + newSignups - endCount;
+  // Churn rate = lost / startCount × 100
+  return (lost / startCount) * 100;
+}
+
+// Example: monthly churn for July 2026
+const startCount = await db.getActiveSubscriptionCount(merchantId, "2026-07-01");
+const endCount = await db.getActiveSubscriptionCount(merchantId, "2026-08-01");
+const newSignups = await db.getNewSubscriptionCount(merchantId, "2026-07-01", "2026-08-01");
+
+const churnRate = calculateChurnRate(startCount, endCount, newSignups);
+console.log(`July churn rate: ${churnRate.toFixed(1)}%`);
+
+// Net revenue churn (accounts for upgrades offsetting downgrades)
+function calculateNetRevenueChurn(startMRR, endMRR, newMRR) {
+  if (startMRR === 0) return 0;
+  const lostMRR = startMRR + newMRR - endMRR;
+  return (lostMRR / startMRR) * 100;
+}
+
+const startMRR = await db.getMRR(merchantId, "2026-07-01");
+const endMRR = await db.getMRR(merchantId, "2026-08-01");
+const newMRRFromUpgrades = await db.getUpgradeRevenue(merchantId, "2026-07-01", "2026-08-01");
+
+const netChurn = calculateNetRevenueChurn(startMRR, endMRR, newMRRFromUpgrades);
+console.log(`Net revenue churn: ${netChurn.toFixed(1)}%`);
+```
+
+> **Detecting cancellations from events:** The contract emits a `cancel` event on every successful `cancel` call. Your indexer should count these events per period to determine the number of lost subscribers. See [Step 5](#step-5-handle-cancellations-and-service-termination) for cancellation detection code.
 
 ---
 

@@ -410,3 +410,54 @@ export const apiLimiter = publicLimiter;
 
 /** @deprecated use publicLimiter instead */
 export const strictLimiter = authLimiter;
+
+// ---------------------------------------------------------------------------
+// #1380 — Configurable default and POST rate limiters
+// ---------------------------------------------------------------------------
+
+/**
+ * Default rate limiter: 100 req/min per IP (for GET/HEAD endpoints).
+ * Configurable via:
+ *   RATE_LIMIT_DEFAULT_MAX  — max requests per window (default: 100)
+ *   RATE_LIMIT_WINDOW_MS    — window size in ms (default: 60000)
+ */
+export const defaultRateLimiter = makeLimiter(
+  parseInt(process.env.RATE_LIMIT_WINDOW_MS ?? '60000', 10),
+  parseInt(process.env.RATE_LIMIT_DEFAULT_MAX ?? '100', 10),
+);
+
+/**
+ * Stricter rate limiter for POST/PUT/PATCH/DELETE endpoints: 20 req/min per IP.
+ * Configurable via:
+ *   RATE_LIMIT_POST_MAX   — max requests per window (default: 20)
+ *   RATE_LIMIT_WINDOW_MS  — window size in ms (default: 60000)
+ */
+export const postRateLimiter = makeLimiter(
+  parseInt(process.env.RATE_LIMIT_WINDOW_MS ?? '60000', 10),
+  parseInt(process.env.RATE_LIMIT_POST_MAX ?? '20', 10),
+);
+
+/**
+ * Selective middleware that applies postRateLimiter to mutation methods
+ * (POST/PUT/PATCH/DELETE) and defaultRateLimiter to all others (GET/HEAD/etc.).
+ *
+ * Mount as a global middleware in index.ts to apply method-aware rate limiting
+ * to all routes in one shot.
+ *
+ * Environment variables:
+ *   RATE_LIMIT_DEFAULT_MAX  default: 100 req/min per IP (read methods)
+ *   RATE_LIMIT_POST_MAX     default:  20 req/min per IP (write methods)
+ *   RATE_LIMIT_WINDOW_MS    default: 60000 ms (1 minute)
+ */
+export function selectiveRateLimiter(
+  req: Request,
+  res: Response,
+  next: NextFunction,
+): void {
+  const method = (req.method ?? 'GET').toUpperCase();
+  if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(method)) {
+    postRateLimiter(req, res, next);
+  } else {
+    defaultRateLimiter(req, res, next);
+  }
+}

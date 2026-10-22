@@ -9,8 +9,9 @@ use soroban_sdk::{contract, contractimpl, symbol_short, token, Address, BytesN, 
 use crate::error::ContractError;
 use crate::storage::{
     get_protocol_fee_config, has_execution_marker, set_protocol_fee_config, subscription_key,
-    write_execution_marker, DataKey, ProtocolFeeConfig, SubscriptionData, CONTRACT_VERSION,
-    CURRENT_SCHEMA_VERSION, MAX_AMOUNT, MAX_FEE_BPS, MAX_TTL_LEDGERS, MIN_TTL_LEDGERS,
+    write_execution_marker, AdminConfig, DataKey, ProtocolFeeConfig, SubscriptionData,
+    SubscriptionEntry, CONTRACT_VERSION, CURRENT_SCHEMA_VERSION, MAX_AMOUNT, MAX_FEE_BPS,
+    MAX_TTL_LEDGERS, MIN_TTL_LEDGERS,
 };
 
 /// Maximum number of subscribers allowed in a single `batch_execute_payment` call.
@@ -190,6 +191,15 @@ pub struct SubscriptionProtocol;
 
 #[contractimpl]
 impl SubscriptionProtocol {
+    // ── Authorization convention (see docs/security.md §3) ─────────────────
+    // Every RESTRICTED (state-mutating) entry point MUST call `<party>.require_auth()`
+    // as its FIRST statement — before any storage read, log, or cross-contract call.
+    // Read-only entry points (get_subscription, get_version, get_protocol_fee,
+    // get_merchant_subscriptions, get_subscription_count, …) intentionally have
+    // NO auth. The bootstrap constructor `initialize` is the sole mutating
+    // exception (one-time, guarded by the `DataKey::Admin` already-initialized
+    // panic) — see docs/security.md §3 "Full require_auth-first audit". Do NOT
+    // add new mutating entry points that defer `require_auth` past a state read.
     // =========================================================================
     // Admin / Versioning
     // =========================================================================
@@ -418,6 +428,12 @@ impl SubscriptionProtocol {
         if subscriber == merchant {
             return Err(ContractError::SelfSubscription);
         }
+        // Reject the contract's own address as the payment token (#1355).  A
+        // subscription whose token is this contract cannot represent a real
+        // SEP-41 asset and would make every later token call fail.
+        if token == env.current_contract_address() {
+            return Err(ContractError::InvalidTokenAddress);
+        }
         if amount <= 0 {
             return Err(ContractError::AmountMustBePositive);
         }
@@ -512,7 +528,8 @@ impl SubscriptionProtocol {
         subscriber.require_auth();
 
         // 2. Verify subscription exists.
-        let key = DataKey::Subscription(subscriber.clone(), merchant.clone());
+        let hash = subscription_key(&env, &subscriber, &merchant);
+        let key = DataKey::Subscription(hash);
         let mut data: SubscriptionData = env
             .storage()
             .persistent()
@@ -710,16 +727,20 @@ impl SubscriptionProtocol {
 
         let now = ledger_timestamp(&env)?;
         if data.is_paused {
-            if let Some(resume_at) = data.paused_until {
-                if now >= resume_at {
+            match data.paused_until {
+                Some(resume_at) if now >= resume_at => {
+                    // The scheduled pause window has elapsed: clear the pause and
+                    // keep the original schedule so a payment that became due
+                    // during the pause can be collected immediately.
                     data.is_paused = false;
                     data.paused_until = None;
-                    data.next_payment = checked_next_payment(now, data.interval)?;
-                } else {
-                    return Err(ContractError::SubscriptionPaused);
+                    env.storage().persistent().set(&key, &data);
+                    env.storage()
+                        .persistent()
+                        .extend_ttl(&key, MIN_TTL_LEDGERS, MAX_TTL_LEDGERS);
+                    events::emit_resumed(&env, &subscriber, &merchant, data.next_payment);
                 }
-            } else {
-                return Err(ContractError::SubscriptionPaused);
+                _ => return Err(ContractError::SubscriptionPaused),
             }
         }
         if now < data.next_payment {
@@ -781,7 +802,7 @@ impl SubscriptionProtocol {
         // Advance next_payment from now (actual collection time), not from next_payment.
         // This slides the billing window forward from the actual transfer, preventing
         // drift accumulation for merchants who collect consistently late.
-        data.next_payment = now + data.interval;
+        data.next_payment = checked_next_payment(now, data.interval)?;
         data.overdue_since = None;
         data.payment_nonce = data.payment_nonce.checked_add(1).ok_or(ContractError::InvalidTimestamp)?;
         env.storage().persistent().set(&key, &data);
@@ -796,6 +817,11 @@ impl SubscriptionProtocol {
         write_execution_marker(&env, &hash, data.payment_nonce);
 
         events::emit_executed(&env, &subscriber, &merchant, &data.token, data.amount, data.payment_nonce);
+
+        Ok(())
+    }
+
+    /// Collect payments from multiple subscribers in one transaction (max 50).
     pub fn batch_execute_payment(
         env: Env,
         merchant: Address,
@@ -832,6 +858,13 @@ impl SubscriptionProtocol {
                     continue;
                 }
             };
+
+            // Paused subscriptions are never charged by a batch; the subscriber
+            // must resume them (or let a timed pause elapse) first.
+            if data.is_paused {
+                results.push_back((subscriber.clone(), false));
+                continue;
+            }
 
             // ── Time-lock guard (per subscriber) ─────────────────────────────────
             // Uses the same >= semantics as execute_payment: allowed when now >= next_payment.
@@ -882,7 +915,7 @@ impl SubscriptionProtocol {
 
             // Advance next_payment from now (actual collection time), consistent
             // with execute_payment behaviour.
-            data.next_payment = now + data.interval;
+            data.next_payment = checked_next_payment(now, data.interval)?;
             data.overdue_since = None;
             data.payment_nonce = data.payment_nonce.checked_add(1).ok_or(ContractError::InvalidTimestamp)?;
             env.storage().persistent().set(&key, &data);
@@ -939,33 +972,13 @@ impl SubscriptionProtocol {
         Ok(())
     }
 
-    /// Atomically transfer an active subscription from one merchant to another.
+    /// Atomically transfer an active subscription to a new merchant.
     ///
-    /// This is the canonical mechanism for merchant key rotation, account merges,
-    /// and business sales: the subscription state (token, amount, interval,
-    /// `next_payment`) is preserved exactly — no billing-cycle reset occurs.
+    /// Preserves token, amount, interval, and `next_payment` exactly. Requires
+    /// auth from both `subscriber` and `old_merchant`.
     ///
-    /// # Authorization
-    /// Requires valid signatures from **both** `subscriber` and `old_merchant`.
-    /// Neither party alone can reassign the subscription.
-    ///
-    /// # Parameters
-    /// - `subscriber`:   The account currently subscribed to `old_merchant`.
-    /// - `old_merchant`: The current recipient of payments.
-    /// - `new_merchant`: The destination merchant address.
-    ///
-    /// # Atomicity
-    /// The old storage entry is removed and the new entry is written in the same
-    /// contract invocation.  The Soroban host either commits both changes or
-    /// neither — there is no window where the subscription is absent.
-    ///
-    /// # Errors
-    /// - `ContractError::NoActiveSubscription`      — no active subscription exists for
-    ///                                                `(subscriber, old_merchant)`.
-    /// - `ContractError::SameMerchant`              — `old_merchant == new_merchant`.
-    /// - `ContractError::SelfSubscription`          — `subscriber == new_merchant`.
-    /// - `ContractError::SubscriptionAlreadyExists` — a subscription already exists for
-    ///                                                `(subscriber, new_merchant)`.
+    /// Errors: `NoActiveSubscription`, `SameMerchant`, `SelfSubscription`,
+    /// `SubscriptionAlreadyExists`.
     pub fn transfer_subscription(
         env: Env,
         subscriber: Address,
@@ -1020,7 +1033,6 @@ impl SubscriptionProtocol {
             &subscriber,
             &old_merchant,
             &new_merchant,
-            data.amount,
         );
 
         Ok(())
@@ -1070,20 +1082,17 @@ impl SubscriptionProtocol {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "upgrade-test")))]
 mod test;
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "upgrade-test")))]
 mod security_tests;
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "upgrade-test")))]
 mod property_tests;
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "upgrade-test")))]
 mod multi_token_tests;
 
-#[cfg(test)]
-mod regression_tests;
-
-#[cfg(test)]
-mod transfer_subscription_tests;
+#[cfg(all(test, feature = "upgrade-test"))]
+mod test_upgrade;

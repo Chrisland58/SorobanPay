@@ -122,6 +122,19 @@ fn test_subscribe_stores_data_and_emits_event() {
     }
 }
 
+#[test]
+fn test_version_entry_points_return_constants_without_auth() {
+    let t = T::new();
+    let admin = Address::generate(&t.env);
+
+    assert_eq!(
+        t.client().get_version(),
+        soroban_sdk::String::from_str(&t.env, "1.0.0"),
+    );
+    t.client().initialize(&admin);
+    assert_eq!(t.client().get_schema_version(), 1);
+}
+
 // ─── Requirement 13.1 — Full lifecycle ───────────────────────────────────────
 
 #[test]
@@ -2594,4 +2607,60 @@ fn test_batch_failed_item_next_payment_not_advanced() {
         "subscriber balance must be unchanged after a failed batch item");
     assert_eq!(t.mer_bal(), 0_i128,
         "merchant balance must be unchanged after a failed batch item");
+}
+
+// ─── Requirement: execute_payment overflow guard ─────────────────────────────
+
+/// `execute_payment` must return `InvalidTimestamp` (8) if advancing `next_payment`
+/// by one `interval` would overflow `u64`.
+///
+/// We craft this scenario by subscribing at `overflow_ts - 1` (so `next_payment`
+/// equals `u64::MAX`) and then running `execute_payment` at `overflow_ts` where
+/// `now + interval` overflows. The contract must catch the overflow via
+/// `checked_next_payment` and return `InvalidTimestamp` rather than silently
+/// storing a wrapped (and incorrect) `next_payment`.
+///
+/// Acceptance criterion: Overflow in `next_payment + interval` → `ContractError::InvalidTimestamp`
+#[test]
+fn test_execute_payment_next_payment_overflow_returns_invalid_timestamp() {
+    let t = T::new();
+    let amt = 100_000_i128;
+    let ivl = 86_400_u64; // 1 day — minimum valid interval
+
+    // Choose a timestamp such that (overflow_ts - 1) + ivl == u64::MAX (no overflow
+    // on subscribe), but overflow_ts + ivl overflows.
+    //
+    // overflow_ts - 1 + ivl == u64::MAX
+    //   => overflow_ts == u64::MAX - ivl + 1
+    //
+    // At overflow_ts: now + ivl == u64::MAX + 1 → wraps, caught by checked_add.
+    let overflow_ts = u64::MAX - ivl + 1; // == u64::MAX - 86_400 + 1
+
+    // Subscribe at (overflow_ts - 1): next_payment = (overflow_ts - 1) + ivl == u64::MAX.
+    // checked_next_payment succeeds here because u64::MAX - 1 + ivl == u64::MAX (no wrap).
+    t.env.ledger().with_mut(|l| l.timestamp = overflow_ts - 1);
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &amt, &ivl);
+
+    let d = t.get_sub();
+    assert_eq!(d.next_payment, u64::MAX, "next_payment must equal u64::MAX after setup");
+
+    // Advance clock to overflow_ts. The time-lock passes because
+    //   now (overflow_ts) >= next_payment (u64::MAX) is false — wait, overflow_ts < u64::MAX.
+    //
+    // We need now >= next_payment == u64::MAX, so we must set timestamp to u64::MAX.
+    // At u64::MAX: now + ivl == u64::MAX + ivl → overflows.
+    t.env.ledger().with_mut(|l| l.timestamp = u64::MAX);
+
+    let result = t.client.try_execute_payment(&t.subscriber, &t.merchant);
+    assert!(
+        matches!(result, Err(Ok(ContractError::InvalidTimestamp))),
+        "execute_payment where now + interval would overflow u64 must return InvalidTimestamp"
+    );
+
+    // Subscription state must be unchanged — next_payment must not have advanced.
+    let d_after = t.get_sub();
+    assert_eq!(
+        d_after.next_payment, u64::MAX,
+        "next_payment must not change when execute_payment fails with InvalidTimestamp"
+    );
 }

@@ -294,9 +294,95 @@ Keep old contract addresses in `deployments.json` with a `deprecated_at` field f
 
 ---
 
+## 6. How to Verify You Are on the Correct Network
+
+Before making any real transaction, confirm every layer of the stack is pointing to the same network.
+
+### 6.1 Check the Stellar CLI identity network
+
+```bash
+# Print the public key for your active identity
+stellar keys address $STELLAR_IDENTITY
+
+# Confirm the network the CLI will use for the next command
+echo "Network: $STELLAR_NETWORK"
+# Expected for mainnet: mainnet
+# Expected for testnet: testnet
+```
+
+### 6.2 Check the deployed contract is on the expected network
+
+```bash
+# Testnet — contract should exist; returns WASM hash and entry points
+stellar contract info \
+  --id "$CONTRACT_ID" \
+  --rpc-url "https://soroban-testnet.stellar.org" \
+  --network-passphrase "Test SDF Network ; September 2015"
+
+# Mainnet — same contract ID will NOT exist on testnet (and vice versa)
+stellar contract info \
+  --id "$MAINNET_CONTRACT_ID" \
+  --rpc-url "https://mainnet.stellar.validationcloud.io/v1/<API_KEY>" \
+  --network-passphrase "Public Global Stellar Network ; September 2015"
+```
+
+If you accidentally pass a testnet contract ID with mainnet credentials, the command returns `contract_not_found`. This is the fastest way to detect a mismatch.
+
+### 6.3 Check the frontend environment
+
+```bash
+# Print active env values (from the running Next.js process or .env.local)
+grep "NEXT_PUBLIC_" frontend/.env.local
+```
+
+Expected output for testnet:
+
+```
+NEXT_PUBLIC_RPC_URL=https://soroban-testnet.stellar.org
+NEXT_PUBLIC_NETWORK_PASSPHRASE=Test SDF Network ; September 2015
+NEXT_PUBLIC_CONTRACT_ID=C...
+```
+
+Both `RPC_URL` and `NETWORK_PASSPHRASE` must match the same network. A mismatch causes silent `tx_bad_auth` failures.
+
+### 6.4 Check Freighter is on the correct network
+
+Open Freighter and look at the network indicator in the top-right corner. It should say **Testnet** or **Mainnet** to match your `.env.local`.
+
+To check programmatically from the frontend:
+
+```typescript
+import { getNetworkDetails } from "@stellar/freighter-api";
+
+const details = await getNetworkDetails();
+const expected = process.env.NEXT_PUBLIC_NETWORK_PASSPHRASE;
+
+if (details.networkPassphrase !== expected) {
+  console.error(
+    `Freighter is on "${details.network}" but app expects "${expected}". ` +
+    `Switch Freighter's network to match.`
+  );
+}
+```
+
+### 6.5 Quick verification table
+
+| Check | Testnet expected value | Mainnet expected value |
+|---|---|---|
+| `STELLAR_NETWORK` env var | `testnet` | `mainnet` |
+| `NEXT_PUBLIC_RPC_URL` | `https://soroban-testnet.stellar.org` | `https://mainnet.stellar.validationcloud.io/v1/<KEY>` |
+| `NEXT_PUBLIC_NETWORK_PASSPHRASE` | `Test SDF Network ; September 2015` | `Public Global Stellar Network ; September 2015` |
+| Freighter network pill | **Testnet** | **Mainnet** |
+| `stellar contract info` result | Contract found | Contract found (different address) |
+| Friendbot available? | Yes | No |
+
+---
+
 ## See Also
 
 - [Storage TTL Management Guide](./operations.md) — alert thresholds, TTL detection scripts
+- [Storage TTL Guide](./storage-ttl.md) — TTL constants and subscription lifetime
+- [Versioning and Migration Guide](./versioning.md) — contract address management across versions
 - [Backend API Cookbook](./api-cookbook.md) — recipes for all API operations
 - `deploy/deploy.sh` — network-aware deployment script
 - `frontend/.env.example` — environment variable template

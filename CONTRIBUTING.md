@@ -7,11 +7,11 @@ Thank you for your interest in contributing! This guide covers development setup
 ## Table of Contents
 
 1. [Code of Conduct](#1-code-of-conduct)
-2. [Development Setup](#2-development-setup)
-3. [Code Conventions](#3-code-conventions)
-4. [Testing Requirements](#4-testing-requirements)
-5. [PR Process](#5-pr-process)
-6. [Issue Triage Guide](#6-issue-triage-guide)
+2. [Development Environment Setup](#2-development-setup)
+3. [Code Style Guide (Rust + TypeScript)](#3-code-conventions)
+4. [Testing Requirements for PRs](#4-testing-requirements)
+5. [Branch Naming, PR Template & Maintainer Review Process](#5-pr-process)
+6. [Issue Templates & Triage Guide](#6-issue-triage-guide)
 7. [Security Vulnerability Reporting](#7-security-vulnerability-reporting)
 8. [Labels Reference](#8-labels-reference)
 
@@ -282,6 +282,8 @@ chore/<description>
 
 ### PR description template
 
+All pull requests automatically load [`.github/PULL_REQUEST_TEMPLATE.md`](.github/PULL_REQUEST_TEMPLATE.md):
+
 ```markdown
 ## Summary
 <!-- 1–3 sentences: what does this PR do and why? -->
@@ -307,18 +309,28 @@ Closes #<number>
 - [ ] Documentation updated where applicable
 ```
 
-### Review requirements
+### Maintainer review process
 
-- **1 approving review** required for all PRs.
-- **2 approving reviews** required for any change to `contracts/subscription/src/`.
-- Reviewers check: `require_auth` placement, event emission order, error handling completeness, test coverage, no secrets in diff.
-- Address all review comments before requesting re-review.
-- Squash merge for features/fixes; merge commit for release branches.
-- Delete your branch after merge.
+- **Initial triage SLA**: Maintainers aim to provide an initial review or feedback within **48–72 hours** of PR submission once all CI checks are green.
+- **1 approving review** required for standard frontend, backend, and documentation PRs.
+- **2 approving reviews** required for any change to `contracts/subscription/src/` or `deploy/`.
+- **Review criteria**: `require_auth` placement, event emission order, error handling completeness, unit/integration test coverage, and zero secrets in the diff.
+- **Feedback resolution**: Address all review comments with follow-up commits (do not force-push over reviewed commits during active review unless requested) and re-request review.
+- **Merge strategy**: Squash merge for features/fixes; merge commit for release branches. Delete your feature branch after merge.
 
 ---
 
-## 6. Issue Triage Guide
+## 6. Issue Templates & Triage Guide
+
+When opening a new issue on GitHub, select the appropriate template from [`.github/ISSUE_TEMPLATE/`](.github/ISSUE_TEMPLATE/):
+
+| Template | File | Purpose |
+|----------|------|---------|
+| **Bug Report** | [`.github/ISSUE_TEMPLATE/bug_report.md`](.github/ISSUE_TEMPLATE/bug_report.md) | Report reproducible bugs across contract, backend, or frontend |
+| **Feature Request** | [`.github/ISSUE_TEMPLATE/feature_request.md`](.github/ISSUE_TEMPLATE/feature_request.md) | Propose new protocol features, UI workflows, or API endpoints |
+| **Smart Contract Issue** | [`.github/ISSUE_TEMPLATE/smart_contract.md`](.github/ISSUE_TEMPLATE/smart_contract.md) | Report or propose Soroban contract entry point, storage, or TTL changes |
+| **Documentation** | [`.github/ISSUE_TEMPLATE/documentation.md`](.github/ISSUE_TEMPLATE/documentation.md) | Report missing, outdated, or unclear documentation |
+| **Template Chooser Config** | [`.github/ISSUE_TEMPLATE/config.yml`](.github/ISSUE_TEMPLATE/config.yml) | Directs security disclosures to private GitHub Security Advisories |
 
 For maintainers and trusted contributors.
 
@@ -410,3 +422,21 @@ Full policy: [docs/security.md](docs/security.md#8-security-disclosure-policy).
 | `good first issue` | Small, well-bounded; newcomer-friendly |
 | `help wanted` | Community contributions welcome |
 | `P0` / `P1` / `P2` / `P3` | Priority levels |
+
+---
+
+## 9. Internationalisation (i18n)
+
+SorobanPay uses [`next-intl`](https://next-intl-docs.vercel.app/) for internationalisation.
+
+### Adding a New Locale
+
+1. **Create message translation file**:
+   Add `frontend/messages/<locale>.json` modeled after `frontend/messages/en.json`.
+2. **Register locale**:
+   Add the locale code to `locales` in `frontend/src/i18n.ts`. If the locale is right-to-left (e.g. Arabic, Hebrew), also add it to `rtlLocales`.
+3. **Add language label**:
+   Add the localized display name to the `"languageSelector"` block in all message files.
+4. **Test**:
+   Verify that the language selector in the header switches to your new language and that layout direction matches (LTR or RTL).
+

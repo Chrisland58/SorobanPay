@@ -204,4 +204,130 @@ router.get('/metrics', (_req: Request, res: Response) => {
   res.send(getPrometheusMetrics());
 });
 
+// ---------------------------------------------------------------------------
+// GET /api/v1/admin/subscriptions — #1381
+// ---------------------------------------------------------------------------
+/**
+ * Returns paginated subscriptions across ALL merchants for admin monitoring.
+ *
+ * Query params:
+ *   status     {string}  — filter by ACTIVE | PAUSED | OVERDUE | CANCELLED | EXPIRED
+ *   merchant   {string}  — filter by merchant address
+ *   subscriber {string}  — filter by subscriber address
+ *   token      {string}  — filter by token contract address
+ *   from       {string}  — ISO 8601 date; subscriptions created at or after
+ *   to         {string}  — ISO 8601 date; subscriptions created at or before
+ *   page       {number}  — 1-indexed page number (default: 1)
+ *   pageSize   {number}  — records per page (default: 50, max: 200)
+ *
+ * Rate limit: 20 req/min (enforced by the postRateLimiter applied at the
+ * application level — admin routes share the global selectiveRateLimiter).
+ *
+ * Response 200:
+ *   { data: Subscription[], meta: { total, page, pageSize, totalPages } }
+ * Response 400: invalid query params
+ * Response 401: missing or invalid JWT
+ * Response 403: token valid but role !== 'admin'
+ */
+router.get('/subscriptions', async (req: Request, res: Response) => {
+  const page     = Math.max(1,   parseInt((req.query.page     as string) ?? '1',   10));
+  const pageSize = Math.min(200, Math.max(1, parseInt((req.query.pageSize as string) ?? '50', 10)));
+
+  // Optional filters
+  const statusFilter     = req.query.status     as string | undefined;
+  const merchantFilter   = req.query.merchant   as string | undefined;
+  const subscriberFilter = req.query.subscriber as string | undefined;
+  const tokenFilter      = req.query.token      as string | undefined;
+  const fromParam        = req.query.from        as string | undefined;
+  const toParam          = req.query.to          as string | undefined;
+
+  // Validate status filter
+  const VALID_STATUSES = ['ACTIVE', 'PAUSED', 'OVERDUE', 'CANCELLED', 'EXPIRED'];
+  if (statusFilter && !VALID_STATUSES.includes(statusFilter.toUpperCase())) {
+    return res.status(400).json({
+      error: `Invalid status. Must be one of: ${VALID_STATUSES.join(', ')}`,
+    });
+  }
+
+  // Validate date filters
+  let fromDate: Date | undefined;
+  let toDate: Date | undefined;
+  if (fromParam) {
+    fromDate = new Date(fromParam);
+    if (isNaN(fromDate.getTime())) {
+      return res.status(400).json({ error: 'from must be a valid ISO 8601 date' });
+    }
+  }
+  if (toParam) {
+    toDate = new Date(toParam);
+    if (isNaN(toDate.getTime())) {
+      return res.status(400).json({ error: 'to must be a valid ISO 8601 date' });
+    }
+  }
+
+  try {
+    const where: Record<string, unknown> = {};
+
+    if (statusFilter)     where.status     = statusFilter.toUpperCase();
+    if (merchantFilter)   where.merchant   = merchantFilter;
+    if (subscriberFilter) where.subscriber = subscriberFilter;
+    if (tokenFilter)      where.token      = tokenFilter;
+    if (fromDate || toDate) {
+      where.createdAt = {
+        ...(fromDate && { gte: fromDate }),
+        ...(toDate   && { lte: toDate   }),
+      };
+    }
+
+    const skip = (page - 1) * pageSize;
+
+    const [data, total] = await prisma.$transaction([
+      prisma.subscription.findMany({
+        where,
+        orderBy: { createdAt: 'desc' },
+        take: pageSize,
+        skip,
+      }),
+      prisma.subscription.count({ where }),
+    ]);
+
+    const totalPages = Math.ceil(total / pageSize);
+
+    return res.json({
+      data,
+      meta: { total, page, pageSize, totalPages },
+    });
+  } catch (_err) {
+    return res.status(500).json({ error: 'Failed to fetch subscriptions' });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// GET /api/v1/admin/subscriptions/:id — #1381
+// ---------------------------------------------------------------------------
+/**
+ * Returns a single subscription by database ID for admin inspection.
+ *
+ * Response 200: Subscription object
+ * Response 400: non-numeric id
+ * Response 404: subscription not found
+ */
+router.get('/subscriptions/:id', async (req: Request, res: Response) => {
+  const id = parseInt(req.params.id, 10);
+  if (isNaN(id)) {
+    return res.status(400).json({ error: 'id must be a numeric value' });
+  }
+
+  try {
+    const subscription = await prisma.subscription.findUnique({ where: { id } });
+    if (!subscription) {
+      return res.status(404).json({ error: 'Subscription not found' });
+    }
+    return res.json(subscription);
+  } catch (_err) {
+    return res.status(500).json({ error: 'Failed to fetch subscription' });
+  }
+});
+
 export default router;
+

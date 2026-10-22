@@ -3,11 +3,11 @@
 A collection of practical, copy-paste-ready recipes for the most common SorobanPay backend tasks. Every recipe includes a `curl` command and a JavaScript (`fetch`) equivalent, plus the response schema.
 
 > **Base URL**: Replace `https://api.sorobanpay.example.com` with your actual backend URL.  
-> **Authentication**: Recipes 1–7 require a valid `Authorization: Bearer <jwt>` header obtained from Recipe 1.
+> **Authentication**: Recipes 2–8 require a valid `Authorization: Bearer <jwt>` header obtained from Recipe 1.
 
 ---
 
-## Recipe 1 — Authenticate as a Merchant (SEP-10 Challenge-Response)
+## Recipe 1 — Authenticate with the Admin API (JWT)
 
 SorobanPay uses [SEP-10](https://github.com/stellar/stellar-protocol/blob/master/ecosystem/sep-0010.md) for merchant authentication: the backend issues a challenge transaction, the merchant signs it with Freighter (or any Stellar wallet), and the backend returns a JWT.
 
@@ -92,7 +92,7 @@ const { token, expires_at } = await tokenRes.json();
 
 ---
 
-## Recipe 2 — List All Active Subscriptions for a Merchant
+## Recipe 2 — List Subscriptions for a Merchant
 
 Returns subscriptions where the authenticated account is the merchant.
 
@@ -163,11 +163,9 @@ const { subscriptions, pagination } = await res.json();
 | `status` | `string` | `active` or `cancelled` |
 | `created_at` | `string` | ISO 8601 UTC timestamp of initial subscription creation |
 
----
+### Querying payment history
 
-## Recipe 3 — Query Payment History with Date Filter
-
-Returns the executed payment log for the authenticated merchant, optionally filtered by date range.
+You can also filter payments by date range and subscriber:
 
 **curl**
 
@@ -193,8 +191,6 @@ const res = await fetch(
 const { payments, pagination } = await res.json();
 ```
 
-**Query parameters**
-
 | Parameter | Format | Description |
 |---|---|---|
 | `from` | `YYYY-MM-DD` | Start date (UTC, inclusive). Defaults to 30 days ago. |
@@ -203,47 +199,13 @@ const { payments, pagination } = await res.json();
 | `page` | integer | Page number (default: 1) |
 | `limit` | integer | Results per page (max 200, default: 100) |
 
-**Response schema**
-
-```json
-{
-  "payments": [
-    {
-      "tx_hash":     "abc123...",
-      "subscriber":  "GABC...SUBSCRIBER",
-      "merchant":    "GDEF...MERCHANT",
-      "token":       "CTOKEN...ADDRESS",
-      "amount":      "1000000",
-      "paid_at":     "2026-07-15T12:34:56Z",
-      "ledger":      5901234
-    }
-  ],
-  "pagination": {
-    "page":        1,
-    "limit":       100,
-    "total":       847,
-    "total_pages": 9
-  }
-}
-```
-
-| Field | Type | Description |
-|---|---|---|
-| `tx_hash` | `string` | Stellar transaction hash of the `execute_payment` invocation |
-| `subscriber` | `string` | Payer's Stellar public key |
-| `merchant` | `string` | Recipient's Stellar public key |
-| `token` | `string` | SEP-41 token contract address |
-| `amount` | `string` | Amount paid (as string) |
-| `paid_at` | `string` | ISO 8601 UTC timestamp of ledger close |
-| `ledger` | `number` | Ledger sequence number of the payment transaction |
+Each payment object contains `tx_hash`, `subscriber`, `merchant`, `token`, `amount` (string), `paid_at` (ISO 8601 UTC), and `ledger` (sequence number).
 
 ---
 
-## Recipe 4 — Set Up a Webhook Endpoint and Verify HMAC Signature
+## Recipe 3 — Register a Webhook
 
-SorobanPay webhooks are signed with HMAC-SHA256 using your webhook secret. Always verify the signature before processing the payload.
-
-### Register a webhook
+Register an HTTP endpoint to receive real-time notifications when payment events occur. SorobanPay delivers webhooks signed with HMAC-SHA256 using a per-endpoint secret.
 
 **curl**
 
@@ -287,11 +249,40 @@ const { id, secret } = await res.json();
 }
 ```
 
+| Field | Type | Description |
+|---|---|---|
+| `id` | `string` | Unique webhook identifier. Used for updates and deletion. |
+| `url` | `string` | The HTTPS endpoint that will receive webhook deliveries. |
+| `events` | `string[]` | Event types to subscribe to. |
+| `secret` | `string` | HMAC-SHA256 signing secret. **Shown only once** — store immediately. |
+| `created_at` | `string` | ISO 8601 UTC timestamp of registration. |
+
 > **Security**: Store `secret` in an environment variable, not in source code.
 
-### Verify the HMAC signature on incoming requests
+### Available webhook events
 
-SorobanPay adds the header `X-SorobanPay-Signature: t=<timestamp>,v1=<hmac>` to every webhook delivery.
+| Event type | Trigger | Payload fields |
+|---|---|---|
+| `payment.executed` | `executed` contract event | `subscriber`, `merchant`, `token`, `amount`, `txHash`, `ledger` |
+| `payment.failed` | Failed `execute_payment` call | `subscriber`, `merchant`, `token`, `amount`, `reason`, `attempt` |
+| `subscription.cancelled` | `cancel` contract event | `subscriber`, `merchant`, `ledger` |
+| `subscription.created` | `subscribe` contract event | `subscriber`, `merchant`, `token`, `amount`, `interval`, `ledger` |
+
+---
+
+## Recipe 4 — Verify a Webhook Signature
+
+SorobanPay adds the header `X-SorobanPay-Signature: t=<timestamp>,v1=<hmac>` to every webhook delivery. Always verify the signature before processing the payload to prevent tampering and replay attacks.
+
+**Signature format**
+
+```
+X-SorobanPay-Signature: t=1722009600,v1=7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b
+```
+
+The HMAC is computed over `<timestamp>.<rawBody>` using your webhook secret.
+
+**JavaScript — verification function**
 
 ```javascript
 // backend/webhooks/verify.js
@@ -353,87 +344,19 @@ app.post(
     }
 
     const event = JSON.parse(rawBody);
-    handleWebhookEvent(event); // see Recipe 5
+    handleWebhookEvent(event); // see Recipe 8
     res.status(200).json({ received: true });
   }
 );
 ```
 
----
-
-## Recipe 5 — Handle a Payment Failure Webhook (Retry Logic Pattern)
-
-When `execute_payment` fails (e.g., insufficient token allowance), SorobanPay emits a `payment.failed` webhook. Implement exponential backoff to retry collection, and cancel after a configurable number of attempts.
-
-**Webhook payload — `payment.failed`**
-
-```json
-{
-  "event":      "payment.failed",
-  "created_at": "2026-07-26T14:05:00Z",
-  "data": {
-    "subscriber":  "GABC...SUBSCRIBER",
-    "merchant":    "GDEF...MERCHANT",
-    "token":       "CTOKEN...ADDRESS",
-    "amount":      "1000000",
-    "reason":      "insufficient_allowance",
-    "attempt":     1,
-    "next_retry":  "2026-07-27T14:05:00Z"
-  }
-}
-```
-
-| Field | Type | Description |
-|---|---|---|
-| `reason` | `string` | `insufficient_allowance`, `insufficient_balance`, `contract_error`, `network_timeout` |
-| `attempt` | `number` | Current attempt number (1-indexed) |
-| `next_retry` | `string` | ISO 8601 UTC scheduled retry time (null if no more retries) |
-
-**Retry handler**
-
-```javascript
-// backend/webhooks/handler.js
-
-const MAX_ATTEMPTS = 4;
-// Retry delays (days): attempt 2 → +1d, 3 → +3d, 4 → +7d
-const RETRY_DELAY_DAYS = [0, 1, 3, 7];
-
-export async function handleWebhookEvent(event) {
-  if (event.event !== "payment.failed") return;
-
-  const { subscriber, merchant, reason, attempt } = event.data;
-
-  console.warn(`Payment failed: ${subscriber} → ${merchant}. Reason: ${reason}. Attempt ${attempt}.`);
-
-  if (attempt >= MAX_ATTEMPTS) {
-    // Give up — notify merchant and optionally suspend the subscription
-    await notifyMerchantPaymentFailed({ subscriber, merchant, attempt, reason });
-    await updateSubscriptionStatus(subscriber, merchant, "payment_failed");
-    return;
-  }
-
-  // Schedule the next retry attempt
-  const delayDays = RETRY_DELAY_DAYS[attempt] ?? 7;
-  const nextRetry = new Date(Date.now() + delayDays * 86400 * 1000).toISOString();
-
-  await schedulePaymentRetry({ subscriber, merchant, attempt: attempt + 1, scheduledAt: nextRetry });
-
-  console.log(`Retry ${attempt + 1} scheduled for ${nextRetry}`);
-}
-```
-
-**Reasons and recommended responses**
-
-| Reason | Recommended action |
-|---|---|
-| `insufficient_allowance` | Notify subscriber to re-approve token allowance |
-| `insufficient_balance` | Notify subscriber to top up their token balance |
-| `contract_error` | Log full error; retry after 1 day; page on-call if persists |
-| `network_timeout` | Retry sooner (e.g., 1 hour) — likely transient |
+> **Important**: Always use `express.raw()` (not `express.json()`) on the webhook route. Parsing the body before HMAC verification invalidates the signature check because the raw bytes are lost.
 
 ---
 
-## Recipe 6 — Export Payments to CSV for Accounting
+## Recipe 5 — Export Payments as CSV
+
+Download all payments within a date range as a CSV file for import into accounting software (QuickBooks, Xero, etc.).
 
 **curl**
 
@@ -499,7 +422,7 @@ def456...,GHIJ...SUBSCRIBER,GDEF...MERCHANT,CTOKEN...,500000,2026-07-20T08:10:22
 
 ---
 
-## Recipe 7 — Calculate MRR from the Analytics Endpoint
+## Recipe 6 — Calculate MRR
 
 MRR (Monthly Recurring Revenue) is computed by the backend from active subscription amounts and their normalized monthly values.
 
@@ -570,9 +493,9 @@ monthly_amount = 10_000_000 × (2_592_000 / 86_400) = 300_000_000 (30.00 USDC/mo
 
 ---
 
-## Recipe 8 — Monitor Subscription TTL Health
+## Recipe 7 — Check TTL Health
 
-Use this recipe to integrate the TTL health endpoint into your alerting pipeline (PagerDuty, Opsgenie, Slack, etc.).
+Use this recipe to integrate the TTL health endpoint into your alerting pipeline (PagerDuty, Opsgenie, Slack, etc.). Subscriptions with low remaining TTL are at risk of being garbage-collected by the Soroban host.
 
 **curl**
 
@@ -655,6 +578,79 @@ fi
 For full details on the alert threshold (622,080 ledgers) and the multi-level INFO/WARN/CRITICAL ladder, see the [Storage TTL Management Guide](./operations.md#6-alert-threshold-justification).
 
 ---
+
+## Recipe 8 — Handle Payment Failure Webhooks
+
+When `execute_payment` fails (e.g., insufficient token allowance or balance), SorobanPay emits a `payment.failed` webhook. Implement exponential backoff to retry collection, and cancel after a configurable number of attempts.
+
+**Webhook payload — `payment.failed`**
+
+```json
+{
+  "event":      "payment.failed",
+  "created_at": "2026-07-26T14:05:00Z",
+  "data": {
+    "subscriber":  "GABC...SUBSCRIBER",
+    "merchant":    "GDEF...MERCHANT",
+    "token":       "CTOKEN...ADDRESS",
+    "amount":      "1000000",
+    "reason":      "insufficient_allowance",
+    "attempt":     1,
+    "next_retry":  "2026-07-27T14:05:00Z"
+  }
+}
+```
+
+| Field | Type | Description |
+|---|---|---|
+| `reason` | `string` | `insufficient_allowance`, `insufficient_balance`, `contract_error`, `network_timeout` |
+| `attempt` | `number` | Current attempt number (1-indexed) |
+| `next_retry` | `string` | ISO 8601 UTC scheduled retry time (null if no more retries) |
+
+**Retry handler (Node.js)**
+
+```javascript
+// backend/webhooks/handler.js
+
+const MAX_ATTEMPTS = 4;
+// Retry delays (days): attempt 2 → +1d, 3 → +3d, 4 → +7d
+const RETRY_DELAY_DAYS = [0, 1, 3, 7];
+
+export async function handleWebhookEvent(event) {
+  if (event.event !== "payment.failed") return;
+
+  const { subscriber, merchant, reason, attempt } = event.data;
+
+  console.warn(`Payment failed: ${subscriber} → ${merchant}. Reason: ${reason}. Attempt ${attempt}.`);
+
+  if (attempt >= MAX_ATTEMPTS) {
+    // Give up — notify merchant and optionally suspend the subscription
+    await notifyMerchantPaymentFailed({ subscriber, merchant, attempt, reason });
+    await updateSubscriptionStatus(subscriber, merchant, "payment_failed");
+    return;
+  }
+
+  // Schedule the next retry attempt
+  const delayDays = RETRY_DELAY_DAYS[attempt] ?? 7;
+  const nextRetry = new Date(Date.now() + delayDays * 86400 * 1000).toISOString();
+
+  await schedulePaymentRetry({ subscriber, merchant, attempt: attempt + 1, scheduledAt: nextRetry });
+
+  console.log(`Retry ${attempt + 1} scheduled for ${nextRetry}`);
+}
+```
+
+**Reasons and recommended responses**
+
+| Reason | Recommended action |
+|---|---|
+| `insufficient_allowance` | Notify subscriber to re-approve token allowance |
+| `insufficient_balance` | Notify subscriber to top up their token balance |
+| `contract_error` | Log full error; retry after 1 day; page on-call if persists |
+| `network_timeout` | Retry sooner (e.g., 1 hour) — likely transient |
+
+---
+
 
 ## Error Responses
 
@@ -1392,3 +1388,67 @@ Step 7 means that even if a bug in route logic omits a WHERE clause, the service
 - Swagger UI: `https://api.sorobanpay.example.com/docs`
 - GraphQL Playground: `https://api.sorobanpay.example.com/graphql` (disabled in production)
 - SEP-10 Spec: https://github.com/stellar/stellar-protocol/blob/master/ecosystem/sep-0010.md
+
+---
+
+## Rate Limiting (#1380)
+
+All REST API endpoints are protected by a method-aware rate limiter to prevent abuse and protect the Soroban RPC from excessive polling.
+
+### Default limits
+
+| Method type | Limit | Env variable |
+|---|---|---|
+| GET / HEAD (read) | 100 req/min per IP | `RATE_LIMIT_DEFAULT_MAX` |
+| POST / PUT / PATCH / DELETE (write) | 20 req/min per IP | `RATE_LIMIT_POST_MAX` |
+| Window duration | 60 seconds | `RATE_LIMIT_WINDOW_MS` |
+
+### Configuration
+
+Set these environment variables to override the defaults:
+
+```env
+# Max requests per window for GET/HEAD endpoints (default: 100)
+RATE_LIMIT_DEFAULT_MAX=100
+
+# Max requests per window for POST/PUT/PATCH/DELETE endpoints (default: 20)
+RATE_LIMIT_POST_MAX=20
+
+# Rate limit window in milliseconds (default: 60000 = 1 minute)
+RATE_LIMIT_WINDOW_MS=60000
+
+# Optional: bypass rate limiting for specific IPs (e.g., internal monitoring)
+RATE_LIMIT_ALLOWLIST=10.0.0.1,10.0.0.2
+```
+
+### Response headers
+
+Every response includes standard rate limit headers (RFC draft-7):
+
+```
+RateLimit-Limit: 100
+RateLimit-Remaining: 99
+RateLimit-Reset: 1700000060
+```
+
+### 429 Too Many Requests
+
+When a limit is exceeded the server responds with:
+
+```http
+HTTP/1.1 429 Too Many Requests
+Retry-After: 60
+Content-Type: application/json
+
+{
+  "error": "Too Many Requests",
+  "retryAfter": 60,
+  "message": "Rate limit exceeded. Please wait 60 seconds before retrying."
+}
+```
+
+Clients should respect the `Retry-After` header and back off accordingly.
+
+### Redis-backed distributed limiting
+
+When `REDIS_URL` is set, rate limit counters are stored in Redis and shared across all backend replicas. Without `REDIS_URL`, an in-process memory store is used (limits are per-instance).

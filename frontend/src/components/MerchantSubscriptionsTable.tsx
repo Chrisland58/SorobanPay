@@ -33,6 +33,7 @@
 import { useState, useCallback, useMemo } from 'react';
 import type { MerchantSubscription } from '@/hooks/useMerchantSubscriptions';
 import { truncateAddress } from '@/lib/utils';
+import { SkeletonMerchantSubscriberList, useMinLoadingDuration } from '@/components/Skeleton';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -166,6 +167,9 @@ export default function MerchantSubscriptionsTable({
   const [statusFilter, setStatusFilter] = useState<SubscriptionStatusFilter>('all');
   const [subscriberQuery, setSubscriberQuery] = useState('');
 
+  // Enforce minimum 200 ms skeleton display to prevent flash
+  const showSkeleton = useMinLoadingDuration(isLoading);
+
   // Selectable rows: only due, non-expired, non-collecting rows
   const selectableSubscribers = useMemo(
     () =>
@@ -220,35 +224,8 @@ export default function MerchantSubscriptionsTable({
   const hasActiveFilters = statusFilter !== 'all' || normalizedQuery.length > 0;
 
   // ── Loading state ──────────────────────────────────────────────────────────
-  if (isLoading && subscriptions.length === 0) {
-    return (
-      <div className="rounded-2xl border border-gray-800 bg-gray-900/60 overflow-hidden">
-        <div className="flex items-center justify-between px-4 py-3 border-b border-gray-800">
-          <div className="h-4 w-40 animate-pulse rounded bg-gray-800" />
-          <div className="h-8 w-24 animate-pulse rounded bg-gray-800" />
-        </div>
-        <div className="overflow-x-auto">
-          <table className="w-full text-sm" aria-label="Loading merchant subscriptions">
-            <thead>
-              <tr className="border-b border-gray-800 text-left text-xs text-gray-500 uppercase tracking-wide">
-                <th className="px-4 py-2 w-8" />
-                <th className="px-4 py-2">Subscriber</th>
-                <th className="px-4 py-2">Amount</th>
-                <th className="px-4 py-2">Interval</th>
-                <th className="px-4 py-2">Next Payment</th>
-                <th className="px-4 py-2">Status</th>
-                <th className="px-4 py-2">Action</th>
-              </tr>
-            </thead>
-            <tbody>
-              {[...Array(3)].map((_, i) => (
-                <SkeletonRow key={i} />
-              ))}
-            </tbody>
-          </table>
-        </div>
-      </div>
-    );
+  if (showSkeleton && subscriptions.length === 0) {
+    return <SkeletonMerchantSubscriberList rows={5} />;
   }
 
   // ── Error state ────────────────────────────────────────────────────────────
