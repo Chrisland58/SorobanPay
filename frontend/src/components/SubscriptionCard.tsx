@@ -36,6 +36,8 @@ export interface SubscriptionCardProps {
   interval: number;
   /** Unix timestamp (seconds) of the next scheduled payment */
   nextPayment: number;
+  /** Unix timestamp when subscription became overdue, if any */
+  overdueSince?: number | null;
   /** Unique key for this subscription */
   subscriptionKey: string;
   /** True when a cancel tx is already in flight */
@@ -72,6 +74,7 @@ export default function SubscriptionCard({
   amount,
   interval,
   nextPayment,
+  overdueSince,
   subscriptionKey,
   isCancelling,
   cancelledAt,
@@ -81,7 +84,14 @@ export default function SubscriptionCard({
   const [cancelError, setCancelError] = useState<string | null>(null);
   const [showConfirm, setShowConfirm] = useState(false);
 
+  const GRACE_PERIOD_SECONDS = 604800; // 7 days grace period
+  const now = Date.now() / 1000;
   const overdue = isOverdue(nextPayment);
+  const overdueStart = overdueSince || (overdue ? nextPayment : null);
+  const elapsedOverdue = overdueStart ? now - overdueStart : 0;
+  const isExpired = elapsedOverdue > GRACE_PERIOD_SECONDS;
+  const remainingGraceSeconds = Math.max(0, GRACE_PERIOD_SECONDS - elapsedOverdue);
+  const remainingGraceDays = Math.ceil(remainingGraceSeconds / 86400);
 
   const handleCancelClick = useCallback(() => {
     setCancelError(null);
@@ -153,13 +163,31 @@ export default function SubscriptionCard({
           </div>
 
           {/* Status badge */}
-          <span
-            className="flex-shrink-0 inline-flex items-center gap-1.5 rounded-full bg-green-900/40 border border-green-700/50 px-2.5 py-1 text-xs font-semibold text-green-300"
-            aria-label="Subscription status: Active"
-          >
-            <span className="h-1.5 w-1.5 rounded-full bg-green-400" aria-hidden="true" />
-            Active
-          </span>
+          {isExpired ? (
+            <span
+              className="flex-shrink-0 inline-flex items-center gap-1.5 rounded-full bg-red-950/80 border border-red-700 px-2.5 py-1 text-xs font-semibold text-red-300"
+              aria-label="Subscription status: Expired"
+            >
+              <span className="h-1.5 w-1.5 rounded-full bg-red-500" aria-hidden="true" />
+              Expired
+            </span>
+          ) : overdue ? (
+            <span
+              className="flex-shrink-0 inline-flex items-center gap-1.5 rounded-full bg-red-900/60 border border-red-600 px-2.5 py-1 text-xs font-semibold text-red-200"
+              aria-label="Subscription status: Overdue"
+            >
+              <span className="h-1.5 w-1.5 rounded-full bg-red-400" aria-hidden="true" />
+              Overdue
+            </span>
+          ) : (
+            <span
+              className="flex-shrink-0 inline-flex items-center gap-1.5 rounded-full bg-green-900/40 border border-green-700/50 px-2.5 py-1 text-xs font-semibold text-green-300"
+              aria-label="Subscription status: Active"
+            >
+              <span className="h-1.5 w-1.5 rounded-full bg-green-400" aria-hidden="true" />
+              Active
+            </span>
+          )}
         </div>
 
         {/* Details grid */}
@@ -191,28 +219,71 @@ export default function SubscriptionCard({
             <dt className="text-xs text-gray-500 mb-0.5">Next payment</dt>
             <dd
               className={
-                overdue
-                  ? 'text-yellow-300 font-semibold'
-                  : 'text-gray-200'
+                isExpired
+                  ? 'text-red-500 font-bold'
+                  : overdue
+                    ? 'text-red-400 font-semibold'
+                    : 'text-gray-200'
               }
               aria-label={
-                overdue
-                  ? `Next payment overdue: ${formatDate(nextPayment)}`
-                  : `Next payment: ${formatDate(nextPayment)}`
+                isExpired
+                  ? `Payment expired: ${formatDate(nextPayment)}`
+                  : overdue
+                    ? `Next payment overdue: ${formatDate(nextPayment)}`
+                    : `Next payment: ${formatDate(nextPayment)}`
               }
             >
               {formatDate(nextPayment)}
-              {overdue && (
-                <span
-                  className="ml-1.5 text-xs text-yellow-400"
-                  aria-hidden="true"
-                >
+              {isExpired ? (
+                <span className="ml-1.5 text-xs text-red-500 font-bold" aria-hidden="true">
+                  (expired)
+                </span>
+              ) : overdue ? (
+                <span className="ml-1.5 text-xs text-red-400 font-bold" aria-hidden="true">
                   (overdue)
                 </span>
-              )}
+              ) : null}
             </dd>
           </div>
         </dl>
+
+        {/* Overdue & Grace Period Alert */}
+        {overdue && !isExpired && (
+          <div
+            role="alert"
+            className="mb-3 rounded-lg bg-red-950/50 border border-red-700/70 p-3 text-xs text-red-200"
+          >
+            <div className="flex items-start justify-between gap-2">
+              <div>
+                <p className="font-semibold text-red-300">⚠️ Subscription Overdue</p>
+                <p className="mt-0.5 text-red-300/80">
+                  Grace period expires in {remainingGraceDays} day{remainingGraceDays !== 1 ? 's' : ''}.
+                </p>
+              </div>
+              <a
+                href="https://laboratory.stellar.org/#account-creator"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="shrink-0 rounded bg-red-700 hover:bg-red-600 text-white font-medium px-2.5 py-1 text-xs transition-colors"
+              >
+                Add Funds
+              </a>
+            </div>
+          </div>
+        )}
+
+        {/* Expired alert */}
+        {isExpired && (
+          <div
+            role="alert"
+            className="mb-3 rounded-lg bg-red-950/80 border border-red-800 p-3 text-xs text-red-300"
+          >
+            <p className="font-semibold text-red-200">Subscription Expired</p>
+            <p className="mt-0.5 text-red-300/80">
+              The 7-day grace period has elapsed. Payments cannot be collected.
+            </p>
+          </div>
+        )}
 
         {/* Cancel error */}
         {cancelError && (

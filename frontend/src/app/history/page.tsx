@@ -11,42 +11,93 @@
  *  - Cursor-based pagination via the usePaymentHistory hook
  *  - 60-second localStorage cache to reduce RPC calls
  *  - Accessible table (WCAG 2.1 AA) via PaymentHistoryTable component
- *  - Search and filter panel via PaymentHistoryFilters (issue #1435):
- *      date range, event type multi-select, merchant address search,
- *      amount range, token filter
- *  - Filter state persisted in URL query params
- *  - Client-side filtering for < 100 results; server-side notice above
  *  - Loading, empty, error, and disconnected states
  *  - Back-link to the home page
  *  - Network indicator (Testnet / Mainnet)
+ *
+ * Keyboard shortcut H on the home page scrolls to the placeholder section
+ * which contains a link to this page.
  */
 
-import { Suspense } from 'react';
 import Link from 'next/link';
+import dynamic from 'next/dynamic';
+import { useCallback, useEffect, useState } from 'react';
 import { useWallet } from '@/hooks/useWallet';
 import { usePaymentHistory } from '@/hooks/usePaymentHistory';
-import { usePaymentHistoryFilters, SERVER_THRESHOLD } from '@/hooks/usePaymentHistoryFilters';
-import PaymentHistoryTable from '@/components/PaymentHistoryTable';
-import { PaymentHistoryFilters } from '@/components/PaymentHistoryFilters';
 import { NETWORK_NAME } from '@/constants/network';
 
-// ── Inner page (needs useSearchParams, wrapped in Suspense below) ─────────────
+const PaymentHistoryTable = dynamic(
+  () => import('@/components/PaymentHistoryTable'),
+  {
+    ssr: false,
+    loading: () => (
+      <div className="rounded-2xl border border-gray-800 bg-gray-900/60 p-6 animate-pulse" aria-hidden="true">
+        <div className="h-6 w-48 rounded bg-gray-800 mb-4" />
+        <div className="h-40 w-full rounded bg-gray-800" />
+      </div>
+    ),
+  },
+);
 
-function HistoryPageInner() {
+const PAGE_SIZE = 20;
+
+function getPageFromUrl(): number {
+  const page = Number(new URLSearchParams(window.location.search).get('page'));
+  return Number.isSafeInteger(page) && page > 0 ? page : 1;
+}
+
+// ── Page ──────────────────────────────────────────────────────────────────────
+
+export default function HistoryPage() {
   const { publicKey } = useWallet();
+  const [currentPage, setCurrentPage] = useState(1);
 
   const { events, isLoading, error, hasMore, loadMore, refresh } =
     usePaymentHistory({ publicKey });
 
-  const {
-    filters,
-    setFilter,
-    toggleEventType,
-    clearFilters,
-    hasActiveFilters,
-    filteredEvents,
-    needsServerFilter,
-  } = usePaymentHistoryFilters(events);
+  const syncPageFromUrl = useCallback(() => {
+    setCurrentPage(getPageFromUrl());
+  }, []);
+
+  useEffect(() => {
+    syncPageFromUrl();
+    window.addEventListener('popstate', syncPageFromUrl);
+    return () => window.removeEventListener('popstate', syncPageFromUrl);
+  }, [syncPageFromUrl]);
+
+  const updatePageUrl = useCallback((page: number, replace = false) => {
+    const url = new URL(window.location.href);
+    if (page === 1) url.searchParams.delete('page');
+    else url.searchParams.set('page', String(page));
+    window.history[replace ? 'replaceState' : 'pushState']({}, '', url);
+    setCurrentPage(page);
+  }, []);
+
+  const goToNextPage = useCallback(() => {
+    const nextPage = currentPage + 1;
+    updatePageUrl(nextPage);
+    if (events.length < nextPage * PAGE_SIZE) loadMore();
+  }, [currentPage, events.length, loadMore, updatePageUrl]);
+
+  const refreshHistory = useCallback(() => {
+    updatePageUrl(1, true);
+    refresh();
+  }, [refresh, updatePageUrl]);
+
+  useEffect(() => {
+    if (isLoading || currentPage === 1) return;
+    if (events.length < currentPage * PAGE_SIZE && hasMore) {
+      loadMore();
+      return;
+    }
+    if (!hasMore && events.length < currentPage * PAGE_SIZE) {
+      const lastPage = Math.max(1, Math.ceil(events.length / PAGE_SIZE));
+      updatePageUrl(lastPage, true);
+    }
+  }, [currentPage, events.length, hasMore, isLoading, loadMore, updatePageUrl]);
+
+  const pageEvents = events.slice((currentPage - 1) * PAGE_SIZE, currentPage * PAGE_SIZE);
+  const canGoNext = hasMore || events.length > currentPage * PAGE_SIZE;
 
   return (
     <main
@@ -113,34 +164,6 @@ function HistoryPageInner() {
         </div>
       )}
 
-      {/* ── Filter panel ────────────────────────────────────────────────── */}
-      {publicKey && (
-        <div className="w-full max-w-4xl mb-6">
-          <PaymentHistoryFilters
-            filters={filters}
-            onFilterChange={setFilter}
-            onToggleEventType={toggleEventType}
-            onClear={clearFilters}
-            hasActiveFilters={hasActiveFilters}
-            totalCount={events.length}
-            filteredCount={filteredEvents.length}
-          />
-
-          {/* Server-side filter notice */}
-          {needsServerFilter && hasActiveFilters && (
-            <p
-              role="status"
-              aria-live="polite"
-              className="mt-2 text-xs text-yellow-400"
-            >
-              {events.length}+ results loaded — server-side filtering applies.
-              Showing all {events.length} events; refine your date range to
-              narrow results via the RPC.
-            </p>
-          )}
-        </div>
-      )}
-
       {/* ── Table section ───────────────────────────────────────────────── */}
       <section
         className="w-full max-w-4xl"
@@ -148,14 +171,17 @@ function HistoryPageInner() {
         aria-live="polite"
       >
         <PaymentHistoryTable
-          events={
-            needsServerFilter || !hasActiveFilters ? events : filteredEvents
-          }
+          events={pageEvents}
           isLoading={isLoading}
           error={error}
-          hasMore={hasMore && !hasActiveFilters}
+          hasMore={hasMore}
           onLoadMore={loadMore}
-          onRefresh={refresh}
+          onRefresh={refreshHistory}
+          currentPage={currentPage}
+          canGoPrevious={currentPage > 1}
+          canGoNext={canGoNext}
+          onPreviousPage={() => updatePageUrl(currentPage - 1)}
+          onNextPage={goToNextPage}
           isConnected={!!publicKey}
           networkName={NETWORK_NAME}
         />
@@ -168,21 +194,10 @@ function HistoryPageInner() {
           <code className="rounded bg-gray-800 px-1 text-gray-400">executed</code>{' '}
           events for your account from the SorobanPay contract on{' '}
           <span className="text-gray-500">{NETWORK_NAME}</span>.{' '}
-          Results are cached for 60 seconds. Filters below {SERVER_THRESHOLD}{' '}
-          results are applied client-side; above that threshold the RPC
-          is queried with date range parameters.
+          Results are cached for 60 seconds. Use the refresh button to fetch the
+          latest data.
         </p>
       </div>
     </main>
-  );
-}
-
-// ── Page export (Suspense boundary for useSearchParams) ───────────────────────
-
-export default function HistoryPage() {
-  return (
-    <Suspense fallback={null}>
-      <HistoryPageInner />
-    </Suspense>
   );
 }

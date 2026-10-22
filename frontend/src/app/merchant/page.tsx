@@ -25,11 +25,23 @@
 
 import { useState, useCallback } from 'react';
 import Link from 'next/link';
+import dynamic from 'next/dynamic';
 import { useWallet } from '@/hooks/useWallet';
 import { useMerchantSubscriptions } from '@/hooks/useMerchantSubscriptions';
-import MerchantSubscriptionsTable, {
-  type RowResult,
-} from '@/components/MerchantSubscriptionsTable';
+import type { RowResult } from '@/components/MerchantSubscriptionsTable';
+
+const MerchantSubscriptionsTable = dynamic(
+  () => import('@/components/MerchantSubscriptionsTable'),
+  {
+    ssr: false,
+    loading: () => (
+      <div className="rounded-2xl border border-gray-800 bg-gray-900/60 p-6 animate-pulse" aria-hidden="true">
+        <div className="h-6 w-48 rounded bg-gray-800 mb-4" />
+        <div className="h-40 w-full rounded bg-gray-800" />
+      </div>
+    ),
+  },
+);
 import {
   buildAndSubmitExecutePayment,
   buildAndSubmitBatchExecutePayment,
