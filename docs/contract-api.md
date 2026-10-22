@@ -1,105 +1,100 @@
 # Contract API Reference
 
-Full reference for all `SubscriptionProtocol` entry points, types, and error codes.
-
-**Contract version:** `1.0.0`  
-**Schema version:** `2`
-**Network:** Stellar / Soroban
+Full reference for all `SubscriptionProtocol` entry points — parameters, error codes, CLI examples, and TypeScript examples.
 
 ---
 
-## Table of contents
+## Table of Contents
 
-1. [Type reference](#type-reference)
-2. [Entry points](#entry-points)
+1. [Contract Overview](#contract-overview)
+2. [Data Types](#data-types)
+3. [Entry Points](#entry-points)
    - [subscribe](#subscribe)
-   - [execute_payment](#execute_payment)
-   - [batch_execute_payment](#batch_execute_payment)
+   - [execute\_payment](#execute_payment)
+   - [execute\_payment\_batch](#execute_payment_batch)
    - [cancel](#cancel)
-   - [pause_subscription](#pause_subscription)
-   - [resume_subscription](#resume_subscription)
-   - [get_subscription](#get_subscription)
-   - [initialize](#initialize)
-   - [migrate](#migrate)
-   - [get_version](#get_version)
-   - [get_schema_version](#get_schema_version)
-   - [compute_subscription_key](#compute_subscription_key)
-   - [get_merchant_subscription_keys](#get_merchant_subscription_keys)
-3. [Error code reference](#error-code-reference)
-4. [Transaction fee guidance](#transaction-fee-guidance)
-5. [End-to-end flow example](#end-to-end-flow-example)
+   - [get\_subscription](#get_subscription)
+   - [version](#version)
+   - [contract\_name](#contract_name)
+4. [Error Codes](#error-codes)
+5. [Storage Constants](#storage-constants)
+6. [End-to-End Example](#end-to-end-example)
 
 ---
 
-## Type reference
+## Contract Overview
+
+`SubscriptionProtocol` is a non-custodial recurring payments contract deployed on Stellar's Soroban platform. It stores one persistent record per `(subscriber, merchant)` pair and enforces time-locked payment collection. All token transfers go directly `subscriber → merchant` — the contract never holds balances.
+
+**Contract name:** `SorobanPay`  
+**Contract version:** `1.0.0`  
+**Language:** Rust / Soroban SDK  
+**WASM artifact:** `contracts/target/wasm32-unknown-unknown/release/soroban_subscription_contract.wasm`
+
+---
+
+## Data Types
 
 ### `SubscriptionData`
 
-The on-chain record persisted under `DataKey::Subscription(sha256(subscriber_xdr ++ merchant_xdr))`.
+Persistent on-chain record for an active subscription.
 
-| Field | Type | Invariants | Description |
-|-------|------|------------|-------------|
-| `token` | `Address` | SEP-41 contract | Token used for payment transfers |
-| `amount` | `i128` | `> 0`, `≤ 10¹⁸` | Payment amount per interval in the token's base unit (stroops) |
-| `interval` | `u64` | `[86400, 31536000]` | Seconds between successive payments (1 day – 365 days) |
-| `next_payment` | `u64` | `> 0`, no overflow | Unix timestamp of the next valid payment window |
-| `is_paused` | `bool` | — | `true` when subscription payments are suspended |
-| `grace_period` | `u64` | — | Seconds after `overdue_since` before the subscription is eligible for expiry |
-| `overdue_since` | `Option<u64>` | — | Unix timestamp of the most recent failed collection, or `None` |
-| `payment_nonce` | `u32` | — | Monotonically increasing counter of successful payments (replay protection) |
-| `paused_until` | `Option<u64>` | — | Unix timestamp at which a paused subscription auto-resumes; `None` means an indefinite pause |
+| Field | Type | Description |
+|-------|------|-------------|
+| `token` | `Address` | SEP-41 token contract address used for payments |
+| `amount` | `i128` | Payment amount per interval (in token's smallest unit / stroops) |
+| `interval` | `u64` | Seconds between payment windows |
+| `next_payment` | `u64` | Unix timestamp of the earliest valid next payment |
+| `is_paused` | `bool` | Reserved field — not currently read by `execute_payment` |
 
-**Amount units:** All `amount` values are in the token's smallest unit (stroops for USDC-equivalent tokens with 7 decimals: divide by `10_000_000` to get the display value). See [docs/token-decimals.md](token-decimals.md) for full guidance.
+### `DataKey`
 
-### Storage key derivation
-
-Subscription entries are keyed by `sha256(subscriber_xdr ++ merchant_xdr)`, a compact 32-byte `BytesN<32>`. Use [`compute_subscription_key`](#compute_subscription_key) to derive the key off-chain for direct storage inspection.
+Storage key type: `Subscription(Address, Address)` — composite key of `(subscriber, merchant)`.
 
 ---
 
-## Entry points
-
----
+## Entry Points
 
 ### `subscribe`
 
-Create or update a recurring payment subscription. Calling `subscribe` a second time for the same `(subscriber, merchant)` pair **updates** the amount and interval and resets the storage TTL — it does not create a duplicate.
+Creates or overwrites a recurring payment authorization.
 
-**Authorization:** `subscriber` must sign.
+**Auth:** `subscriber` must sign.
 
 #### Parameters
 
-| Parameter | Type | Constraints | Description |
+| Parameter | Type | Valid Range | Description |
 |-----------|------|-------------|-------------|
-| `subscriber` | `Address` | ≠ `merchant` | Account that will be charged each interval |
+| `subscriber` | `Address` | ≠ `merchant` | Account that will be charged on each interval |
 | `merchant` | `Address` | ≠ `subscriber` | Account that receives payments |
-| `token` | `Address` | SEP-41, ≠ contract address | Token contract used for transfers |
-| `amount` | `i128` | `> 0`, `≤ 10¹⁸` | Payment amount per interval in token base units |
-| `interval` | `u64` | `[86400, 31536000]` | Seconds between payments (min 1 day, max 365 days) |
-| `strict` | `bool` | — | When `true`, rejects the call if the subscriber's current SEP-41 allowance for this contract is below `amount`. When `false`, a low-allowance warning event is emitted instead. |
+| `token` | `Address` | Valid SEP-41, ≠ contract address | Token contract for the payment stream |
+| `amount` | `i128` | `(0, 10^18]` | Base units (stroops) charged per interval |
+| `interval` | `u64` | `[86400, 31536000]` | Seconds between payments (1 day – 1 year) |
 
 #### Return value
 
-`Result<(), ContractError>` — returns `()` on success.
+`Result<(), ContractError>` — returns `Ok(())` on success.
 
-#### Error codes
+#### Side effects
 
-| Error | Code | Trigger |
-|-------|------|---------|
+- Writes or overwrites `SubscriptionData` in persistent storage under key `Subscription(subscriber, merchant)`.
+- Sets `next_payment = current_ledger_timestamp + interval` (first payment collectable immediately after the interval elapses).
+- Calls `extend_ttl` to ensure the entry survives at least 30 days, up to 365 days.
+- Emits the `subscribe` event.
+
+Calling `subscribe` again for the same pair **updates** amount, interval, and token — it does not create a duplicate. The TTL is reset and `next_payment` is recalculated from the current time.
+
+#### Error cases
+
+| Error | Code | Condition |
+|-------|------|-----------|
 | `SelfSubscription` | 10 | `subscriber == merchant` |
-| `AmountMustBePositive` | 1 | `amount ≤ 0` |
-| `AmountTooLarge` | 9 | `amount > 10¹⁸` |
-| `AmountExceedsLimit` | 19 | `amount >` the admin-configured `max_amount` |
+| `InvalidTokenAddress` | 11 | `token` equals the contract's own address |
+| `AmountMustBePositive` | 1 | `amount <= 0` |
+| `AmountTooLarge` | 9 | `amount > 1_000_000_000_000_000_000` (10¹⁸) |
 | `IntervalTooShort` | 2 | `interval < 86400` |
 | `IntervalTooLong` | 3 | `interval > 31536000` |
-| `InvalidTokenAddress` | 11 | `token` equals the contract's own address |
-| `InvalidTimestamp` | 8 | Ledger timestamp is zero or `now + interval` overflows `u64` |
-| `InsufficientAllowance` | 15 | `strict == true` and subscriber's token allowance < `amount` |
-
-#### Events emitted
-
-- `subscribe` — always on success (see [events.md](events.md))
-- `low_allowance` — when `strict == false` and allowance is below `amount`
+| `InvalidTimestamp` | 8 | Ledger timestamp is zero or computing `next_payment` overflows `u64` |
 
 #### CLI example
 
@@ -111,162 +106,72 @@ stellar contract invoke \
   -- subscribe \
   --subscriber GABC1234...SUBSCRIBER \
   --merchant   GXYZ5678...MERCHANT \
-  --token      CABC1111...TOKEN \
-  --amount     10000000 \
-  --interval   2592000 \
-  --strict     false
+  --token      CABC1111...USDC \
+  --amount     100000000 \
+  --interval   2592000
 ```
 
 #### TypeScript example
 
 ```typescript
-import {
-  Contract,
-  nativeToScVal,
-  Address,
-  SorobanRpc,
-  TransactionBuilder,
-  Networks,
-} from "@stellar/stellar-sdk";
+import { Contract, nativeToScVal, Address } from "@stellar/stellar-sdk";
 
 const contract = new Contract(contractId);
 
-// Build the operation
 const op = contract.call(
   "subscribe",
-  new Address(subscriber).toScVal(),        // subscriber
-  new Address(merchant).toScVal(),          // merchant
-  new Address(tokenAddress).toScVal(),      // token
-  nativeToScVal(10_000_000n, { type: "i128" }), // amount: 1.0 USDC (7 decimals)
-  nativeToScVal(2_592_000n, { type: "u64" }),   // interval: 30 days
-  nativeToScVal(false, { type: "bool" }),        // strict: false
+  new Address(subscriber).toScVal(),
+  new Address(merchant).toScVal(),
+  new Address(tokenAddress).toScVal(),
+  nativeToScVal(100_000_000n, { type: "i128" }),   // 100 USDC (7 decimal places)
+  nativeToScVal(2_592_000n, { type: "u64" }),       // 30 days in seconds
 );
-
-// Simulate first, then sign and submit
-const server = new SorobanRpc.Server("https://soroban-testnet.stellar.org");
-const account = await server.getAccount(subscriber);
-const tx = new TransactionBuilder(account, {
-  fee: "1000",
-  networkPassphrase: Networks.TESTNET,
-})
-  .addOperation(op)
-  .setTimeout(30)
-  .build();
-
-const simResult = await server.simulateTransaction(tx);
-// Expected: { status: "SUCCESS" }
-// Subscription stored; `subscribe` event emitted.
-```
-
-#### Rust test example
-
-```rust
-#[test]
-fn test_subscribe_basic() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let contract_id = env.register_contract(None, SubscriptionProtocol);
-    let client = SubscriptionProtocolClient::new(&env, &contract_id);
-
-    let subscriber = Address::generate(&env);
-    let merchant = Address::generate(&env);
-    let token = Address::generate(&env);
-
-    // Subscribe: 1_000_000 base units, 30-day interval, non-strict
-    let result = client.subscribe(&subscriber, &merchant, &token, &1_000_000i128, &2_592_000u64, &false);
-    assert!(result.is_ok());
-
-    // Verify subscription was stored
-    let sub = client.get_subscription(&subscriber, &merchant);
-    assert!(sub.is_some());
-    let sub = sub.unwrap();
-    assert_eq!(sub.amount, 1_000_000i128);
-    assert_eq!(sub.interval, 2_592_000u64);
-    assert!(!sub.is_paused);
-}
-
-#[test]
-fn test_subscribe_self_subscription_error() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let contract_id = env.register_contract(None, SubscriptionProtocol);
-    let client = SubscriptionProtocolClient::new(&env, &contract_id);
-    let addr = Address::generate(&env);
-    let token = Address::generate(&env);
-
-    let result = client.try_subscribe(&addr, &addr, &token, &100i128, &86_400u64, &false);
-    assert_eq!(result, Err(Ok(ContractError::SelfSubscription)));
-}
 ```
 
 ---
 
 ### `execute_payment`
 
-Collect the next due payment from a subscriber. Transfers `amount` tokens directly from `subscriber` to `merchant` via SEP-41 `transfer`. Advances `next_payment` by `interval` seconds.
+Collects the next due payment for a single subscriber. Transfers `amount` tokens directly from `subscriber` to `merchant`.
 
-**Authorization:** `merchant` must sign.
+**Auth:** `merchant` must sign.
 
 #### Parameters
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `subscriber` | `Address` | Subscriber whose payment is due |
+| `subscriber` | `Address` | Account whose payment is due |
 | `merchant` | `Address` | Caller — receives the payment |
 
 #### Return value
 
-`Result<(), ContractError>` — returns `()` on success.
+`Result<(), ContractError>` — returns `Ok(())` on successful transfer.
 
-#### Error codes
+#### Side effects on success
 
-| Error | Code | Trigger |
-|-------|------|---------|
-| `NoActiveSubscription` | 4 | No subscription found for this `(subscriber, merchant)` pair |
-| `PaymentNotDue` | 5 | Ledger timestamp < `next_payment` |
-| `TransferFailed` | 7 | Subscriber's token balance < `amount` at payment time |
+- Transfers `data.amount` tokens via SEP-41 `transfer(subscriber, merchant, amount)`.
+- Advances `next_payment` to `now + interval` (late-payment-aware rescheduling — delay is absorbed into future schedule).
+- Calls `extend_ttl` to reset the subscription's TTL to 365 days.
+- Emits `payment_transfer_success` and `executed` events.
+
+#### Side effects on insufficient balance
+
+- Emits `payment_transfer_failure` event.
+- Returns `Err(TransferFailed)`.
+- Subscription state is **not modified** — the call can be retried once funds are available.
+
+#### Late payment rescheduling
+
+When a payment is collected late, `next_payment = now + interval`. This means delays cascade to future payments rather than creating immediate double-billing. Merchants requiring "make-up" charges should implement that logic off-chain.
+
+#### Error cases
+
+| Error | Code | Condition |
+|-------|------|-----------|
+| `NoActiveSubscription` | 4 | No subscription found for `(subscriber, merchant)` |
+| `PaymentNotDue` | 5 | `now < data.next_payment` |
+| `TransferFailed` | 7 | Subscriber balance is less than `data.amount` |
 | `InvalidTimestamp` | 8 | Ledger timestamp is zero |
-| `SubscriptionPaused` | 12 | Subscription is paused and `paused_until` has not elapsed |
-| `InsufficientAllowance` | 15 | Subscriber's token allowance < `amount` |
-| `DuplicateExecution` | 22 | The payment nonce was already executed (replay guard) |
-
-#### Failure paths
-
-**`PaymentNotDue` path:**  
-The call returns immediately after the storage read. No token transfer occurs. The subscription record is unchanged. Diagnostic: check `next_payment` from `get_subscription` and compare to current ledger time.
-
-```bash
-# Check when the next payment is due
-stellar contract invoke \
-  --id $CONTRACT_ID --source alice --network testnet \
-  -- get_subscription \
-  --subscriber GABC...ALICE \
-  --merchant   GXYZ...MERCHANT
-# Returns: { token, amount, interval, next_payment, is_paused }
-# Compare next_payment (unix timestamp) to current time
-```
-
-**`TransferFailed` path:**  
-The contract checks the subscriber's balance before calling `transfer`. If the balance is insufficient, it emits a `payment_transfer_failure` event and returns `TransferFailed`. The subscription remains active and can be retried once the subscriber funds their account.
-
-```typescript
-// Detect a TransferFailed by listening for the payment_transfer_failure event
-import { SorobanRpc } from "@stellar/stellar-sdk";
-const server = new SorobanRpc.Server("https://soroban-testnet.stellar.org");
-const events = await server.getEvents({
-  startLedger: ledgerOfFailedTx,
-  filters: [{ type: "contract", contractIds: [contractId] }],
-});
-// Look for topic[0] === "payment_transfer_failure"
-```
-
-#### Events emitted
-
-- `executed` — on successful transfer
-- `payment_transfer_failure` — when subscriber balance < `amount` (subscription not modified)
-
-For a complete guide on when and how to retry after a `TransferFailed` or revoked
-allowance, see [docs/retry-semantics.md](retry-semantics.md).
 
 #### CLI example
 
@@ -288,75 +193,39 @@ const op = contract.call(
   new Address(subscriber).toScVal(),
   new Address(merchant).toScVal(),
 );
-
-// After signing and submitting:
-// - On success: `executed` event emitted, next_payment advanced by interval
-// - On failure: `payment_transfer_failure` event emitted, TransferFailed error returned
-```
-
-#### Rust test example
-
-```rust
-#[test]
-fn test_execute_payment_success() {
-    let env = Env::default();
-    env.mock_all_auths();
-    // ... setup token, fund subscriber, call subscribe ...
-    // Advance ledger past next_payment
-    env.ledger().with_mut(|l| l.timestamp = next_payment + 1);
-
-    let result = client.execute_payment(&subscriber, &merchant);
-    assert!(result.is_ok());
-
-    // Verify next_payment was advanced
-    let sub = client.get_subscription(&subscriber, &merchant).unwrap();
-    assert_eq!(sub.next_payment, next_payment + 1 + interval);
-}
-
-#[test]
-fn test_execute_payment_not_due() {
-    // ... setup ...
-    // Do NOT advance ledger past next_payment
-    let result = client.try_execute_payment(&subscriber, &merchant);
-    assert_eq!(result, Err(Ok(ContractError::PaymentNotDue)));
-}
 ```
 
 ---
 
-### `batch_execute_payment`
+### `execute_payment_batch`
 
-Collect payments from up to 50 subscribers in a single transaction. Each subscriber is processed independently — failures do not abort the batch. Returns a result vector indicating which subscribers were successfully charged.
+Collects multiple recurring payments in a single transaction. All payments must be to the **same merchant** (enforced by the auth check).
 
-**Authorization:** `merchant` must sign (once for the entire batch).
-
-**Hard cap:** 50 subscribers per call (`BATCH_MAX_SIZE = 50`).
+**Auth:** `merchant` must sign once for the entire batch.
 
 #### Parameters
 
-| Parameter | Type | Constraints | Description |
-|-----------|------|-------------|-------------|
-| `merchant` | `Address` | — | Caller — receives all payments |
-| `subscribers` | `Vec<Address>` | length `[1, 50]` | List of subscriber addresses to charge |
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `merchant` | `Address` | Caller — receives all payments in the batch |
+| `payments` | `Vec<Address>` | List of subscriber addresses to collect from |
 
 #### Return value
 
-`Result<Vec<(Address, bool)>, ContractError>` — a vector of `(subscriber_address, success)` tuples. `true` means the payment was transferred; `false` means it was skipped (not due, no active subscription, or insufficient balance).
+`Result<(), ContractError>` — returns `Ok(())` after processing the entire batch.
 
-#### Error codes
+Per-subscription failures (missing subscription, payment not due, insufficient balance) are **not** propagated as errors. Each payment is processed independently:
 
-| Error | Code | Trigger |
-|-------|------|---------|
-| `EmptyBatch` | 13 | `subscribers` vector is empty |
-| `BatchTooLarge` | 14 | `subscribers.len() > 50` |
-| `InvalidTimestamp` | 8 | Ledger timestamp is zero |
+- If the subscription does not exist → silently skipped.
+- If `now < next_payment` → silently skipped.
+- If subscriber balance is insufficient → `payment_transfer_failure` event emitted, skipped.
+- If transfer succeeds → `payment_transfer_success` + `executed` events emitted, state updated.
 
-#### Events emitted
+#### Error cases
 
-- `batch_execute_initiated` — once at the start, with merchant and batch size
-- `payment_transfer_success` — for each subscriber successfully charged
-- `executed` — for each subscriber successfully charged
-- `payment_transfer_failure` — for each subscriber with insufficient balance
+| Error | Code | Condition |
+|-------|------|-----------|
+| `EmptyBatch` | 12 | `payments` vector is empty |
 
 #### CLI example
 
@@ -365,35 +234,40 @@ stellar contract invoke \
   --id $CONTRACT_ID \
   --source merchant-key \
   --network testnet \
-  -- batch_execute_payment \
-  --merchant   GXYZ5678...MERCHANT \
-  --subscribers '[{"address":"GABC...SUB1"},{"address":"GDEF...SUB2"}]'
+  -- execute_payment_batch \
+  --merchant GXYZ5678...MERCHANT \
+  --payments '["GABC1234...SUB1","GDEF5678...SUB2","GHIJ9012...SUB3"]'
 ```
 
 #### TypeScript example
 
 ```typescript
-import { nativeToScVal, Address, xdr } from "@stellar/stellar-sdk";
+import { Contract, nativeToScVal, Address, xdr } from "@stellar/stellar-sdk";
 
-const subscriberAddresses = ["GABC...SUB1", "GDEF...SUB2", "GHIJ...SUB3"];
+const subscribers = [
+  "GABC1234...SUB1",
+  "GDEF5678...SUB2",
+  "GHIJ9012...SUB3",
+];
 
-const op = contract.call(
-  "batch_execute_payment",
-  new Address(merchant).toScVal(),
-  xdr.ScVal.scvVec(subscriberAddresses.map((s) => new Address(s).toScVal())),
+const subscribersScVal = xdr.ScVal.scvVec(
+  subscribers.map((s) => new Address(s).toScVal())
 );
 
-// After submission, decode the return value to see per-subscriber results:
-// Vec<(Address, bool)> → [ [sub1, true], [sub2, false], [sub3, true] ]
+const op = contract.call(
+  "execute_payment_batch",
+  new Address(merchant).toScVal(),
+  subscribersScVal,
+);
 ```
 
 ---
 
 ### `cancel`
 
-Remove the subscription from persistent storage. No further payments can be collected after cancellation. Removes the subscription from the merchant's enumeration index.
+Removes the subscription from persistent storage. No further payments can be collected after a successful cancel.
 
-**Authorization:** `subscriber` must sign.
+**Auth:** `subscriber` must sign.
 
 #### Parameters
 
@@ -404,17 +278,19 @@ Remove the subscription from persistent storage. No further payments can be coll
 
 #### Return value
 
-`Result<(), ContractError>` — returns `()` on success.
+`Result<(), ContractError>` — returns `Ok(())` on success.
 
-#### Error codes
+#### Side effects
 
-| Error | Code | Trigger |
-|-------|------|---------|
-| `NoActiveSubscription` | 4 | No subscription found for this pair |
+- Removes the `Subscription(subscriber, merchant)` entry from persistent storage.
+- Emits the `cancel` event.
+- Does **not** extend or touch TTL (the entry is removed entirely).
 
-#### Events emitted
+#### Error cases
 
-- `cancel` — always on success, data is `()` (unit)
+| Error | Code | Condition |
+|-------|------|-----------|
+| `NoActiveSubscription` | 4 | No subscription found for `(subscriber, merchant)` |
 
 #### CLI example
 
@@ -436,155 +312,99 @@ const op = contract.call(
   new Address(subscriber).toScVal(),
   new Address(merchant).toScVal(),
 );
-// After success: subscription deleted; future execute_payment returns NoActiveSubscription (4)
-```
-
-#### Rust test example
-
-```rust
-#[test]
-fn test_cancel_removes_subscription() {
-    // ... setup and subscribe ...
-    let result = client.cancel(&subscriber, &merchant);
-    assert!(result.is_ok());
-
-    // Subscription is gone
-    assert!(client.get_subscription(&subscriber, &merchant).is_none());
-
-    // execute_payment now returns NoActiveSubscription
-    let pay_result = client.try_execute_payment(&subscriber, &merchant);
-    assert_eq!(pay_result, Err(Ok(ContractError::NoActiveSubscription)));
-}
-```
-
----
-
-### `pause_subscription`
-
-Temporarily suspend payment collection for an active subscription. While paused, `execute_payment` returns `SubscriptionPaused` and `batch_execute_payment` skips the subscription; no tokens move and `next_payment` is left untouched.
-
-**Authorization:** `subscriber` must sign.
-
-#### Parameters
-
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `subscriber` | `Address` | Owner of the subscription |
-| `merchant` | `Address` | Merchant counterparty |
-| `token` | `Address` | Token contract address (informational; the subscription is resolved by subscriber + merchant) |
-| `resume_at` | `Option<u64>` | Optional Unix timestamp for automatic resume. `None` pauses indefinitely until an explicit `resume_subscription` call. |
-
-#### Return value
-
-`Result<(), ContractError>` — returns `()` on success.
-
-#### Error codes
-
-| Error | Code | Trigger |
-|-------|------|---------|
-| `NoActiveSubscription` | 4 | No subscription found for this pair |
-| `InvalidTimestamp` | 8 | `resume_at` is not strictly in the future |
-| `SubscriptionPaused` | 12 | Subscription is already paused |
-
-#### Events emitted
-
-- `paused` — data is `Option<u64>` (`resume_at`)
-
-#### CLI example
-
-```bash
-stellar contract invoke \
-  --id $CONTRACT_ID --source alice --network testnet \
-  -- pause_subscription \
-  --subscriber GABC1234...SUBSCRIBER \
-  --merchant   GXYZ5678...MERCHANT \
-  --token      CABC1111...TOKEN \
-  --resume-at  1735689600
-```
-
----
-
-### `resume_subscription`
-
-Reactivate a paused subscription immediately, clearing `is_paused` and `paused_until`. `next_payment` is recomputed as `now + interval`, so the subscriber is not charged for time spent paused.
-
-**Authorization:** `subscriber` must sign.
-
-#### Parameters
-
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `subscriber` | `Address` | Owner of the subscription |
-| `merchant` | `Address` | Merchant counterparty |
-| `token` | `Address` | Token contract address (informational; the subscription is resolved by subscriber + merchant) |
-
-#### Return value
-
-`Result<(), ContractError>` — returns `()` on success.
-
-#### Error codes
-
-| Error | Code | Trigger |
-|-------|------|---------|
-| `NoActiveSubscription` | 4 | No subscription found for this pair |
-| `InvalidTimestamp` | 8 | Ledger timestamp is zero or `now + interval` overflows `u64` |
-| `SubscriptionNotPaused` | 24 | Subscription is not currently paused |
-
-#### Events emitted
-
-- `resumed` — data is the recomputed `next_payment` (`u64`)
-
-#### CLI example
-
-```bash
-stellar contract invoke \
-  --id $CONTRACT_ID --source alice --network testnet \
-  -- resume_subscription \
-  --subscriber GABC1234...SUBSCRIBER \
-  --merchant   GXYZ5678...MERCHANT \
-  --token      CABC1111...TOKEN
 ```
 
 ---
 
 ### `get_subscription`
 
-Query active subscription details for a subscriber-merchant pair. This is a read-only call; it requires no authorization. As a side effect, it extends the entry's TTL if it is below the minimum threshold.
+Read-only view — returns the current subscription record for a `(subscriber, merchant)` pair.
 
-**Authorization:** None required.
+**Auth:** None required.
 
 #### Parameters
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `subscriber` | `Address` | Subscriber address |
-| `merchant` | `Address` | Merchant address |
+| `subscriber` | `Address` | Account being charged |
+| `merchant` | `Address` | Account receiving payments |
 
 #### Return value
 
-`Option<SubscriptionData>` — `Some(data)` if an active subscription exists, `None` otherwise.
+`Option<SubscriptionData>` — `Some(data)` if the subscription exists, `None` if not.
+
+```typescript
+// SubscriptionData shape returned from the contract
+interface SubscriptionData {
+  token: string;        // SEP-41 token contract address
+  amount: bigint;       // payment amount in stroops (i128)
+  interval: bigint;     // seconds between payments (u64)
+  next_payment: bigint; // Unix timestamp of next collectable payment (u64)
+  is_paused: boolean;   // reserved; not enforced by execute_payment
+}
+```
+
+#### Side effects
+
+- Bumps the TTL of the storage entry (if present) to prevent silent expiry while being monitored.
 
 #### CLI example
 
 ```bash
 stellar contract invoke \
   --id $CONTRACT_ID \
-  --source any-account \
+  --source alice \
   --network testnet \
   -- get_subscription \
   --subscriber GABC1234...SUBSCRIBER \
   --merchant   GXYZ5678...MERCHANT
 ```
 
-**Example output:**
-```json
-{
-  "token": "CABC1111...TOKEN",
-  "amount": "10000000",
-  "interval": "2592000",
-  "next_payment": "1753660800",
-  "is_paused": false
+#### TypeScript example
+
+```typescript
+import { SorobanRpc, Contract, Address, scValToNative } from "@stellar/stellar-sdk";
+
+const server = new SorobanRpc.Server("https://soroban-testnet.stellar.org");
+const contract = new Contract(contractId);
+
+// Build a simulation to read the subscription state
+const tx = /* ... build transaction with get_subscription call */;
+const sim = await server.simulateTransaction(tx);
+
+if (SorobanRpc.Api.isSimulationSuccess(sim) && sim.result) {
+  const sub = scValToNative(sim.result.retval);
+  if (sub) {
+    console.log("Token:        ", sub.token);
+    console.log("Amount:       ", sub.amount.toString(), "stroops");
+    console.log("Interval:     ", (Number(sub.interval) / 86400).toFixed(1), "days");
+    console.log("Next payment: ", new Date(Number(sub.next_payment) * 1000).toISOString());
+  } else {
+    console.log("No active subscription.");
+  }
 }
+```
+
+---
+
+### `version`
+
+Returns the contract version string.
+
+**Auth:** None required.
+
+#### Return value
+
+`Symbol` — e.g., `"1.0.0"` (Soroban Symbol, max 32 chars).
+
+#### CLI example
+
+```bash
+stellar contract invoke \
+  --id $CONTRACT_ID \
+  --source alice \
+  --network testnet \
+  -- version
 ```
 
 #### TypeScript example
@@ -592,458 +412,192 @@ stellar contract invoke \
 ```typescript
 import { scValToNative } from "@stellar/stellar-sdk";
 
-const op = contract.call(
-  "get_subscription",
-  new Address(subscriber).toScVal(),
-  new Address(merchant).toScVal(),
-);
+// Simulated call returns Symbol "1.0.0"
+const versionSym = scValToNative(sim.result!.retval);
+console.log("Contract version:", versionSym); // "1.0.0"
+```
 
-// Simulate (no signature needed for read-only)
-const simResult = await server.simulateTransaction(tx);
-if (SorobanRpc.Api.isSimulationSuccess(simResult)) {
-  const data = scValToNative(simResult.result!.retval);
-  // data === null  →  no active subscription
-  // data === { token, amount, interval, next_payment, is_paused }
-  if (data) {
-    const nextPaymentDate = new Date(Number(data.next_payment) * 1000);
-    console.log("Next payment due:", nextPaymentDate.toISOString());
+**Usage pattern:** check the major version prefix before making calls to ensure SDK compatibility:
+
+```typescript
+const version = scValToNative(sim.result!.retval) as string;
+if (!version.startsWith("1.")) {
+  throw new Error(`Unsupported contract version: ${version}`);
+}
+```
+
+---
+
+### `contract_name`
+
+Returns the contract name for identification.
+
+**Auth:** None required.
+
+#### Return value
+
+`Symbol` — `"SorobanPay"` (Soroban Symbol).
+
+#### CLI example
+
+```bash
+stellar contract invoke \
+  --id $CONTRACT_ID \
+  --source alice \
+  --network testnet \
+  -- contract_name
+```
+
+---
+
+## Error Codes
+
+Complete list of `ContractError` variants with recovery guidance.
+
+| Code | Name | Trigger | Recovery |
+|------|------|---------|----------|
+| 1 | `AmountMustBePositive` | `subscribe` called with `amount <= 0` | Pass a positive `amount` value |
+| 2 | `IntervalTooShort` | `subscribe` called with `interval < 86400` | Minimum interval is 86400 seconds (1 day) |
+| 3 | `IntervalTooLong` | `subscribe` called with `interval > 31536000` | Maximum interval is 31536000 seconds (365 days) |
+| 4 | `NoActiveSubscription` | `execute_payment` or `cancel` found no subscription for the pair | Verify the subscriber/merchant pair; call `get_subscription` first |
+| 5 | `PaymentNotDue` | `execute_payment` called before `next_payment` timestamp | Wait until `now >= next_payment`; use `get_subscription` to check the due date |
+| 6 | `Unauthorized` | Authorization check failed (supplementary — `require_auth()` panics directly) | Ensure the correct keypair signs the transaction |
+| 7 | `TransferFailed` | Subscriber balance less than `amount` at payment time | Subscriber must fund their account; retry after sufficient balance is confirmed |
+| 8 | `InvalidTimestamp` | Ledger timestamp is zero, or `next_payment = ts + interval` overflows `u64` | Network issue (zero timestamp) or unrealistically large interval; reduce interval |
+| 9 | `AmountTooLarge` | `subscribe` called with `amount > 10^18` | Reduce amount; max is `1_000_000_000_000_000_000` stroops |
+| 10 | `SelfSubscription` | `subscriber == merchant` in `subscribe` | Use two distinct addresses |
+| 11 | `InvalidTokenAddress` | `token` equals the contract's own address in `subscribe` | Use a valid SEP-41 token contract address, not the subscription contract itself |
+| 12 | `EmptyBatch` | `execute_payment_batch` called with an empty `payments` vector | Provide at least one subscriber address |
+
+### Reading error codes from the RPC response
+
+A failed contract invocation returns an XDR-encoded error. With the Stellar SDK:
+
+```typescript
+import { SorobanRpc, xdr } from "@stellar/stellar-sdk";
+
+try {
+  const result = await server.sendTransaction(tx);
+  if (result.status === "ERROR") {
+    // Parse the result XDR to get the contract error
+    const resultXdr = xdr.TransactionResult.fromXDR(result.resultXdr, "base64");
+    console.error("Transaction failed:", result.resultXdr);
   }
+} catch (err) {
+  // The Soroban SDK throws on simulation errors
+  console.error("Simulation failed:", err);
 }
 ```
-
-#### Frontend helper — `querySubscription`
-
-The SorobanPay frontend exposes a typed wrapper in
-`frontend/src/lib/transaction_builder.ts` that handles account lookup, transaction
-building, and result decoding in one call. No signing or fees are required.
-
-```typescript
-import { querySubscription } from "@/lib/transaction_builder";
-
-// Query from a Next.js component or server action
-const { subscription } = await querySubscription(
-  { subscriber: "GABC...SUBSCRIBER", merchant: "GXYZ...MERCHANT" },
-  process.env.NEXT_PUBLIC_CONTRACT_ID!,
-  process.env.NEXT_PUBLIC_RPC_URL!,
-  process.env.NEXT_PUBLIC_NETWORK_PASSPHRASE!,
-);
-
-if (subscription) {
-  const due = new Date(Number(subscription.next_payment) * 1000);
-  console.log("Token:          ", subscription.token);
-  console.log("Amount:         ", subscription.amount.toString(), "base units");
-  console.log("Interval:       ", subscription.interval.toString(), "seconds");
-  console.log("Next payment:   ", due.toISOString());
-  console.log("Is paused:      ", subscription.is_paused);
-} else {
-  console.log("No active subscription.");
-}
-```
-
-**`QuerySubscriptionParams`**
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `subscriber` | `string` | Subscriber Stellar G-address |
-| `merchant` | `string` | Merchant Stellar G-address |
-
-**`SubscriptionData`** (returned in `subscription`)
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `token` | `string` | SEP-41 token contract address (`C…`) |
-| `amount` | `bigint` | Payment amount per interval in token base units |
-| `interval` | `bigint` | Seconds between payments |
-| `next_payment` | `bigint` | Unix timestamp of next valid payment window |
-| `is_paused` | `boolean` | Whether payments are currently suspended |
-
-#### Notes
-
-- `get_subscription` is **read-only** — no authorization required, no fee consumed.
-- As a side effect, it extends the subscription entry's TTL if it is below `MIN_TTL_LEDGERS` (~30 days). This prevents the entry from expiring between payment cycles even on long billing intervals.
-- Returns `None` / `null` for expired or cancelled subscriptions. Distinguish from an active subscription with zero balance by also checking the on-chain token balance.
 
 ---
 
-### `initialize`
+## Storage Constants
 
-One-time setup: stores the admin address and initial schema version in instance storage. Must be called once after deployment. Panics if called again.
+| Constant | Value | Approximate wall-clock time |
+|----------|-------|-----------------------------|
+| `MAX_AMOUNT` | `1_000_000_000_000_000_000` | — (1 × 10¹⁸ stroops) |
+| `MIN_TTL_LEDGERS` | `518_400` | ~30 days at 5 s/ledger |
+| `MAX_TTL_LEDGERS` | `6_307_200` | ~365 days at 5 s/ledger |
+| Min `interval` | `86_400` s | 1 day |
+| Max `interval` | `31_536_000` s | 365 days |
 
-**Authorization:** None required (called by deployer).
+TTL is extended on every `subscribe` call and every successful `execute_payment`. An active subscription is always guaranteed ≥ 30 days remaining TTL. Subscriptions that go a full year without a successful payment expire and are garbage-collected by the Soroban host.
 
-#### Parameters
+---
 
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `admin` | `Address` | Address authorised to call `migrate` |
+## End-to-End Example
 
-#### CLI example
+### Lifecycle: subscribe → collect → cancel
 
 ```bash
+# 1. Subscribe: alice authorizes 50 USDC every 30 days to merchant
 stellar contract invoke \
-  --id $CONTRACT_ID \
-  --source deployer \
-  --network testnet \
-  -- initialize \
-  --admin GADMIN...ADDRESS
-```
+  --id $CONTRACT_ID --source alice --network testnet \
+  -- subscribe \
+  --subscriber GABC...ALICE \
+  --merchant   GXYZ...MERCHANT \
+  --token      CABC...USDC \
+  --amount     500000000 \
+  --interval   2592000
 
----
-
-### `migrate`
-
-Upgrade the on-chain schema version to `CURRENT_SCHEMA_VERSION`. Returns `AlreadyMigrated` if the contract is already at the current version. Emits `contract_migrated`.
-
-**Authorization:** `admin` (the address stored by `initialize`) must sign.
-
-#### Parameters
-
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `admin` | `Address` | Must match the stored admin address |
-
-#### Return value
-
-`Result<(), ContractError>`
-
-#### Error codes
-
-| Error | Code | Trigger |
-|-------|------|---------|
-| `NotInitialized` | 18 | `initialize` has not been called |
-| `NotAdmin` | 17 | `admin` does not match the stored admin address |
-| `AlreadyMigrated` | 16 | Schema version is already `CURRENT_SCHEMA_VERSION` |
-
----
-
-### `get_version`
-
-Return the contract semantic version as a Soroban `String`. The current value is `"1.0.0"`; this is a compile-time constant and requires no storage read.
-
-**Authorization:** None required.
-
-#### Return value
-
-`String` — `"1.0.0"`
-
-#### CLI example
-
-```bash
+# 2. (30 days later) Merchant collects payment
 stellar contract invoke \
-  --id $CONTRACT_ID \
-  --source any-account \
-  --network testnet \
-  -- get_version
-# Output: "1.0.0"
-```
+  --id $CONTRACT_ID --source merchant-key --network testnet \
+  -- execute_payment \
+  --subscriber GABC...ALICE \
+  --merchant   GXYZ...MERCHANT
 
----
-
-### `get_schema_version`
-
-Return the on-chain schema version stored during the last `migrate` call (or `initialize`). The current contract schema version is `1`. Returns `0` if `initialize` has not been called.
-
-**Authorization:** None required.
-
-#### Return value
-
-`u32`
-
----
-
-### `compute_subscription_key`
-
-Compute and return the compact 32-byte SHA-256 storage key for a subscription pair. Useful for off-chain tooling that wants to inspect raw ledger storage entries without going through the contract.
-
-**Authorization:** None required.
-
-#### Parameters
-
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `subscriber` | `Address` | Subscriber address |
-| `merchant` | `Address` | Merchant address |
-
-#### Return value
-
-`BytesN<32>` — `sha256(subscriber_xdr ++ merchant_xdr)`
-
----
-
-### `get_merchant_subscription_keys`
-
-Return all subscription key hashes indexed for a given merchant. Off-chain tools can iterate these hashes to enumerate all active subscriptions the merchant is party to.
-
-**Authorization:** None required.
-
-#### Parameters
-
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `merchant` | `Address` | Merchant address to query |
-
-#### Return value
-
-`Vec<BytesN<32>>` — list of 32-byte hashed subscription keys (may be empty if no subscriptions exist).
-
-> **Note:** These keys are stored in **temporary** storage (not persistent). Temporary storage has a shorter TTL than persistent storage. Entries may be absent for inactive merchants.
-
----
-
-## Error code reference
-
-Complete table of all 25 error codes with trigger conditions, affected entry points, and resolution guidance.
-
-| Code | Name | Entry points | Trigger condition | Resolution |
-|------|------|-------------|-------------------|------------|
-| 1 | `AmountMustBePositive` | `subscribe`, `update_subscription` | `amount ≤ 0` | Pass a positive `amount` |
-| 2 | `IntervalTooShort` | `subscribe`, `update_subscription` | `interval < 86400` | Minimum interval is 86400 s (1 day) |
-| 3 | `IntervalTooLong` | `subscribe`, `update_subscription` | `interval > 31536000` | Maximum interval is 31536000 s (365 days) |
-| 4 | `NoActiveSubscription` | `execute_payment`, `cancel`, `update_subscription`, `pause_subscription`, `resume_subscription`, `transfer_subscription` | No record for `(subscriber, merchant)` | Verify pair; may have been cancelled or expired |
-| 5 | `PaymentNotDue` | `execute_payment` | `now < next_payment` | Wait until `next_payment` timestamp has passed |
-| 6 | `Unauthorized` | all auth-required | Signature missing or invalid | Ensure the correct account signs the transaction |
-| 7 | `TransferFailed` | `execute_payment` | Subscriber balance < `amount` | Subscriber must fund their account or top up allowance |
-| 8 | `InvalidTimestamp` | `subscribe`, `execute_payment`, `batch_execute_payment`, `pause_subscription`, `resume_subscription` | Ledger timestamp is zero or `now + interval` overflows `u64` | Unlikely in production; indicates ledger misconfiguration |
-| 9 | `AmountTooLarge` | `subscribe`, `update_subscription`, `set_max_amount` | `amount > 10¹⁸` or an invalid cap | Use an amount within the safe range |
-| 10 | `SelfSubscription` | `subscribe`, `transfer_subscription` | `subscriber == merchant` (or `subscriber == new_merchant`) | Use distinct addresses for subscriber and merchant |
-| 11 | `InvalidTokenAddress` | `subscribe` | `token == contract address` | Use a valid SEP-41 token contract address |
-| 12 | `SubscriptionPaused` | `execute_payment`, `pause_subscription` | Payment attempted before `paused_until`, or pause on an already-paused subscription | Wait for `paused_until`, call `resume_subscription`, or `cancel` |
-| 13 | `EmptyBatch` | `batch_execute_payment` | `subscribers` vector is empty | Pass at least one subscriber |
-| 14 | `BatchTooLarge` | `batch_execute_payment` | `subscribers.len() > 50` | Split into batches of ≤ 50 |
-| 15 | `InsufficientAllowance` | `subscribe`, `execute_payment` | `strict == true` and allowance < `amount`, or allowance revoked before collection | Approve a higher SEP-41 allowance first |
-| 16 | `AlreadyMigrated` | `migrate` | Schema already at `CURRENT_SCHEMA_VERSION` | No action needed |
-| 17 | `NotAdmin` | `migrate`, `set_max_amount`, `set_protocol_fee` | Caller ≠ stored admin address | Use the admin identity set during `initialize` |
-| 18 | `NotInitialized` | `get_config`, `migrate`, `set_protocol_fee` | `initialize` not yet called | Call `initialize(admin)` first |
-| 19 | `AmountExceedsLimit` | `subscribe` | `amount >` the admin-configured `max_amount` | Lower the amount or have the admin raise the cap |
-| 20 | `SameMerchant` | `transfer_subscription` | `old_merchant == new_merchant` | Choose a distinct destination merchant |
-| 21 | `SubscriptionAlreadyExists` | `transfer_subscription` | A subscription already exists for `(subscriber, new_merchant)` | Cancel the destination subscription first or choose another merchant |
-| 22 | `DuplicateExecution` | `execute_payment` | The payment nonce was already executed (replay guard) | Do not retry the same execution; wait for the next billing cycle |
-| 23 | `GracePeriodActive` | grace-period flows (reserved) | An operation requiring an expired grace period was attempted while grace is still active | Wait until the grace period elapses |
-| 24 | `SubscriptionNotPaused` | `resume_subscription` | Subscription is not currently paused | No action needed, or pause it first |
-| 25 | `FeeBpsTooHigh` | `set_protocol_fee` | `fee_bps > 500` | Use a fee ≤ 500 bps (5%) |
-
-### Errors returned per entry point
-
-| Entry point | Possible errors |
-|-------------|----------------|
-| `subscribe` | 1, 2, 3, 6, 8, 9, 10, 11, 15, 19 |
-| `update_subscription` | 1, 2, 3, 4, 6, 9 |
-| `execute_payment` | 4, 5, 6, 7, 8, 12, 15, 22 |
-| `batch_execute_payment` | 6, 8, 13, 14 (per-subscriber failures are returned as `false`) |
-| `cancel` | 4, 6 |
-| `pause_subscription` | 4, 6, 8, 12 |
-| `resume_subscription` | 4, 6, 8, 24 |
-| `transfer_subscription` | 4, 6, 10, 20, 21 |
-| `get_subscription` | _(none — returns `Option`)_ |
-| `migrate` | 16, 17, 18 |
-| `set_max_amount` | 6, 9, 17, 18 |
-| `set_protocol_fee` | 6, 17, 18, 25 |
-
----
-
-## Transaction fee guidance
-
-All entry points are O(1) in computation (no unbounded loops). Fee costs differ because `execute_payment` crosses into an external token contract.
-
-| Entry point | Relative cost | Min `instructions` | Min `write_bytes` | Notes |
-|-------------|--------------|-------------------|------------------|-------|
-| `subscribe` | Medium | 150,000 | 300 | Auth + persistent write + TTL extend |
-| `execute_payment` | Highest | 500,000 | 500 | Two cross-contract calls (`balance` + `transfer`) |
-| `batch_execute_payment` | Scales with batch | `500,000 × n` | `500 × n` | Per-subscriber cost similar to `execute_payment` |
-| `cancel` | Lowest | 50,000 | 100 | Auth + persistent remove |
-| `get_subscription` | Minimal | 30,000 | 50 | Read-only + conditional TTL extend |
-
-Always simulate before submitting to production — `simulateTransaction` returns exact `minResourceFee`, `instructions`, and write/read byte counts:
-
-```typescript
-const simResult = await server.simulateTransaction(tx);
-if (SorobanRpc.Api.isSimulationSuccess(simResult)) {
-  console.log("Min resource fee:", simResult.minResourceFee);
-  console.log("Instructions:", simResult.transactionData.resources().instructions());
-}
-```
-
-Add a 10–25% buffer to the simulated `instructions` count to absorb minor host-version variance between simulation and submission.
-
-### Error cases
-
-| Error | Code | Trigger |
-|-------|------|---------|
-| `NoActiveSubscription` | 4 | No subscription found for this pair |
-
----
-
-## Query entry points
-
-### `get_subscription`
-
-Read-only. Returns the full `SubscriptionData` for a subscriber-merchant pair, or `None` if no subscription exists.
-
-Calling this function also silently extends the entry's TTL (same thresholds as `subscribe`).
-
-**Auth:** none.
-
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `subscriber` | `Address` | Subscriber to look up |
-| `merchant` | `Address` | Merchant counterparty |
-
-**Return type:** `Option<SubscriptionData>`
-
-```rust
-pub struct SubscriptionData {
-    pub token:        Address,  // SEP-41 token contract
-    pub amount:       i128,     // payment amount per interval
-    pub interval:     u64,      // seconds between payments
-    pub next_payment: u64,      // unix timestamp of next valid payment window
-    pub is_paused:    bool,     // true when payments are suspended
-}
-```
-
-**CLI:**
-```bash
+# 3. Check subscription state
 stellar contract invoke \
   --id $CONTRACT_ID --source alice --network testnet \
   -- get_subscription \
   --subscriber GABC...ALICE \
   --merchant   GXYZ...MERCHANT
-```
 
-**TypeScript:**
-```typescript
-const result = await server.simulateTransaction(
-  buildGetSubscriptionTx(contract, subscriber, merchant, account, networkPassphrase)
-);
-const data = scValToNative(result.result?.retval);
-// data: { token, amount, interval, next_payment, is_paused } or null
-```
-
----
-
-## Utility entry points
-
-### `compute_subscription_key`
-
-Returns the 32-byte `sha256(subscriber_xdr ++ merchant_xdr)` storage key for a given pair. Useful for off-chain tooling that needs to inspect raw ledger entries.
-
-**Auth:** none.
-
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `subscriber` | `Address` | Subscriber address |
-| `merchant` | `Address` | Merchant address |
-
-Returns `BytesN<32>`.
-
----
-
-### `get_merchant_subscription_keys`
-
-Returns all 32-byte subscription key hashes currently indexed for the given merchant. Off-chain tools can iterate these hashes to enumerate all active subscriptions the merchant participates in.
-
-**Auth:** none.
-
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `merchant` | `Address` | Merchant to look up |
-
-Returns `Vec<BytesN<32>>`. Returns an empty vector if the merchant has no subscriptions or the index entry has expired.
-
-> **Note:** The index is stored under **temporary** storage (not persistent). It may be evicted if the ledger TTL lapses. Always treat the result as advisory and verify individual entries with `get_subscription`.
-
----
-
-## All error codes
-
-| Code | Name | Trigger |
-|------|------|---------|
-| 1 | `AmountMustBePositive` | `amount ≤ 0` in `subscribe` or `update_subscription` |
-| 2 | `IntervalTooShort` | `interval < 86400` in `subscribe` or `update_subscription` |
-| 3 | `IntervalTooLong` | `interval > 31536000` in `subscribe` or `update_subscription` |
-| 4 | `NoActiveSubscription` | No subscription found for `(subscriber, merchant)` |
-| 5 | `PaymentNotDue` | `now < next_payment` in `execute_payment` |
-| 6 | `Unauthorized` | Authorization check failed |
-| 7 | `TransferFailed` | Insufficient subscriber balance at payment time |
-| 8 | `InvalidTimestamp` | Ledger timestamp is zero or would overflow |
-| 9 | `AmountTooLarge` | `amount > 10¹⁸` in `subscribe` / `update_subscription`, or invalid `set_max_amount` cap |
-| 10 | `SelfSubscription` | `subscriber == merchant` in `subscribe` or `transfer_subscription` |
-| 11 | `InvalidTokenAddress` | `token` is the contract's own address in `subscribe` |
-| 12 | `SubscriptionPaused` | Payment attempted while paused before `paused_until`, or double pause |
-| 13 | `EmptyBatch` | `subscribers` list is empty in `batch_execute_payment` |
-| 14 | `BatchTooLarge` | `subscribers.len() > 50` in `batch_execute_payment` |
-| 15 | `InsufficientAllowance` | `strict == true` and `allowance < amount` in `subscribe`, or allowance revoked before `execute_payment` |
-| 16 | `AlreadyMigrated` | Schema already at current version in `migrate` |
-| 17 | `NotAdmin` | Caller is not the stored admin in `migrate`, `set_max_amount`, or `set_protocol_fee` |
-| 18 | `NotInitialized` | `initialize` was never called |
-| 19 | `AmountExceedsLimit` | `amount` exceeds the admin-configured `max_amount` in `subscribe` |
-| 20 | `SameMerchant` | `old_merchant == new_merchant` in `transfer_subscription` |
-| 21 | `SubscriptionAlreadyExists` | Destination `(subscriber, new_merchant)` pair already has a subscription |
-| 22 | `DuplicateExecution` | Replay guard detected an already-executed payment nonce |
-| 23 | `GracePeriodActive` | Grace-period-dependent operation attempted while grace is still active |
-| 24 | `SubscriptionNotPaused` | `resume_subscription` called on an active subscription |
-| 25 | `FeeBpsTooHigh` | `fee_bps > 500` in `set_protocol_fee` |
-
-Error codes 1–25 are **stable** — they will never be reassigned. New codes will use numbers ≥ 26.
-
----
-
-## End-to-end flow example
-
-```bash
-# 1. Deploy and initialize
-CONTRACT_ID=$(bash deploy/deploy.sh)
-stellar contract invoke \
-  --id $CONTRACT_ID --source deployer --network testnet \
-  -- initialize --admin $ADMIN_ADDRESS
-
-# 2. Subscriber sets SEP-41 allowance (off-chain, via token contract)
-stellar contract invoke \
-  --id $TOKEN_CONTRACT --source alice --network testnet \
-  -- approve \
-  --from    $ALICE_ADDRESS \
-  --spender $CONTRACT_ID \
-  --amount  100000000 \
-  --expiration_ledger 9999999
-
-# 3. Subscriber creates a subscription (10 USDC/month)
-stellar contract invoke \
-  --id $CONTRACT_ID --source alice --network testnet \
-  -- subscribe \
-  --subscriber $ALICE_ADDRESS \
-  --merchant   $MERCHANT_ADDRESS \
-  --token      $USDC_TOKEN \
-  --amount     100000000 \
-  --interval   2592000 \
-  --strict     false
-
-# 4. Query subscription state
-stellar contract invoke \
-  --id $CONTRACT_ID --source alice --network testnet \
-  -- get_subscription \
-  --subscriber $ALICE_ADDRESS \
-  --merchant   $MERCHANT_ADDRESS
-
-# 5. Merchant collects payment (run on/after next_payment timestamp)
-stellar contract invoke \
-  --id $CONTRACT_ID --source merchant-key --network testnet \
-  -- execute_payment \
-  --subscriber $ALICE_ADDRESS \
-  --merchant   $MERCHANT_ADDRESS
-
-# 6. Subscriber cancels
+# 4. Alice cancels
 stellar contract invoke \
   --id $CONTRACT_ID --source alice --network testnet \
   -- cancel \
-  --subscriber $ALICE_ADDRESS \
-  --merchant   $MERCHANT_ADDRESS
+  --subscriber GABC...ALICE \
+  --merchant   GXYZ...MERCHANT
 ```
 
----
+### Batch collection example
 
-## Related documentation
+```typescript
+import { Contract, SorobanRpc, TransactionBuilder, Networks, Address, xdr } from "@stellar/stellar-sdk";
+import Stellar from "@stellar/stellar-sdk";
 
-- [events.md](events.md) — Full event reference, RPC query examples, and decoding guide
-- [docs/token-decimals.md](token-decimals.md) — Amount units, decimal conversion
-- [docs/operations.md](operations.md) — Storage TTL management and alert thresholds
-- [docs/security.md](security.md) — Security model and best practices
-- [docs/networks.md](networks.md) — Testnet vs mainnet configuration
+const server = new SorobanRpc.Server("https://soroban-testnet.stellar.org");
+const contract = new Contract(process.env.CONTRACT_ID!);
+
+const merchantKeypair = Stellar.Keypair.fromSecret(process.env.MERCHANT_SECRET!);
+const merchantAccount = await server.getAccount(merchantKeypair.publicKey());
+
+const subscribers = [
+  "GABC1111...SUB1",
+  "GABC2222...SUB2",
+  "GABC3333...SUB3",
+];
+
+const subscribersScVal = xdr.ScVal.scvVec(
+  subscribers.map((s) => new Address(s).toScVal())
+);
+
+const tx = new TransactionBuilder(merchantAccount, {
+  fee: "100000",
+  networkPassphrase: Networks.TESTNET,
+})
+  .addOperation(
+    contract.call(
+      "execute_payment_batch",
+      new Address(merchantKeypair.publicKey()).toScVal(),
+      subscribersScVal,
+    )
+  )
+  .setTimeout(30)
+  .build();
+
+// Simulate to get resource footprint
+const simResult = await server.simulateTransaction(tx);
+if (!SorobanRpc.Api.isSimulationSuccess(simResult)) {
+  throw new Error("Simulation failed: " + JSON.stringify(simResult));
+}
+
+// Assemble, sign, and submit
+const preparedTx = SorobanRpc.assembleTransaction(tx, simResult).build();
+preparedTx.sign(merchantKeypair);
+
+const sendResult = await server.sendTransaction(preparedTx);
+console.log("Batch tx hash:", sendResult.hash);
+
+// Poll for confirmation
+let getResult = await server.getTransaction(sendResult.hash);
+while (getResult.status === "NOT_FOUND") {
+  await new Promise((r) => setTimeout(r, 2000));
+  getResult = await server.getTransaction(sendResult.hash);
+}
+console.log("Batch status:", getResult.status);
+```
+
+See [docs/events.md](events.md) for the full event schema and how to decode `payment_transfer_success`, `payment_transfer_failure`, and `executed` events from the batch.
