@@ -3,16 +3,27 @@
 /**
  * Toast.tsx
  *
- * Auto-dismissing toast notification system with:
- *  - role="alert" for screen reader announcements (UX-113)
- *  - 10-second auto-dismiss (configurable)
- *  - Manual dismiss via X button
- *  - Variants: error, success, warning, info
- *  - Context + hook for easy usage anywhere in the app
+ * Auto-dismissing toast notification system.
+ *
+ * Issue: #1431 [UI/UX] Toast notification system for non-critical feedback
+ *
+ * Behaviour per issue spec:
+ *  - Appears bottom-right, stacks vertically
+ *  - Success / info / warning: auto-dismiss after 4 s
+ *  - Error: requires manual dismiss (no auto-dismiss)
+ *  - Maximum 3 toasts visible at once (oldest removed when limit exceeded)
+ *  - role="status" for success/info/warning (polite), role="alert" for error (assertive)
+ *
+ * Accessibility:
+ *  - role="status" + aria-live="polite"  for non-critical feedback
+ *  - role="alert"  + aria-live="assertive" for errors
+ *  - Dismiss button with aria-label
+ *  - Shrinking progress bar communicates remaining time visually
  *
  * Usage:
  *   const { showToast } = useToast();
- *   showToast({ variant: 'error', message: 'Something went wrong', action: 'Try again' });
+ *   showToast({ variant: 'success', message: 'Copied to clipboard' });
+ *   showToast({ variant: 'error',   message: 'Transfer failed', action: 'Check balance and retry' });
  */
 
 import {
@@ -38,7 +49,11 @@ export interface ToastData {
   action?: string;
   /** Optional link to docs */
   docsUrl?: string;
-  /** Auto-dismiss delay in ms (default 10000) */
+  /**
+   * Auto-dismiss delay in ms.
+   * - success / info / warning: defaults to 4 000 ms
+   * - error: defaults to Infinity (manual dismiss required)
+   */
   duration?: number;
 }
 
@@ -47,6 +62,7 @@ export interface ShowToastOptions {
   message: string;
   action?: string;
   docsUrl?: string;
+  /** Override the default duration. Pass Infinity to require manual dismiss. */
   duration?: number;
 }
 
@@ -54,6 +70,14 @@ interface ToastContextValue {
   showToast: (opts: ShowToastOptions) => void;
   dismissToast: (id: string) => void;
 }
+
+// ─── Constants ────────────────────────────────────────────────────────────────
+
+/** Maximum number of toasts shown simultaneously per issue spec. */
+const MAX_TOASTS = 3;
+
+/** Default auto-dismiss for non-error variants (ms). */
+const SUCCESS_DURATION_MS = 4_000;
 
 // ─── Context ──────────────────────────────────────────────────────────────────
 
@@ -70,6 +94,15 @@ export function useToast(): ToastContextValue {
   return ctx ?? NO_OP_TOAST;
 }
 
+// ─── Resolve duration ─────────────────────────────────────────────────────────
+
+function resolveDuration(opts: ShowToastOptions): number {
+  if (opts.duration !== undefined) return opts.duration;
+  // Error toasts require manual dismiss per issue spec
+  if (opts.variant === 'error') return Infinity;
+  return SUCCESS_DURATION_MS;
+}
+
 // ─── Styles ───────────────────────────────────────────────────────────────────
 
 const VARIANT_STYLES: Record<
@@ -77,26 +110,22 @@ const VARIANT_STYLES: Record<
   { container: string; icon: string; title: string }
 > = {
   error: {
-    container:
-      'bg-red-950/95 border-red-600/70 shadow-red-950/50',
+    container: 'bg-red-950/95 border-red-600/70 shadow-red-950/50',
     icon: '❌',
     title: 'text-red-300',
   },
   success: {
-    container:
-      'bg-green-950/95 border-green-600/70 shadow-green-950/50',
+    container: 'bg-green-950/95 border-green-600/70 shadow-green-950/50',
     icon: '✓',
     title: 'text-green-300',
   },
   warning: {
-    container:
-      'bg-yellow-950/95 border-yellow-600/70 shadow-yellow-950/50',
+    container: 'bg-yellow-950/95 border-yellow-600/70 shadow-yellow-950/50',
     icon: '⚠️',
     title: 'text-yellow-300',
   },
   info: {
-    container:
-      'bg-blue-950/95 border-blue-600/70 shadow-blue-950/50',
+    container: 'bg-blue-950/95 border-blue-600/70 shadow-blue-950/50',
     icon: 'ℹ️',
     title: 'text-blue-300',
   },
@@ -112,35 +141,37 @@ function ToastItem({
   onDismiss: (id: string) => void;
 }) {
   const styles = VARIANT_STYLES[toast.variant];
-  const duration = toast.duration ?? 10_000;
+  const duration = toast.duration ?? (toast.variant === 'error' ? Infinity : SUCCESS_DURATION_MS);
+  const isError = toast.variant === 'error';
   const progressRef = useRef<HTMLDivElement>(null);
 
-  // Auto-dismiss timer
+  // Auto-dismiss timer — errors are never auto-dismissed
   useEffect(() => {
+    if (!isFinite(duration)) return;
     const timer = setTimeout(() => onDismiss(toast.id), duration);
     return () => clearTimeout(timer);
-  }, [toast.id, duration, onDismiss]);
+  }, [toast.id, duration, isError, onDismiss]);
 
-  // Shrinking progress bar
+  // Shrinking progress bar (only for auto-dismiss toasts)
   useEffect(() => {
+    if (!isFinite(duration)) return;
     const el = progressRef.current;
     if (!el) return;
     el.style.transition = `width ${duration}ms linear`;
-    // Force reflow so the transition starts from 100%
-    void el.offsetWidth;
+    void el.offsetWidth; // force reflow
     el.style.width = '0%';
   }, [duration]);
 
   return (
     <div
-      role="alert"
-      aria-live="assertive"
+      // role="alert" (assertive) for errors; role="status" (polite) for everything else
+      role={isError ? 'alert' : 'status'}
+      aria-live={isError ? 'assertive' : 'polite'}
       aria-atomic="true"
       className={`
         w-full max-w-sm rounded-xl border shadow-xl
         ${styles.container}
         overflow-hidden
-        animate-in slide-in-from-right-5 fade-in duration-300
       `}
     >
       <div className="p-4">
@@ -163,24 +194,26 @@ function ToastItem({
                 href={toast.docsUrl}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="mt-1.5 inline-block text-xs text-blue-400 hover:text-blue-300 underline focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400 rounded"
+                className="mt-1.5 inline-block text-xs text-blue-400 hover:text-blue-300 underline
+                           focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400 rounded"
               >
                 View troubleshooting docs ↗
               </a>
             )}
           </div>
-          {/* Dismiss button */}
+          {/* Dismiss button — always visible for errors, visible on hover for others */}
           <button
             type="button"
             onClick={() => onDismiss(toast.id)}
             aria-label="Dismiss notification"
-            className="
+            className={`
               flex-shrink-0 ml-1 -mt-0.5
               h-6 w-6 flex items-center justify-center
               rounded text-gray-400 hover:text-white
               hover:bg-white/10 transition-colors
               focus:outline-none focus-visible:ring-2 focus-visible:ring-white/50
-            "
+              ${isError ? 'opacity-100' : 'opacity-60 hover:opacity-100'}
+            `}
           >
             <svg
               xmlns="http://www.w3.org/2000/svg"
@@ -198,21 +231,29 @@ function ToastItem({
           </button>
         </div>
       </div>
-      {/* Auto-dismiss progress bar */}
-      <div className="h-1 bg-white/10">
-        <div
-          ref={progressRef}
-          className="h-full bg-white/30 w-full"
-          aria-hidden="true"
-        />
-      </div>
+
+      {/* Auto-dismiss progress bar — hidden for error toasts */}
+      {isFinite(duration) && (
+        <div className="h-1 bg-white/10" aria-hidden="true">
+          <div
+            ref={progressRef}
+            className="h-full bg-white/30 w-full"
+          />
+        </div>
+      )}
     </div>
   );
 }
 
 // ─── Toast container ──────────────────────────────────────────────────────────
 
-function ToastContainer({ toasts, onDismiss }: { toasts: ToastData[]; onDismiss: (id: string) => void }) {
+function ToastContainer({
+  toasts,
+  onDismiss,
+}: {
+  toasts: ToastData[];
+  onDismiss: (id: string) => void;
+}) {
   if (toasts.length === 0) return null;
 
   return (
@@ -240,7 +281,12 @@ export function ToastProvider({ children }: { children: ReactNode }) {
 
   const showToast = useCallback((opts: ShowToastOptions) => {
     const id = `toast-${++_idCounter}-${Date.now()}`;
-    setToasts((prev) => [...prev, { ...opts, id }]);
+    const duration = resolveDuration(opts);
+    setToasts((prev) => {
+      const updated = [...prev, { ...opts, id, duration }];
+      // Cap at MAX_TOASTS — drop the oldest when the limit is exceeded
+      return updated.length > MAX_TOASTS ? updated.slice(updated.length - MAX_TOASTS) : updated;
+    });
   }, []);
 
   return (
