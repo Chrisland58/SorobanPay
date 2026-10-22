@@ -29,6 +29,7 @@ import notificationsRouter from './routes/notifications';
 import kycRouter from './routes/kyc';
 import versionRouter from './routes/version';
 import analyticsRouter from './routes/analytics';   // FE-50 / BE-52
+import mrrRouter from './routes/mrr';               // #1378: MRR analytics
 import reportsRouter from './routes/reports';        // BE-58: revenue reporting export
 import adminRouter from './routes/admin';
 import authRouter from './routes/auth';                        // BE-55: merchant auth
@@ -217,6 +218,7 @@ app.use('/api/v1/summaries',     summariesRouter);
 app.use('/api/v1/reconcile',     reconcileRouter);
 app.use('/api/v1/notifications', notificationsRouter);  // BE-68
 app.use('/api/v1/admin',         adminRouter);          // BE-75: admin dashboard
+app.use('/api/v1/analytics/mrr', mrrRouter);            // #1378: MRR analytics
 app.use('/api/v1/analytics',     requireMerchant, analyticsRouter);  // FE-50: revenue analytics
 app.use('/api/v1/reports',       requireMerchant, reportsRouter);    // BE-58 / #798: payment reports export
 
@@ -233,6 +235,7 @@ app.use('/api/webhooks',      webhooksRouter);
 app.use('/api/summaries',     summariesRouter);
 app.use('/api/reconcile',     reconcileRouter);
 app.use('/api/notifications', notificationsRouter);
+app.use('/api/analytics/mrr', mrrRouter);              // #1378: backward-compat alias
 app.use('/api/analytics',     analyticsRouter);        // FE-50: backward-compat alias
 app.use('/api/reports',       reportsRouter);          // BE-58 / #798: backward-compat alias
 
