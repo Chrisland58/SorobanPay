@@ -41,6 +41,27 @@ rules, and step-by-step checklist — see [docs/release-process.md](docs/release
   workflow artifact, builds and deploys the frontend to Vercel with the
   updated contract ID, and runs smoke tests against the deployed frontend.
   Closes #1443.
+- Redis StatefulSet in `deploy/k8s/` with PVC, resource limits (256Mi / 0.25
+  CPU), and liveness/readiness/startup health probes. Includes ClusterIP and
+  headless Services, a ConfigMap with `redis.conf` tuned for caching (LRU
+  eviction, no persistence), and a `kustomization.yaml` manifest. Closes #1444.
+
+- Redis-backed distributed rate limiting in the backend using `ioredis` +
+  `rate-limiter-flexible`, replacing the previous `rate-limit-redis` peer
+  dependency. Falls back to in-memory when `REDIS_URL` is unset.
+
+- Redis cache client (`backend/src/lib/redisCache.ts`) for MRR analytics
+  caching. Payout summary queries (`/api/v1/summaries`) are cached with a
+  60-second TTL, reducing database load during report generation.
+
+- Redis health check in the `/health` endpoint — reports `ok`, `disabled`
+  (when `REDIS_URL` is unset), or `error` with the failure message.
+
+- `ioredis` and `rate-limiter-flexible` dependencies added to
+  `backend/package.json`.
+
+- Redis configuration documented in `backend/.env.example` (`REDIS_URL`,
+  `RATE_LIMIT_REDIS_PREFIX`, `REDIS_CACHE_PREFIX`).
 
 ### Changed
 
