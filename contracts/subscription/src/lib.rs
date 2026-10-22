@@ -418,6 +418,12 @@ impl SubscriptionProtocol {
         if subscriber == merchant {
             return Err(ContractError::SelfSubscription);
         }
+        // Reject the contract's own address as the payment token (#1355).  A
+        // subscription whose token is this contract cannot represent a real
+        // SEP-41 asset and would make every later token call fail.
+        if token == env.current_contract_address() {
+            return Err(ContractError::InvalidTokenAddress);
+        }
         if amount <= 0 {
             return Err(ContractError::AmountMustBePositive);
         }
@@ -796,6 +802,11 @@ impl SubscriptionProtocol {
         write_execution_marker(&env, &hash, data.payment_nonce);
 
         events::emit_executed(&env, &subscriber, &merchant, &data.token, data.amount, data.payment_nonce);
+
+        Ok(())
+    }
+
+    /// Collect payments from multiple subscribers in one transaction (max 50).
     pub fn batch_execute_payment(
         env: Env,
         merchant: Address,
