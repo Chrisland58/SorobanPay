@@ -11,7 +11,7 @@
     "db:seed-and-reset": "bash scripts/seed-and-reset.sh"
   },
   "devDependencies": {
-    "@stellar/stellar-sdk": "^16.0.1",
+    "@stellar/stellar-sdk": "^17.2.1",
     "ts-node": "^10.9.2",
     "typescript": "^5.5.4"
   },
