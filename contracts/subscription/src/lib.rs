@@ -101,6 +101,26 @@ impl SubscriptionProtocol {
             .unwrap_or(0_u32)
     }
 
+    /// Set the maximum amount accepted for subscriptions in this deployment.
+    pub fn set_max_amount(env: Env, admin: Address, max_amount: i128) -> Result<(), ContractError> {
+        admin.require_auth();
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(ContractError::NotInitialized)?;
+        if admin != stored_admin {
+            return Err(ContractError::Unauthorized);
+        }
+        env.storage().instance().set(&DataKey::MaxAmount, &max_amount);
+        Ok(())
+    }
+
+    /// Return the configured deployment cap, or `None` when no cap is set.
+    pub fn get_max_amount(env: Env) -> Option<i128> {
+        env.storage().instance().get(&DataKey::MaxAmount)
+    }
+
     /// Rewrite subscription records and migrate the schema to the current version.
     ///
     /// Requires the stored admin's authorization. Existing records are rewritten
@@ -254,6 +274,15 @@ impl SubscriptionProtocol {
         if amount > MAX_AMOUNT {
             return Err(ContractError::AmountTooLarge);
         }
+        if env
+            .storage()
+            .instance()
+            .get::<_, i128>(&DataKey::MaxAmount)
+            .map(|max_amount| amount > max_amount)
+            .unwrap_or(false)
+        {
+            return Err(ContractError::AmountExceedsLimit);
+        }
         if interval < 86_400 {
             return Err(ContractError::IntervalTooShort);
         }
@@ -300,6 +329,59 @@ impl SubscriptionProtocol {
 
         events::emit_subscribe(&env, &subscriber, &merchant, &token, amount);
 
+        Ok(())
+    }
+
+    /// Update the amount and interval for an existing subscription.
+    ///
+    /// Requires authorization from `subscriber`; the subscription token and
+    /// optional metadata are preserved, and the next payment is recalculated.
+    pub fn update_subscription(
+        env: Env,
+        subscriber: Address,
+        merchant: Address,
+        amount: i128,
+        interval: u64,
+    ) -> Result<(), ContractError> {
+        subscriber.require_auth();
+
+        if amount <= 0 {
+            return Err(ContractError::AmountMustBePositive);
+        }
+        if amount > MAX_AMOUNT {
+            return Err(ContractError::AmountTooLarge);
+        }
+        if env
+            .storage()
+            .instance()
+            .get::<_, i128>(&DataKey::MaxAmount)
+            .map(|max_amount| amount > max_amount)
+            .unwrap_or(false)
+        {
+            return Err(ContractError::AmountExceedsLimit);
+        }
+        if interval < 86_400 {
+            return Err(ContractError::IntervalTooShort);
+        }
+        if interval > 31_536_000 {
+            return Err(ContractError::IntervalTooLong);
+        }
+
+        let key = DataKey::Subscription(subscription_key(&env, &subscriber, &merchant));
+        let mut data: SubscriptionData = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .ok_or(ContractError::NoActiveSubscription)?;
+        let next_payment = checked_next_payment(ledger_timestamp(&env)?, interval)?;
+        data.amount = amount;
+        data.interval = interval;
+        data.next_payment = next_payment;
+        data.overdue_since = None;
+        env.storage().persistent().set(&key, &data);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, MIN_TTL_LEDGERS, MAX_TTL_LEDGERS);
         Ok(())
     }
 

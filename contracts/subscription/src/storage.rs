@@ -48,6 +48,9 @@ pub enum DataKey {
 
     /// Designated admin address authorised to call `migrate`.
     Admin,
+
+    /// Optional maximum subscription amount for this deployment.
+    MaxAmount,
 }
 
 /// Persistent on-chain record for a subscription.

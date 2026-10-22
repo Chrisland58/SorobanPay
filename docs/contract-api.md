@@ -3,7 +3,7 @@
 Full reference for all `SubscriptionProtocol` entry points, types, and error codes.
 
 **Contract version:** `1.0.0`  
-**Schema version:** `1`  
+**Schema version:** `2`
 **Network:** Stellar / Soroban
 
 ---
@@ -13,12 +13,14 @@ Full reference for all `SubscriptionProtocol` entry points, types, and error cod
 1. [Type reference](#type-reference)
 2. [Entry points](#entry-points)
    - [subscribe](#subscribe)
+  - [update_subscription](#update_subscription)
    - [execute_payment](#execute_payment)
    - [batch_execute_payment](#batch_execute_payment)
    - [cancel](#cancel)
-   - [expire_subscription](#expire_subscription)
    - [get_subscription](#get_subscription)
    - [initialize](#initialize)
+  - [set_max_amount](#set_max_amount)
+  - [get_max_amount](#get_max_amount)
    - [migrate](#migrate)
    - [get_version](#get_version)
    - [get_schema_version](#get_schema_version)
@@ -43,6 +45,9 @@ The on-chain record persisted under `DataKey::Subscription(sha256(subscriber_xdr
 | `interval` | `u64` | `[86400, 31536000]` | Seconds between successive payments (1 day – 365 days) |
 | `next_payment` | `u64` | `> 0`, no overflow | Unix timestamp of the next valid payment window |
 | `is_paused` | `bool` | — | `true` when subscription payments are suspended (reserved for future use) |
+| `grace_period` | `Option<u64>` | — | Optional grace-period duration in seconds |
+| `paused_until` | `Option<u64>` | — | Optional timestamp until which payments are paused |
+| `overdue_since` | `Option<u64>` | — | Optional timestamp when the subscription became overdue |
 
 **Amount units:** All `amount` values are in the token's smallest unit (stroops for USDC-equivalent tokens with 7 decimals: divide by `10_000_000` to get the display value). See [docs/token-decimals.md](token-decimals.md) for full guidance.
 
@@ -84,6 +89,7 @@ Create or update a recurring payment subscription. Calling `subscribe` a second 
 | `SelfSubscription` | 10 | `subscriber == merchant` |
 | `AmountMustBePositive` | 1 | `amount ≤ 0` |
 | `AmountTooLarge` | 9 | `amount > 10¹⁸` |
+| `AmountExceedsLimit` | 18 | A configured deployment cap exists and `amount` exceeds it |
 | `IntervalTooShort` | 2 | `interval < 86400` |
 | `IntervalTooLong` | 3 | `interval > 31536000` |
 | `InvalidTimestamp` | 8 | Ledger timestamp is zero or `now + interval` overflows `u64` |
@@ -150,6 +156,32 @@ const simResult = await server.simulateTransaction(tx);
 // Expected: { status: "SUCCESS" }
 // Subscription stored; `subscribe` event emitted.
 ```
+
+---
+
+### `update_subscription`
+
+Update the amount and interval for an existing subscription. The token and optional subscription metadata are preserved.
+
+**Authorization:** `subscriber` must sign.
+
+`update_subscription(subscriber, merchant, amount, interval)` validates the amount and interval using the same limits as `subscribe`. It also enforces the configured deployment amount cap and returns `NoActiveSubscription` when the pair has no record.
+
+---
+
+### `set_max_amount`
+
+Set the deployment-wide maximum subscription amount. Requires authorization from the admin set by `initialize`. A missing cap means no deployment-specific limit.
+
+`set_max_amount(admin, max_amount) -> Result<(), ContractError>`
+
+---
+
+### `get_max_amount`
+
+Return the configured deployment cap, or `None` when no cap has been configured. No authorization is required.
+
+`get_max_amount() -> Option<i128>`
 
 #### Rust test example
 
@@ -254,9 +286,6 @@ const events = await server.getEvents({
 
 - `executed` — on successful transfer
 - `payment_transfer_failure` — when subscriber balance < `amount` (subscription not modified)
-
-For a complete guide on when and how to retry after a `TransferFailed` or revoked
-allowance, see [docs/retry-semantics.md](retry-semantics.md).
 
 #### CLI example
 
@@ -449,45 +478,6 @@ fn test_cancel_removes_subscription() {
 
 ---
 
-### `expire_subscription`
-
-Expire a subscription once its unpaid grace period has fully elapsed (issue #contract-expire). When a payment transfer fails, `execute_payment` records `overdue_since` on the subscription; `expire_subscription` removes the subscription only after `overdue_since + grace_period` has passed.
-
-Calling it before the grace window has elapsed is rejected with `GracePeriodNotElapsed` (19) — the subscription is left untouched and no event is emitted.
-
-**Authorization:** `merchant` must sign.
-
-#### Parameters
-
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `subscriber` | `Address` | Subscriber whose subscription is being expired |
-| `merchant` | `Address` | Caller — must sign |
-
-#### Return value
-
-`Result<(), ContractError>` — returns `()` on success.
-
-#### Error codes
-
-| Error | Code | Trigger |
-|-------|------|---------|
-| `NoActiveSubscription` | 4 | No subscription found for this `(subscriber, merchant)` pair |
-| `GracePeriodNotElapsed` | 19 | `now < overdue_since + grace_period` (called too early), or the subscription is not overdue (`overdue_since` is `None`) |
-| `InvalidTimestamp` | 8 | `overdue_since + grace_period` overflows `u64` |
-
-#### Behaviour
-
-| Condition | Result |
-|-----------|--------|
-| Not overdue (`overdue_since == None`) | `Err(GracePeriodNotElapsed)` — subscription kept |
-| Overdue, `now < overdue_since + grace_period` | `Err(GracePeriodNotElapsed)` — subscription kept |
-| Overdue, `now >= overdue_since + grace_period` | `Ok` — subscription removed, `cancel` event with reason `grace_period_expired` (3) |
-
-> **Note:** `GracePeriodNotElapsed` (19) reuses the code formerly allocated to `GracePeriodActive`; the variant was renamed to reflect the `expire_subscription` semantics. The numeric code 19 is unchanged.
-
----
-
 ### `get_subscription`
 
 Query active subscription details for a subscriber-merchant pair. This is a read-only call; it requires no authorization. As a side effect, it extends the entry's TTL if it is below the minimum threshold.
@@ -551,58 +541,6 @@ if (SorobanRpc.Api.isSimulationSuccess(simResult)) {
   }
 }
 ```
-
-#### Frontend helper — `querySubscription`
-
-The SorobanPay frontend exposes a typed wrapper in
-`frontend/src/lib/transaction_builder.ts` that handles account lookup, transaction
-building, and result decoding in one call. No signing or fees are required.
-
-```typescript
-import { querySubscription } from "@/lib/transaction_builder";
-
-// Query from a Next.js component or server action
-const { subscription } = await querySubscription(
-  { subscriber: "GABC...SUBSCRIBER", merchant: "GXYZ...MERCHANT" },
-  process.env.NEXT_PUBLIC_CONTRACT_ID!,
-  process.env.NEXT_PUBLIC_RPC_URL!,
-  process.env.NEXT_PUBLIC_NETWORK_PASSPHRASE!,
-);
-
-if (subscription) {
-  const due = new Date(Number(subscription.next_payment) * 1000);
-  console.log("Token:          ", subscription.token);
-  console.log("Amount:         ", subscription.amount.toString(), "base units");
-  console.log("Interval:       ", subscription.interval.toString(), "seconds");
-  console.log("Next payment:   ", due.toISOString());
-  console.log("Is paused:      ", subscription.is_paused);
-} else {
-  console.log("No active subscription.");
-}
-```
-
-**`QuerySubscriptionParams`**
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `subscriber` | `string` | Subscriber Stellar G-address |
-| `merchant` | `string` | Merchant Stellar G-address |
-
-**`SubscriptionData`** (returned in `subscription`)
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `token` | `string` | SEP-41 token contract address (`C…`) |
-| `amount` | `bigint` | Payment amount per interval in token base units |
-| `interval` | `bigint` | Seconds between payments |
-| `next_payment` | `bigint` | Unix timestamp of next valid payment window |
-| `is_paused` | `boolean` | Whether payments are currently suspended |
-
-#### Notes
-
-- `get_subscription` is **read-only** — no authorization required, no fee consumed.
-- As a side effect, it extends the subscription entry's TTL if it is below `MIN_TTL_LEDGERS` (~30 days). This prevents the entry from expiring between payment cycles even on long billing intervals.
-- Returns `None` / `null` for expired or cancelled subscriptions. Distinguish from an active subscription with zero balance by also checking the on-chain token balance.
 
 ---
 
@@ -735,7 +673,7 @@ Return all subscription key hashes indexed for a given merchant. Off-chain tools
 
 ## Error code reference
 
-Complete table of all 17 error codes with trigger conditions, affected entry points, and resolution guidance.
+Complete table of all 18 error codes with trigger conditions, affected entry points, and resolution guidance.
 
 | Code | Name | Entry points | Trigger condition | Resolution |
 |------|------|-------------|-------------------|------------|
@@ -753,21 +691,23 @@ Complete table of all 17 error codes with trigger conditions, affected entry poi
 | 12 | `EmptyBatch` | `batch_execute_payment` | `subscribers` vector is empty | Pass at least one subscriber |
 | 13 | `BatchTooLarge` | `batch_execute_payment` | `subscribers.len() > 50` | Split into batches of ≤ 50 |
 | 14 | `InsufficientAllowance` | `subscribe` | `strict == true` and allowance < `amount` | Approve a higher SEP-41 allowance first, or use `strict = false` |
-| 15 | `AlreadyMigrated` | `migrate` | Schema already at `CURRENT_SCHEMA_VERSION` | No action needed |
-| 16 | `NotAdmin` | `migrate` | Caller ≠ stored admin address | Use the admin identity set during `initialize` |
-| 17 | `NotInitialized` | `migrate` | `initialize` not yet called | Call `initialize(admin)` first |
-| 19 | `GracePeriodNotElapsed` | `expire_subscription` | `now < overdue_since + grace_period` (called before the grace window elapsed), or not overdue | Wait until `overdue_since + grace_period` has passed |
+| 15 | `AlreadyMigrated` | `migrate` | Stored schema is newer than this contract | Upgrade the contract implementation first |
+| 16 | `NotAdmin` | `migrate` | Legacy error; current admin checks return code 6 | Use the admin identity set during `initialize` |
+| 17 | `NotInitialized` | `migrate`, `set_max_amount` | `initialize` not yet called | Call `initialize(admin)` first |
+| 18 | `AmountExceedsLimit` | `subscribe`, `update_subscription` | `amount` exceeds the configured deployment cap | Lower the amount or increase the cap as admin |
 
 ### Errors returned per entry point
 
 | Entry point | Possible errors |
 |-------------|----------------|
-| `subscribe` | 1, 2, 3, 8, 9, 10, 11, 14 |
+| `subscribe` | 1, 2, 3, 8, 9, 10, 11, 14, 18 |
+| `update_subscription` | 1, 2, 3, 4, 8, 9, 18 |
+| `set_max_amount` | 6, 17 |
 | `execute_payment` | 4, 5, 6, 7, 8 |
 | `batch_execute_payment` | 8, 12, 13 |
 | `cancel` | 4 |
 | `get_subscription` | _(none — returns `Option`)_ |
-| `migrate` | 15, 16, 17 |
+| `migrate` | 4, 6, 15, 17 |
 
 ---
 
@@ -794,118 +734,6 @@ if (SorobanRpc.Api.isSimulationSuccess(simResult)) {
 ```
 
 Add a 10–25% buffer to the simulated `instructions` count to absorb minor host-version variance between simulation and submission.
-
-### Error cases
-
-| Error | Code | Trigger |
-|-------|------|---------|
-| `NoActiveSubscription` | 4 | No subscription found for this pair |
-
----
-
-## Query entry points
-
-### `get_subscription`
-
-Read-only. Returns the full `SubscriptionData` for a subscriber-merchant pair, or `None` if no subscription exists.
-
-Calling this function also silently extends the entry's TTL (same thresholds as `subscribe`).
-
-**Auth:** none.
-
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `subscriber` | `Address` | Subscriber to look up |
-| `merchant` | `Address` | Merchant counterparty |
-
-**Return type:** `Option<SubscriptionData>`
-
-```rust
-pub struct SubscriptionData {
-    pub token:        Address,  // SEP-41 token contract
-    pub amount:       i128,     // payment amount per interval
-    pub interval:     u64,      // seconds between payments
-    pub next_payment: u64,      // unix timestamp of next valid payment window
-    pub is_paused:    bool,     // true when payments are suspended
-}
-```
-
-**CLI:**
-```bash
-stellar contract invoke \
-  --id $CONTRACT_ID --source alice --network testnet \
-  -- get_subscription \
-  --subscriber GABC...ALICE \
-  --merchant   GXYZ...MERCHANT
-```
-
-**TypeScript:**
-```typescript
-const result = await server.simulateTransaction(
-  buildGetSubscriptionTx(contract, subscriber, merchant, account, networkPassphrase)
-);
-const data = scValToNative(result.result?.retval);
-// data: { token, amount, interval, next_payment, is_paused } or null
-```
-
----
-
-## Utility entry points
-
-### `compute_subscription_key`
-
-Returns the 32-byte `sha256(subscriber_xdr ++ merchant_xdr)` storage key for a given pair. Useful for off-chain tooling that needs to inspect raw ledger entries.
-
-**Auth:** none.
-
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `subscriber` | `Address` | Subscriber address |
-| `merchant` | `Address` | Merchant address |
-
-Returns `BytesN<32>`.
-
----
-
-### `get_merchant_subscription_keys`
-
-Returns all 32-byte subscription key hashes currently indexed for the given merchant. Off-chain tools can iterate these hashes to enumerate all active subscriptions the merchant participates in.
-
-**Auth:** none.
-
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `merchant` | `Address` | Merchant to look up |
-
-Returns `Vec<BytesN<32>>`. Returns an empty vector if the merchant has no subscriptions or the index entry has expired.
-
-> **Note:** The index is stored under **temporary** storage (not persistent). It may be evicted if the ledger TTL lapses. Always treat the result as advisory and verify individual entries with `get_subscription`.
-
----
-
-## All error codes
-
-| Code | Name | Trigger |
-|------|------|---------|
-| 1 | `AmountMustBePositive` | `amount ≤ 0` in `subscribe` |
-| 2 | `IntervalTooShort` | `interval < 86400` in `subscribe` |
-| 3 | `IntervalTooLong` | `interval > 31536000` in `subscribe` |
-| 4 | `NoActiveSubscription` | No subscription found for `(subscriber, merchant)` |
-| 5 | `PaymentNotDue` | `now < next_payment` in `execute_payment` |
-| 6 | `Unauthorized` | Authorization check failed |
-| 7 | `TransferFailed` | Insufficient subscriber balance at payment time |
-| 8 | `InvalidTimestamp` | Ledger timestamp is zero or would overflow |
-| 9 | `AmountTooLarge` | `amount > 10¹⁸` in `subscribe` |
-| 10 | `SelfSubscription` | `subscriber == merchant` in `subscribe` |
-| 11 | `InvalidTokenAddress` | `token` is the contract's own address |
-| 12 | `EmptyBatch` | `subscribers` list is empty in `batch_execute_payment` |
-| 13 | `BatchTooLarge` | `subscribers.len() > 50` in `batch_execute_payment` |
-| 14 | `InsufficientAllowance` | `strict == true` and `allowance < amount` in `subscribe` |
-| 15 | `AlreadyMigrated` | Schema already at current version in `migrate` |
-| 16 | `NotAdmin` | Caller is not the stored admin in `migrate` |
-| 17 | `NotInitialized` | `initialize` was never called |
-
-Error codes 1–17 are **stable** — they will never be reassigned. New codes will use numbers ≥ 18.
 
 ---
 
