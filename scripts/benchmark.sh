@@ -3,28 +3,34 @@
 # SorobanPay — Soroban Resource Benchmark Script
 # =============================================================================
 # Deploys the contract to testnet (or uses an existing CONTRACT_ID), then
-# calls simulateTransaction for each of the three entry points and captures:
+# calls simulateTransaction for each of the eight core entry points and captures:
 #
 #   - minResourceFee  (stroops)
 #   - instructions    (CPU instruction count)
 #   - readBytes       (bytes read from ledger)
 #   - writeBytes      (bytes written to ledger)
 #
+# Entry points benchmarked:
+#   subscribe, execute_payment, cancel, update_subscription,
+#   pause_subscription, resume_subscription, batch_execute_payment,
+#   transfer_subscription
+#
 # Usage:
-#   bash scripts/benchmark.sh [--skip-deploy] [--output-json PATH]
+#   bash scripts/benchmark.sh [--skip-deploy] [--output-json PATH] [--output-md PATH]
 #
 # Options:
 #   --skip-deploy        Skip build+deploy and use CONTRACT_ID env var directly.
 #   --output-json PATH   Write results to PATH as JSON (default: docs/performance-baseline.json).
-#   --output-md PATH     Write results to PATH as Markdown (default: docs/performance.md).
+#   --output-md   PATH   Write results to PATH as Markdown (default: docs/performance.md).
 #
 # Environment variables:
-#   STELLAR_NETWORK      "testnet" (default)
+#   STELLAR_NETWORK      "testnet" (default) or "mainnet"
 #   STELLAR_IDENTITY     Stellar CLI identity alias (default: "alice")
 #   CONTRACT_ID          Pre-deployed contract address (required with --skip-deploy)
 #   RPC_URL              Override the default RPC endpoint
 #   SUBSCRIBER_ADDR      Address to use as subscriber in simulations
 #   MERCHANT_ADDR        Address to use as merchant in simulations
+#   MERCHANT2_ADDR       Second merchant address (for transfer_subscription)
 #   TOKEN_ADDR           SEP-41 token address to use in simulations
 #
 # Exit codes:
@@ -40,7 +46,7 @@ SKIP_DEPLOY=false
 OUTPUT_JSON="${OUTPUT_JSON:-docs/performance-baseline.json}"
 OUTPUT_MD="${OUTPUT_MD:-docs/performance.md}"
 
-# ── Argument parsing ─────────────────────────────────────────────────────────
+# ── Argument parsing ──────────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --skip-deploy)  SKIP_DEPLOY=true; shift ;;
@@ -100,26 +106,24 @@ else
   echo "Deployed contract: ${CONTRACT_ID}" >&2
 fi
 
-# ── Step 2: Resolve simulation addresses ────────────────────────────────────────
-# Use the identity's own address for subscriber and merchant in simulations.
-# Real cross-contract calls happen in execute_payment; we accept that the
-# simulation may return "NotAuthorized" for execute_payment (merchant auth is
-# still simulated). We capture resource numbers from simulation regardless.
+# ── Step 2: Resolve simulation addresses ──────────────────────────────────────
 IDENTITY_ADDR=$(stellar keys address "$IDENTITY" --network "$NETWORK" 2>/dev/null || true)
 SUBSCRIBER_ADDR="${SUBSCRIBER_ADDR:-$IDENTITY_ADDR}"
 MERCHANT_ADDR="${MERCHANT_ADDR:-$IDENTITY_ADDR}"
+# For transfer_subscription we need a second merchant address.
+# Fall back to the same address if not provided (simulation still captures resources).
+MERCHANT2_ADDR="${MERCHANT2_ADDR:-$IDENTITY_ADDR}"
 
 # Use the native asset wrapper or a well-known testnet token.
-# Callers can override TOKEN_ADDR. We use a placeholder that still exercises
-# the simulation resource path even if no real transfer is possible.
 TESTNET_NATIVE_TOKEN="CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC"
 TOKEN_ADDR="${TOKEN_ADDR:-$TESTNET_NATIVE_TOKEN}"
 
 echo "" >&2
 echo "Simulation addresses:" >&2
-echo "  subscriber: ${SUBSCRIBER_ADDR}" >&2
-echo "  merchant:   ${MERCHANT_ADDR}" >&2
-echo "  token:      ${TOKEN_ADDR}" >&2
+echo "  subscriber:  ${SUBSCRIBER_ADDR}" >&2
+echo "  merchant:    ${MERCHANT_ADDR}" >&2
+echo "  merchant2:   ${MERCHANT2_ADDR}" >&2
+echo "  token:       ${TOKEN_ADDR}" >&2
 
 # ── Step 3: Simulation helper ─────────────────────────────────────────────────
 # Runs `stellar contract invoke --simulate-only` and parses the JSON output.
@@ -131,8 +135,6 @@ simulate_entry_point() {
   echo "" >&2
   echo "Simulating: ${label}..." >&2
 
-  # Capture the raw simulation output; allow non-zero exits (simulation errors
-  # still return resource data in the JSON response).
   local raw
   raw=$(stellar contract invoke \
     --id "$CONTRACT_ID" \
@@ -144,19 +146,7 @@ simulate_entry_point() {
 
   echo "  Raw output snippet: $(echo "$raw" | head -5)" >&2
 
-  # Try to extract the simulation resource fields from JSON output.
-  # The Stellar CLI prints simulation results as JSON to stdout.
   local instructions readBytes writeBytes minResourceFee
-
-  # Parse key fields from the simulation JSON. The CLI outputs the
-  # transactionData XDR along with minResourceFee. We parse the textual
-  # summary lines the CLI emits to stderr / stdout.
-  #
-  # Stellar CLI >= 21 prints simulation summary lines like:
-  #   "instructions": 123456,
-  #   "readBytes": 1024,
-  #   ...
-  # We grep these out of the combined output.
 
   instructions=$(echo "$raw" \
     | grep -oP '"instructions"\s*:\s*\K[0-9]+' \
@@ -171,20 +161,18 @@ simulate_entry_point() {
     | grep -oP '"minResourceFee"\s*:\s*"\K[0-9]+' \
     | head -1 || echo "")
 
-  # Fallback: try unquoted numeric form for minResourceFee
+  # Fallback: unquoted numeric form
   if [ -z "$minResourceFee" ]; then
     minResourceFee=$(echo "$raw" \
       | grep -oP '"minResourceFee"\s*:\s*\K[0-9]+' \
       | head -1 || echo "")
   fi
 
-  # If the CLI didn't return parseable JSON (e.g. it printed a human summary),
-  # attempt to extract from the --output json format lines.
+  # Fallback: key=value format
   if [ -z "$instructions" ] && echo "$raw" | grep -q "instructions"; then
     instructions=$(echo "$raw" | grep -oP 'instructions[=:]\s*\K[0-9]+' | head -1 || echo "")
   fi
 
-  # Default unresolved fields to 0 so JSON remains valid.
   instructions="${instructions:-0}"
   readBytes="${readBytes:-0}"
   writeBytes="${writeBytes:-0}"
@@ -195,55 +183,114 @@ simulate_entry_point() {
   echo "  writeBytes:     ${writeBytes}" >&2
   echo "  minResourceFee: ${minResourceFee} stroops" >&2
 
-  # Emit a JSON fragment for this entry point
   printf '{"instructions":%s,"readBytes":%s,"writeBytes":%s,"minResourceFee":%s}' \
     "$instructions" "$readBytes" "$writeBytes" "$minResourceFee"
 }
 
-# ── Step 4: Run simulations ───────────────────────────────────────────────────
+# ── Step 4: Run simulations for all 8 entry points ────────────────────────────
 echo "" >&2
-echo "Running simulations for all three entry points..." >&2
+echo "Running simulations for all 8 entry points..." >&2
 
+# subscribe: subscriber + merchant + token + amount + interval + strict + grace_period
 SUBSCRIBE_RESULT=$(simulate_entry_point "subscribe" \
   subscribe \
-  --subscriber "$SUBSCRIBER_ADDR" \
-  --merchant   "$MERCHANT_ADDR" \
-  --token      "$TOKEN_ADDR" \
-  --amount     1000000 \
-  --interval   2592000)
+  --subscriber    "$SUBSCRIBER_ADDR" \
+  --merchant      "$MERCHANT_ADDR" \
+  --token         "$TOKEN_ADDR" \
+  --amount        1000000 \
+  --interval      2592000 \
+  --strict        false \
+  --grace-period  null)
 
+# execute_payment: subscriber + merchant + token
 EXECUTE_RESULT=$(simulate_entry_point "execute_payment" \
   execute_payment \
   --subscriber "$SUBSCRIBER_ADDR" \
-  --merchant   "$MERCHANT_ADDR")
+  --merchant   "$MERCHANT_ADDR" \
+  --token      "$TOKEN_ADDR")
 
+# cancel: subscriber + merchant + token
 CANCEL_RESULT=$(simulate_entry_point "cancel" \
   cancel \
   --subscriber "$SUBSCRIBER_ADDR" \
-  --merchant   "$MERCHANT_ADDR")
+  --merchant   "$MERCHANT_ADDR" \
+  --token      "$TOKEN_ADDR")
 
-# ── Step 5: Build output JSON ────────────────────────────────────────────────
+# update_subscription: subscriber + merchant + new_amount + new_interval
+UPDATE_RESULT=$(simulate_entry_point "update_subscription" \
+  update_subscription \
+  --subscriber    "$SUBSCRIBER_ADDR" \
+  --merchant      "$MERCHANT_ADDR" \
+  --new-amount    2000000 \
+  --new-interval  2592000)
+
+# pause_subscription: subscriber + merchant + token + resume_at (null = indefinite)
+PAUSE_RESULT=$(simulate_entry_point "pause_subscription" \
+  pause_subscription \
+  --subscriber "$SUBSCRIBER_ADDR" \
+  --merchant   "$MERCHANT_ADDR" \
+  --token      "$TOKEN_ADDR" \
+  --resume-at  null)
+
+# resume_subscription: subscriber + merchant + token
+RESUME_RESULT=$(simulate_entry_point "resume_subscription" \
+  resume_subscription \
+  --subscriber "$SUBSCRIBER_ADDR" \
+  --merchant   "$MERCHANT_ADDR" \
+  --token      "$TOKEN_ADDR")
+
+# batch_execute_payment: merchant + token + subscribers (1 subscriber for baseline;
+# the docs/performance-baseline.json notes 10-subscriber cost separately)
+BATCH_RESULT=$(simulate_entry_point "batch_execute_payment (1 subscriber)" \
+  batch_execute_payment \
+  --merchant     "$MERCHANT_ADDR" \
+  --token        "$TOKEN_ADDR" \
+  --subscribers  "[\"${SUBSCRIBER_ADDR}\"]")
+
+# transfer_subscription: subscriber + old_merchant + new_merchant
+TRANSFER_RESULT=$(simulate_entry_point "transfer_subscription" \
+  transfer_subscription \
+  --subscriber   "$SUBSCRIBER_ADDR" \
+  --old-merchant "$MERCHANT_ADDR" \
+  --new-merchant "$MERCHANT2_ADDR")
+
+# ── Step 5: Build output JSON ─────────────────────────────────────────────────
 TIMESTAMP=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+GIT_COMMIT=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 
 JSON_OUT=$(jq -n \
   --arg ts          "$TIMESTAMP" \
+  --arg git_commit  "$GIT_COMMIT" \
   --arg network     "$NETWORK" \
   --arg contract_id "$CONTRACT_ID" \
-  --argjson sub     "$SUBSCRIBE_RESULT" \
-  --argjson exec    "$EXECUTE_RESULT" \
-  --argjson cancel  "$CANCEL_RESULT" \
+  --argjson sub      "$SUBSCRIBE_RESULT" \
+  --argjson exec     "$EXECUTE_RESULT" \
+  --argjson cancel   "$CANCEL_RESULT" \
+  --argjson update   "$UPDATE_RESULT" \
+  --argjson pause    "$PAUSE_RESULT" \
+  --argjson resume   "$RESUME_RESULT" \
+  --argjson batch    "$BATCH_RESULT" \
+  --argjson transfer "$TRANSFER_RESULT" \
   '{
-    "_comment": "Auto-generated by scripts/benchmark.sh — do not edit manually.",
-    "generated_at": $ts,
-    "network": $network,
+    "_comment":  "Auto-generated by scripts/benchmark.sh — do not edit manually.",
+    "_comment2": "CI budget check: fails if any metric exceeds baseline * 1.25 (+25%).",
+    "captured_at": $ts,
+    "git_commit":  $git_commit,
+    "network":     $network,
     "contract_id": $contract_id,
     "thresholds": {
-      "alert_on_increase_pct": 20
+      "alert_on_increase_pct": 20,
+      "fail_on_increase_pct":  25
     },
     "entry_points": {
-      "subscribe": $sub,
-      "execute_payment": $exec,
-      "cancel": $cancel
+      "subscribe":            $sub,
+      "execute_payment":      $exec,
+      "cancel":               $cancel,
+      "update_subscription":  $update,
+      "pause_subscription":   $pause,
+      "resume_subscription":  $resume,
+      "batch_execute_payment": $batch,
+      "transfer_subscription": $transfer
     }
   }')
 
@@ -258,31 +305,56 @@ echo "" >&2
 echo "Writing Markdown report to ${OUTPUT_MD}..." >&2
 mkdir -p "$(dirname "$OUTPUT_MD")"
 
-# Extract fields for table formatting
-sub_instr=$(echo "$SUBSCRIBE_RESULT"  | jq -r '.instructions')
-sub_rb=$(echo "$SUBSCRIBE_RESULT"     | jq -r '.readBytes')
-sub_wb=$(echo "$SUBSCRIBE_RESULT"     | jq -r '.writeBytes')
-sub_fee=$(echo "$SUBSCRIBE_RESULT"    | jq -r '.minResourceFee')
+# Extract fields for each entry point
+sub_instr=$(echo "$SUBSCRIBE_RESULT"   | jq -r '.instructions')
+sub_rb=$(echo "$SUBSCRIBE_RESULT"      | jq -r '.readBytes')
+sub_wb=$(echo "$SUBSCRIBE_RESULT"      | jq -r '.writeBytes')
+sub_fee=$(echo "$SUBSCRIBE_RESULT"     | jq -r '.minResourceFee')
 
-exec_instr=$(echo "$EXECUTE_RESULT"   | jq -r '.instructions')
-exec_rb=$(echo "$EXECUTE_RESULT"      | jq -r '.readBytes')
-exec_wb=$(echo "$EXECUTE_RESULT"      | jq -r '.writeBytes')
-exec_fee=$(echo "$EXECUTE_RESULT"     | jq -r '.minResourceFee')
+exec_instr=$(echo "$EXECUTE_RESULT"    | jq -r '.instructions')
+exec_rb=$(echo "$EXECUTE_RESULT"       | jq -r '.readBytes')
+exec_wb=$(echo "$EXECUTE_RESULT"       | jq -r '.writeBytes')
+exec_fee=$(echo "$EXECUTE_RESULT"      | jq -r '.minResourceFee')
 
-can_instr=$(echo "$CANCEL_RESULT"     | jq -r '.instructions')
-can_rb=$(echo "$CANCEL_RESULT"        | jq -r '.readBytes')
-can_wb=$(echo "$CANCEL_RESULT"        | jq -r '.writeBytes')
-can_fee=$(echo "$CANCEL_RESULT"       | jq -r '.minResourceFee')
+can_instr=$(echo "$CANCEL_RESULT"      | jq -r '.instructions')
+can_rb=$(echo "$CANCEL_RESULT"         | jq -r '.readBytes')
+can_wb=$(echo "$CANCEL_RESULT"         | jq -r '.writeBytes')
+can_fee=$(echo "$CANCEL_RESULT"        | jq -r '.minResourceFee')
+
+upd_instr=$(echo "$UPDATE_RESULT"      | jq -r '.instructions')
+upd_rb=$(echo "$UPDATE_RESULT"         | jq -r '.readBytes')
+upd_wb=$(echo "$UPDATE_RESULT"         | jq -r '.writeBytes')
+upd_fee=$(echo "$UPDATE_RESULT"        | jq -r '.minResourceFee')
+
+pau_instr=$(echo "$PAUSE_RESULT"       | jq -r '.instructions')
+pau_rb=$(echo "$PAUSE_RESULT"          | jq -r '.readBytes')
+pau_wb=$(echo "$PAUSE_RESULT"          | jq -r '.writeBytes')
+pau_fee=$(echo "$PAUSE_RESULT"         | jq -r '.minResourceFee')
+
+res_instr=$(echo "$RESUME_RESULT"      | jq -r '.instructions')
+res_rb=$(echo "$RESUME_RESULT"         | jq -r '.readBytes')
+res_wb=$(echo "$RESUME_RESULT"         | jq -r '.writeBytes')
+res_fee=$(echo "$RESUME_RESULT"        | jq -r '.minResourceFee')
+
+bat_instr=$(echo "$BATCH_RESULT"       | jq -r '.instructions')
+bat_rb=$(echo "$BATCH_RESULT"          | jq -r '.readBytes')
+bat_wb=$(echo "$BATCH_RESULT"          | jq -r '.writeBytes')
+bat_fee=$(echo "$BATCH_RESULT"         | jq -r '.minResourceFee')
+
+tra_instr=$(echo "$TRANSFER_RESULT"    | jq -r '.instructions')
+tra_rb=$(echo "$TRANSFER_RESULT"       | jq -r '.readBytes')
+tra_wb=$(echo "$TRANSFER_RESULT"       | jq -r '.writeBytes')
+tra_fee=$(echo "$TRANSFER_RESULT"      | jq -r '.minResourceFee')
 
 cat > "$OUTPUT_MD" <<MARKDOWN
 # SorobanPay — Contract Performance Benchmarks
 
 > Auto-generated by \`scripts/benchmark.sh\` on **${TIMESTAMP}**
-> Network: **${NETWORK}** · Contract: \`${CONTRACT_ID}\`
+> Network: **${NETWORK}** · Contract: \`${CONTRACT_ID}\` · Commit: \`${GIT_COMMIT}\`
 
 This document records verified resource measurements from \`simulateTransaction\`
-for each of the three entry points. Numbers are used as the baseline in CI to
-detect performance regressions (alert threshold: **+20%**).
+for each of the eight core entry points. Numbers are used as the baseline in CI to
+detect performance regressions (warn threshold: **+20%**, fail threshold: **+25%**).
 
 ---
 
@@ -293,6 +365,11 @@ detect performance regressions (alert threshold: **+20%**).
 | \`subscribe\` | ${sub_instr} | ${sub_rb} | ${sub_wb} | ${sub_fee} |
 | \`execute_payment\` | ${exec_instr} | ${exec_rb} | ${exec_wb} | ${exec_fee} |
 | \`cancel\` | ${can_instr} | ${can_rb} | ${can_wb} | ${can_fee} |
+| \`update_subscription\` | ${upd_instr} | ${upd_rb} | ${upd_wb} | ${upd_fee} |
+| \`pause_subscription\` | ${pau_instr} | ${pau_rb} | ${pau_wb} | ${pau_fee} |
+| \`resume_subscription\` | ${res_instr} | ${res_rb} | ${res_wb} | ${res_fee} |
+| \`batch_execute_payment\` (1 subscriber) | ${bat_instr} | ${bat_rb} | ${bat_wb} | ${bat_fee} |
+| \`transfer_subscription\` | ${tra_instr} | ${tra_rb} | ${tra_wb} | ${tra_fee} |
 
 ---
 
@@ -302,17 +379,16 @@ detect performance regressions (alert threshold: **+20%**).
 
 **Operations performed:**
 - 1 \`require_auth\` on subscriber
-- 5 input validations (amount bounds, interval bounds, timestamp guard)
-- 1 persistent storage write (\`SubscriptionData\` struct)
-- 1 TTL extension (\`extend_ttl\` on the same entry)
-- 1 event publish (\`subscribe\`, 4 topics + i128 data)
+- 6 input validations (self-subscription, amount bounds, interval bounds, timestamp guard, allowance check)
+- 1 cross-contract \`allowance\` call (SEP-41 token)
+- 1 persistent storage write (\`SubscriptionData\`)
+- 2 persistent index writes (merchant index + subscriber roster)
+- 1 TTL extension
+- 1 event publish
 
-No cross-contract calls. The dominant cost is auth verification and the persistent
-storage write (ledger entry write fee).
-
-**Recommended budgets (add ~20% buffer over measured baseline):**
-- \`instructions\`: at least **150,000**
-- \`writeBytes\`: at least **300**
+**Recommended budgets (25% buffer over measured baseline):**
+- \`instructions\`: at least **$(echo "${sub_instr}" | awk '{printf "%d", $1 * 1.25}')**
+- \`writeBytes\`: at least **$(echo "${sub_wb}" | awk '{printf "%d", $1 * 1.25}')**
 
 ---
 
@@ -320,48 +396,139 @@ storage write (ledger entry write fee).
 
 **Operations performed:**
 - 1 \`require_auth\` on merchant
-- 1 persistent storage read
+- 1 persistent storage read + duplicate execution marker check
 - 1 ledger timestamp read
-- 1 cross-contract \`balance\` call on the SEP-41 token contract
-- 1 cross-contract \`transfer\` call on the SEP-41 token contract
-- 1 persistent storage write (updated \`next_payment\`)
+- 1 cross-contract \`allowance\` call (SEP-41 token)
+- 1 cross-contract \`balance\` call (SEP-41 token)
+- 1 cross-contract \`transfer\` call (SEP-41 token) — most expensive
+- 1 persistent storage write (updated \`next_payment\` + nonce)
+- 1 execution marker write (temporary storage)
 - 1 TTL extension
-- 1 event publish (\`executed\` or \`payment_transfer_failure\`)
+- 1 event publish
 
-The two cross-contract calls — especially \`transfer\`, which itself performs auth
-checks, balance reads, and two storage writes inside the token contract — are what
-make this the most expensive entry point. Soroban charges for every instruction
-executed within invoked contracts.
+The cross-contract calls — especially \`transfer\` — dominate. Soroban charges for
+every instruction executed within invoked contracts.
 
-**Recommended budgets (add ~20% buffer over measured baseline):**
-- \`instructions\`: at least **500,000**
-- \`writeBytes\`: at least **500**
+**Recommended budgets (25% buffer over measured baseline):**
+- \`instructions\`: at least **$(echo "${exec_instr}" | awk '{printf "%d", $1 * 1.25}')**
+- \`writeBytes\`: at least **$(echo "${exec_wb}" | awk '{printf "%d", $1 * 1.25}')**
 
 ---
 
-### \`cancel\` — lowest cost
+### \`cancel\` — low cost
 
 **Operations performed:**
 - 1 \`require_auth\` on subscriber
-- 1 persistent storage \`has\` check (read)
+- 1 persistent storage \`has\` check
 - 1 persistent storage \`remove\`
-- 1 event publish (\`cancel\`, 2 topics + unit data)
+- 1 merchant index update (remove entry)
+- 1 subscriber roster update (remove entry)
+- 1 event publish
 
-No cross-contract calls, no writes to new keys. Removing a persistent entry
-reduces ledger size, which may earn a small rent refund.
+No cross-contract calls. No writes to new keys.
 
-**Recommended budgets (add ~20% buffer over measured baseline):**
-- \`instructions\`: at least **50,000**
-- \`writeBytes\`: at least **100**
+**Recommended budgets (25% buffer over measured baseline):**
+- \`instructions\`: at least **$(echo "${can_instr}" | awk '{printf "%d", $1 * 1.25}')**
+- \`writeBytes\`: at least **$(echo "${can_wb}" | awk '{printf "%d", $1 * 1.25}')**
+
+---
+
+### \`update_subscription\` — low-moderate cost
+
+**Operations performed:**
+- 1 \`require_auth\` on subscriber
+- 1 persistent storage read
+- 4 validations (amount + interval bounds)
+- 1 persistent storage write (updated amount + interval, next_payment preserved)
+- 1 TTL extension
+- 1 event publish
+
+No cross-contract calls.
+
+**Recommended budgets (25% buffer over measured baseline):**
+- \`instructions\`: at least **$(echo "${upd_instr}" | awk '{printf "%d", $1 * 1.25}')**
+- \`writeBytes\`: at least **$(echo "${upd_wb}" | awk '{printf "%d", $1 * 1.25}')**
+
+---
+
+### \`pause_subscription\` — low cost
+
+**Operations performed:**
+- 1 \`require_auth\` on subscriber
+- 1 persistent storage read
+- 1 optional ledger timestamp read (when resume_at provided)
+- 1 persistent storage write (set is_paused flag + paused_until)
+- 1 TTL extension
+- 1 event publish
+
+**Recommended budgets (25% buffer over measured baseline):**
+- \`instructions\`: at least **$(echo "${pau_instr}" | awk '{printf "%d", $1 * 1.25}')**
+- \`writeBytes\`: at least **$(echo "${pau_wb}" | awk '{printf "%d", $1 * 1.25}')**
+
+---
+
+### \`resume_subscription\` — low cost
+
+**Operations performed:**
+- 1 \`require_auth\` on subscriber
+- 1 persistent storage read
+- 1 ledger timestamp read (to recompute next_payment)
+- 1 persistent storage write (clear is_paused, recompute next_payment)
+- 1 TTL extension
+- 1 event publish
+
+**Recommended budgets (25% buffer over measured baseline):**
+- \`instructions\`: at least **$(echo "${res_instr}" | awk '{printf "%d", $1 * 1.25}')**
+- \`writeBytes\`: at least **$(echo "${res_wb}" | awk '{printf "%d", $1 * 1.25}')**
+
+---
+
+### \`batch_execute_payment\` — scales with batch size
+
+**Operations performed (per subscriber in batch):**
+- 1 persistent storage read
+- 1 cross-contract \`allowance\` call
+- 1 cross-contract \`balance\` call
+- 1 cross-contract \`transfer\` call
+- 1 persistent storage write
+- 1 execution marker write
+- 2 event publishes
+
+The values above are for a 1-subscriber batch. For N subscribers, scale linearly.
+
+**Recommended budgets for N subscribers (25% buffer):**
+- \`instructions\`: approximately **$(echo "${bat_instr}" | awk '{printf "%d", $1 * 1.25}')** × N
+- \`writeBytes\`: approximately **$(echo "${bat_wb}" | awk '{printf "%d", $1 * 1.25}')** × N
+
+---
+
+### \`transfer_subscription\` — moderate cost
+
+**Operations performed:**
+- 2 \`require_auth\` (subscriber + old_merchant)
+- 1 persistent storage read (old key)
+- Conflict check (new key must not already exist)
+- 1 persistent storage write (new key)
+- 1 persistent storage remove (old key)
+- 2 merchant index updates (remove from old, add to new)
+- 2 subscriber roster updates
+- 1 TTL extension
+- 1 event publish
+
+**Recommended budgets (25% buffer over measured baseline):**
+- \`instructions\`: at least **$(echo "${tra_instr}" | awk '{printf "%d", $1 * 1.25}')**
+- \`writeBytes\`: at least **$(echo "${tra_wb}" | awk '{printf "%d", $1 * 1.25}')**
 
 ---
 
 ## Relative Cost Ranking
 
 \`\`\`
-execute_payment  >  subscribe  >  cancel
-(cross-contract       (write +       (read +
- transfer)             TTL extend)    remove)
+batch_execute_payment  >  execute_payment  >  transfer_subscription  >  subscribe
+(N × token transfer)      (1 token transfer)   (2 auths + 2 indexes)    (1 allowance call)
+
+    update_subscription  ≈  resume_subscription  ≈  pause_subscription  >  cancel
+        (read + write)          (read + ts + write)     (read + write)       (read + remove)
 \`\`\`
 
 ---
@@ -374,16 +541,18 @@ performed up to the point of the error.
 | Scenario | Fee relative to success |
 |----------|------------------------|
 | \`execute_payment\` → \`PaymentNotDue\` | ~10–20% (auth + storage read before early return) |
-| \`execute_payment\` → \`TransferFailed\` | ~60–80% (balance cross-contract call completed, transfer skipped) |
+| \`execute_payment\` → \`TransferFailed\` | ~60–80% (balance call completed, transfer skipped) |
 | \`subscribe\` → validation error | ~10–15% (auth + validation only, no write) |
 | \`cancel\` → \`NoActiveSubscription\` | ~10% (auth + storage has check only) |
+| \`pause_subscription\` → \`SubscriptionPaused\` | ~20–30% (auth + storage read) |
+| \`resume_subscription\` → \`SubscriptionNotPaused\` | ~20–30% (auth + storage read) |
 
 ---
 
 ## Reproducing These Benchmarks
 
 \`\`\`bash
-# Deploy fresh and benchmark:
+# Deploy fresh and benchmark all 8 entry points:
 bash scripts/benchmark.sh
 
 # Re-benchmark an already-deployed contract:
@@ -398,11 +567,12 @@ bash scripts/benchmark.sh --output-json /tmp/baseline.json --output-md /tmp/perf
 ## CI Integration
 
 The \`.github/workflows/ci.yml\` benchmark job runs on every contract change and
-compares results against \`docs/performance-baseline.json\`. It **alerts** (but
-does not fail the build) if any metric increases by more than **20%**.
+compares results against \`docs/performance-baseline.json\`.
 
-See [\`scripts/check_regression.sh\`](../scripts/check_regression.sh) for the
-comparison logic.
+- **Warning**: emitted if any metric increases by more than **+20%**
+- **Failure**: CI step fails if any metric increases by more than **+25%**
+
+See [\`scripts/check_regression.sh\`](../scripts/check_regression.sh) for the comparison logic.
 
 ---
 
@@ -414,14 +584,7 @@ echo "Done: ${OUTPUT_MD}" >&2
 # ── Step 7: Summary ───────────────────────────────────────────────────────────
 echo "" >&2
 echo "============================================" >&2
-echo " Benchmark complete" >&2
+echo " Benchmark complete (8 entry points)" >&2
 echo "============================================" >&2
 echo "  JSON: ${OUTPUT_JSON}" >&2
 echo "  MD:   ${OUTPUT_MD}" >&2
-echo "" >&2
-echo "subscribe:" >&2
-echo "  instructions=${sub_instr}  readBytes=${sub_rb}  writeBytes=${sub_wb}  fee=${sub_fee}" >&2
-echo "execute_payment:" >&2
-echo "  instructions=${exec_instr}  readBytes=${exec_rb}  writeBytes=${exec_wb}  fee=${exec_fee}" >&2
-echo "cancel:" >&2
-echo "  instructions=${can_instr}  readBytes=${can_rb}  writeBytes=${can_wb}  fee=${can_fee}" >&2

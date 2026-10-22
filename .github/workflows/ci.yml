@@ -503,7 +503,7 @@ jobs:
         run: bash scripts/benchmark.sh
         continue-on-error: true
 
-      - name: Check for regressions against baseline
+      - name: Warn on regressions against baseline (+20%)
         if: steps.benchmark.outcome == 'success'
         env:
           BASELINE_PATH: docs/performance-baseline.json

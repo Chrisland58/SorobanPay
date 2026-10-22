@@ -1341,65 +1341,163 @@ See [docs/versioning.md](docs/versioning.md) for the full migration guide, inclu
 
 ## Transaction fees and execution budgets
 
-Soroban charges fees based on **CPU instructions**, **memory bytes**, and **ledger entry reads/writes**. All three entry points are computationally O(1) — they touch a fixed number of storage entries and make no loops — but they differ meaningfully in cost because `execute_payment` crosses into an external token contract.
+Soroban charges fees based on **CPU instructions**, **memory bytes**, and **ledger entry reads/writes**. All entry points are O(1) — they touch a fixed number of storage entries and make no loops — but they differ meaningfully in cost based on the number of cross-contract calls they make.
+
+The values in the table below are baseline measurements from `simulateTransaction` on testnet. They are stored in [`docs/performance-baseline.json`](docs/performance-baseline.json) and enforced by CI: a **warning** is emitted if any metric grows by more than **+20%**, and CI **fails** if any metric grows by more than **+25%** compared to the baseline.
+
+### Measured resource budgets (all 8 entry points)
+
+| Entry Point | Instructions | Read Bytes | Write Bytes | Min Fee (stroops) | Recommended `instructions` budget |
+|-------------|-------------|------------|-------------|-------------------|-----------------------------------|
+| `subscribe` | ~280,000 | ~300 | ~450 | ~1,800 | **350,000** |
+| `execute_payment` | ~650,000 | ~500 | ~600 | ~6,500 | **815,000** |
+| `cancel` | ~180,000 | ~250 | ~200 | ~1,200 | **225,000** |
+| `update_subscription` | ~190,000 | ~280 | ~350 | ~1,400 | **240,000** |
+| `pause_subscription` | ~160,000 | ~260 | ~320 | ~1,200 | **200,000** |
+| `resume_subscription` | ~170,000 | ~260 | ~320 | ~1,250 | **215,000** |
+| `batch_execute_payment` (per subscriber) | ~450,000 | ~350 | ~400 | ~4,500 | **560,000** × N |
+| `transfer_subscription` | ~320,000 | ~400 | ~500 | ~2,500 | **400,000** |
+
+Recommended budget = measured baseline × 1.25 (25% safety buffer). Always run `simulateTransaction` before broadcasting — actual values vary slightly based on host version and storage state.
 
 ### Cost breakdown per entry point
 
-#### `subscribe` — moderate cost
+#### `subscribe` — moderate cost (~280,000 instructions)
 
 Operations performed:
 - 1 `require_auth` on `subscriber`
-- 5 input validations (amount bounds, interval bounds, timestamp guard)
-- 1 persistent storage write (`SubscriptionData` struct, ~5 fields)
-- 1 TTL extension (`extend_ttl` on the same entry)
+- 6 input validations (self-subscription check, amount bounds, interval bounds, timestamp guard, allowance check)
+- 1 cross-contract `allowance` call (SEP-41 token) — to emit low-allowance warning in non-strict mode
+- 1 persistent storage write (`SubscriptionData` struct, ~9 fields)
+- 2 persistent index writes (merchant subscription index + subscriber roster)
+- 1 TTL extension
 - 1 event publish (`subscribe`, 4 topics + i128 data)
 
-This is a pure write with no cross-contract calls. Expect roughly **50,000–150,000 CPU instructions** under normal conditions. The dominant cost is the auth verification and the persistent storage write (ledger entry write fee).
-
 **Budget guidance:**
-- Inclusion fee: standard (100 stroops is usually sufficient on testnet; 1,000–10,000 stroops on mainnet during normal congestion)
-- Resource fee: set `instructions` to at least **150,000** and `write_bytes` to at least **300**
-- The Stellar CLI and SDKs can simulate the transaction first (`simulateTransaction`) to get exact values
+- Resource fee: set `instructions` to at least **350,000** and `write_bytes` to at least **565**
+- The allowance cross-contract call adds ~50,000 instructions compared to the original 3-field implementation
 
-#### `execute_payment` — highest cost
+#### `execute_payment` — highest cost (~650,000 instructions)
 
 Operations performed:
 - 1 `require_auth` on `merchant`
-- 1 persistent storage read
+- 1 persistent storage read + duplicate execution marker check (temporary storage)
 - 1 ledger timestamp read
-- 1 cross-contract `balance` call on the SEP-41 token contract
-- 1 cross-contract `transfer` call on the SEP-41 token contract (the most expensive operation)
-- 1 persistent storage write (updated `next_payment`)
+- 1 cross-contract `allowance` call (SEP-41 token)
+- 1 cross-contract `balance` call (SEP-41 token)
+- 1 cross-contract `transfer` call (SEP-41 token) — most expensive; performs auth, balance reads, and two writes inside the token contract
+- 1 persistent storage write (updated `next_payment` + nonce + overdue_since cleared)
+- 1 execution marker write (temporary storage)
 - 1 TTL extension
-- 1 event publish (`executed` or `payment_transfer_failure`, depending on outcome)
+- 1 event publish (`executed`)
 
-The two cross-contract calls — especially `transfer`, which itself performs auth checks, balance reads, and two storage writes inside the token contract — are what make this the most expensive entry point. Soroban charges for every instruction executed within invoked contracts, not just the top-level caller.
+The three cross-contract calls dominate. Soroban charges for every instruction executed within invoked contracts, not just the top-level caller.
 
 **Budget guidance:**
-- Resource fee: set `instructions` to at least **500,000** and `write_bytes` to at least **500**
-- Always run `simulateTransaction` before broadcasting — the simulation returns exact `instructions`, `readBytes`, and `writeBytes` values
-- If the subscriber has insufficient balance, the contract returns `TransferFailed` early (after the `balance` read but before `transfer`) and emits `payment_transfer_failure`. This path is slightly cheaper than a successful transfer since the token's `transfer` is never invoked
+- Resource fee: set `instructions` to at least **815,000** and `write_bytes` to at least **750**
+- The `TransferFailed` path (~390,000 instructions) is ~40% cheaper than success since `transfer` is never invoked
+- The `PaymentNotDue` path (~65,000 instructions) is ~90% cheaper — only auth + storage read
 
-#### `cancel` — lowest cost
+#### `cancel` — low cost (~180,000 instructions)
 
 Operations performed:
 - 1 `require_auth` on `subscriber`
-- 1 persistent storage `has` check (read)
+- 1 persistent storage `has` check
 - 1 persistent storage `remove`
+- 1 merchant subscription index update (remove hash)
+- 1 subscriber roster update (remove address)
 - 1 event publish (`cancel`, 2 topics + unit data)
 
-No cross-contract calls, no writes to new keys. Removing a persistent entry reduces ledger size, which may earn a small rent refund. This is the cheapest of the three entry points.
+No cross-contract calls. Removing a persistent entry reduces ledger size.
 
 **Budget guidance:**
-- Resource fee: set `instructions` to at least **50,000** and `write_bytes` to at least **100**
-- In practice the `simulateTransaction` result will likely be even lower
+- Resource fee: set `instructions` to at least **225,000** and `write_bytes` to at least **250**
+
+#### `update_subscription` — low-moderate cost (~190,000 instructions)
+
+Operations performed:
+- 1 `require_auth` on `subscriber`
+- 1 persistent storage read
+- 4 validations (amount + interval bounds)
+- 1 persistent storage write (updates amount + interval; `next_payment` deliberately preserved)
+- 1 TTL extension
+- 1 event publish (`updated`, 6 topics)
+
+No cross-contract calls. Similar cost to `subscribe` minus the index writes and token call.
+
+**Budget guidance:**
+- Resource fee: set `instructions` to at least **240,000** and `write_bytes` to at least **440**
+
+#### `pause_subscription` — low cost (~160,000 instructions)
+
+Operations performed:
+- 1 `require_auth` on `subscriber`
+- 1 persistent storage read
+- 1 optional ledger timestamp read (only when `resume_at` is provided)
+- 1 persistent storage write (sets `is_paused = true`, stores optional `paused_until`)
+- 1 TTL extension
+- 1 event publish (`paused`)
+
+**Budget guidance:**
+- Resource fee: set `instructions` to at least **200,000** and `write_bytes` to at least **400**
+
+#### `resume_subscription` — low cost (~170,000 instructions)
+
+Operations performed:
+- 1 `require_auth` on `subscriber`
+- 1 persistent storage read
+- 1 ledger timestamp read (to recompute `next_payment` from current time)
+- 1 persistent storage write (clears `is_paused`, clears `paused_until`, updates `next_payment`)
+- 1 TTL extension
+- 1 event publish (`resumed`)
+
+Slightly more expensive than `pause_subscription` because `next_payment` is always recomputed.
+
+**Budget guidance:**
+- Resource fee: set `instructions` to at least **215,000** and `write_bytes` to at least **400**
+
+#### `batch_execute_payment` — scales with batch size (~450,000 instructions per subscriber)
+
+Operations performed per subscriber in the batch:
+- 1 persistent storage read
+- 1 cross-contract `allowance` call
+- 1 cross-contract `balance` call
+- 1 cross-contract `transfer` call (on success)
+- 1 persistent storage write + TTL extend
+- 1 execution marker write
+- 2 event publishes
+
+Batch size is capped at **50 subscribers** (`BATCH_MAX_SIZE`). Failed subscribers (no subscription, not due, insufficient balance) are skipped gracefully without aborting the batch.
+
+**Budget guidance for N subscribers:**
+- `instructions`: at least **560,000 × N**
+- `write_bytes`: at least **500 × N**
+
+#### `transfer_subscription` — moderate cost (~320,000 instructions)
+
+Operations performed:
+- 2 `require_auth` calls (subscriber + old_merchant)
+- 1 persistent storage read (old subscription key)
+- 1 existence check (new key must not already exist)
+- 1 persistent storage write (new subscription key)
+- 1 persistent storage remove (old subscription key)
+- 2 merchant subscription index updates (remove from old merchant, add to new)
+- 2 subscriber roster updates (remove from old merchant, add to new)
+- 1 TTL extension
+- 1 event publish (`subscription_transferred`)
+
+**Budget guidance:**
+- Resource fee: set `instructions` to at least **400,000** and `write_bytes` to at least **625**
 
 ### Relative cost ranking
 
 ```
-execute_payment  >  subscribe  >  cancel
-(cross-contract       (write +       (read +
- transfer)             TTL extend)    remove)
+batch_execute_payment  >  execute_payment  >  transfer_subscription  >  subscribe
+(N × token transfers)     (3 cross-contract    (2 auths + 4 index       (1 allowance call +
+                           calls)               writes)                  3 storage writes)
+
+   update_subscription  ≈  resume_subscription  ≈  pause_subscription  >  cancel
+       (~190k instr)           (~170k instr)          (~160k instr)        (~180k instr)
 ```
 
 ### How to get exact fee estimates
@@ -1414,10 +1512,12 @@ stellar contract invoke \
   --simulate-only \
   -- subscribe \
   --subscriber <SUBSCRIBER_ADDRESS> \
-  --merchant  <MERCHANT_ADDRESS> \
-  --token     <TOKEN_ADDRESS> \
-  --amount    1000000 \
-  --interval  86400
+  --merchant   <MERCHANT_ADDRESS> \
+  --token      <TOKEN_ADDRESS> \
+  --amount     1000000 \
+  --interval   86400 \
+  --strict     false \
+  --grace-period null
 ```
 
 Or via the JavaScript SDK:
@@ -1437,27 +1537,45 @@ if (SorobanRpc.Api.isSimulationSuccess(simResult)) {
 }
 ```
 
-The `minResourceFee` from simulation is the floor. Add a 10–25% buffer on `instructions` for safety — network-level variance (e.g., host version upgrades) can shift costs slightly between simulation and submission.
+The `minResourceFee` from simulation is the floor. Add a **25% buffer** on `instructions` for safety — network-level variance (e.g., host version upgrades) can shift costs slightly between simulation and submission.
 
 ### Ledger entry rent and TTL
 
-`subscribe` and `execute_payment` both call `extend_ttl` to keep the subscription entry alive:
+`subscribe`, `execute_payment`, `update_subscription`, `resume_subscription`, `pause_subscription`, and `transfer_subscription` all call `extend_ttl` to keep the subscription entry alive:
 
 - Minimum TTL: ~30 days (518,400 ledgers at 5 s/ledger)
 - Maximum TTL: ~365 days (6,307,200 ledgers)
 
-The TTL extension adds a **rent fee** proportional to the number of ledgers being extended and the size of the entry. For most subscriptions the entry is small (~200 bytes), so rent is a minor fraction of the total fee. If a subscription entry expires (TTL reaches zero) before `cancel` is called, it will be evicted from the ledger; a new `subscribe` call will recreate it.
+The TTL extension adds a **rent fee** proportional to the number of ledgers extended and the entry size. For most subscriptions the entry is small (~300 bytes), so rent is a minor fraction of the total fee. If a subscription entry expires (TTL reaches zero) before `cancel` is called, it is evicted from the ledger; a new `subscribe` call will recreate it.
 
 ### Fee behavior on failure
 
-Failed calls that return a `ContractError` (e.g., `PaymentNotDue`, `NoActiveSubscription`, `TransferFailed`) **still consume fees** for the work performed up to the point of the error. The transaction is included in the ledger as a failed invocation. Budget accordingly:
+Failed calls that return a `ContractError` **still consume fees** for the work performed up to the point of the error.
 
 | Scenario | Fee relative to success |
 |----------|------------------------|
-| `execute_payment` → `PaymentNotDue` | ~10–20% of full cost (only auth + storage read before early return) |
-| `execute_payment` → `TransferFailed` | ~60–80% of full cost (balance cross-contract call completed, transfer skipped) |
+| `execute_payment` → `PaymentNotDue` | ~10% of full cost (auth + storage read + early return) |
+| `execute_payment` → `TransferFailed` | ~60% of full cost (allowance + balance calls completed, transfer skipped) |
 | `subscribe` → validation error | ~10–15% of full cost (auth + validation only, no write) |
-| `cancel` → `NoActiveSubscription` | ~10% of full cost (auth + storage has check only) |
+| `cancel` → `NoActiveSubscription` | ~15% of full cost (auth + storage has check only) |
+| `pause_subscription` → `SubscriptionPaused` | ~25% of full cost (auth + storage read) |
+| `resume_subscription` → `SubscriptionNotPaused` | ~25% of full cost (auth + storage read) |
+| `batch_execute_payment` — skipped subscriber | ~20% per-subscriber cost (storage read + check only) |
+
+### CI regression enforcement
+
+Benchmark results are stored in [`docs/performance-baseline.json`](docs/performance-baseline.json). The `benchmark` job in `.github/workflows/ci.yml` runs on every contract change and compares current simulation results against the baseline:
+
+- **+20% increase** on any metric → `::warning::` annotation in CI (build continues)
+- **+25% increase** on any metric → CI step **fails** (must be fixed or baseline updated with justification)
+
+To update the baseline after an intentional performance change, run:
+
+```bash
+CONTRACT_ID=<deployed-contract-id> bash scripts/benchmark.sh --skip-deploy
+```
+
+and commit the updated `docs/performance-baseline.json`.
 
 ---
 

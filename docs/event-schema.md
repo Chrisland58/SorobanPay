@@ -268,7 +268,7 @@ SCV_VEC [
 
 #### Notes
 
-- If `strict == true` and allowance < amount, the call returns `ContractError::InsufficientAllowance` (error 14) and **no event is emitted**.
+- If `strict == true` and allowance < amount, the call returns `ContractError::InsufficientAllowance` (error 25) and **no event is emitted**.
 - Indexers can use this event to trigger an on-chain or off-chain prompt asking the subscriber to approve a larger allowance before the first payment cycle.
 
 ---
