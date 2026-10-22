@@ -255,3 +255,30 @@ model OutboxEvent {
   @@index([status, createdAt])
   @@index([aggregateId])
 }
+
+// #1382: Cancellation audit trail
+// Records every on-chain cancel event with full context for compliance/audit.
+// Retention period configurable via AUDIT_RETENTION_YEARS env var (default: 7).
+model CancellationAudit {
+  id                String    @id @default(uuid())
+  network           String    // "testnet" | "mainnet"
+  contractId        String
+  subscriberAddress String
+  merchantAddress   String
+  tokenAddress      String?
+  amount            String?   // stroops as string to avoid precision loss
+  intervalSeconds   BigInt?
+  nextPaymentAt     DateTime?
+  cancelledAt       DateTime  @default(now())
+  ledger            BigInt
+  transactionHash   String
+  reason            String?   // max 1000 chars; subscriber/operator-provided
+  source            String    @default("event") // "event" | "reconciliation"
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  @@unique([network, transactionHash], name: "network_tx_hash")
+  @@index([merchantAddress, cancelledAt(sort: Desc)])
+  @@index([subscriberAddress, cancelledAt(sort: Desc)])
+  @@index([network, contractId, subscriberAddress, merchantAddress])
+}
