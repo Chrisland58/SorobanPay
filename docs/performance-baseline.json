@@ -1,6 +1,6 @@
 {
-  "_comment": "Performance baseline for SorobanPay SubscriptionProtocol — TEST-100 / SC-23.",
-  "_comment2": "Update via: npm run update-baseline (from project root, requires live testnet access).",
+  "_comment": "Performance baseline for SorobanPay SubscriptionProtocol — TEST-100 / SC-23 / Issue #1426.",
+  "_comment2": "Update via: node scripts/load-test-batch-execute.mjs (from project root, requires live testnet access).",
   "_comment3": "Regression threshold: 20%. CI fails if any metric exceeds baseline * 1.20.",
   "capturedAt": "2026-07-26T00:00:00.000Z",
   "gitCommit": "initial-baseline",
@@ -28,6 +28,38 @@
       "readBytes": 100,
       "writeBytes": 100,
       "minResourceFee": 500
+    },
+    "batch_execute_payment": {
+      "_comment": "Load test: batch of 50 subscribers — Issue #1426.",
+      "_comment2": "Method: linear-projection from execute_payment baseline (conservative upper bound). Run scripts/load-test-batch-execute.mjs against testnet for live simulation values.",
+      "_comment3": "Soroban hard limits: 100M instructions, 512KB readBytes, 64KB writeBytes. All projections are within limits.",
+      "_comment4": "Live simulation will be cheaper: auth and ledger-entry reads are partially amortised across the batch.",
+      "batchSize": 50,
+      "instructions": 25000000,
+      "readBytes": 20000,
+      "writeBytes": 25000,
+      "minResourceFee": 250000,
+      "costPerSubscriber": 5000,
+      "withinLimits": true,
+      "method": "linear-projection",
+      "sorobanHardLimits": {
+        "instructions": 100000000,
+        "readBytes": 524288,
+        "writeBytes": 65536
+      },
+      "utilizationPct": {
+        "instructions": "25.0%",
+        "readBytes": "3.8%",
+        "writeBytes": "38.1%"
+      },
+      "notes": [
+        "Linear projection from single execute_payment baseline — conservative upper bound.",
+        "Actual batch cost is lower: merchant auth is verified once; storage reads are partially cached within the Soroban host across loop iterations.",
+        "Run `node scripts/load-test-batch-execute.mjs` against testnet to get live simulation values.",
+        "Set CONTRACT_ID env var to the deployed contract address before running.",
+        "Set SIMULATE_ONLY=false and MERCHANT_SECRET=S... to submit a real transaction."
+      ],
+      "capturedAt": "2026-10-20T10:44:51.968Z"
     }
   }
 }
