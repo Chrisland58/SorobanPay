@@ -3,6 +3,7 @@
   "version": "1.0.0",
   "private": true,
   "scripts": {
+    "build": "tsc --build",
     "test": "jest --testPathPattern='(?<!integration)\\.test\\.ts$'",
     "test:integration": "jest --testPathPattern='integration\\.test\\.ts$'",
     "test:all": "jest",
