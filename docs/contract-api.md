@@ -538,7 +538,7 @@ stellar contract invoke \
 
 ### `migrate`
 
-Upgrade the on-chain schema version to `CURRENT_SCHEMA_VERSION`. Returns `AlreadyMigrated` if the contract is already at the current version. Emits `contract_migrated`.
+Rewrite the listed subscription records using the current schema, defaulting newly added optional fields, then store `CURRENT_SCHEMA_VERSION`. Calling migration again for the current version is safe. Emits `contract_migrated` when the schema version advances.
 
 **Authorization:** `admin` (the address stored by `initialize`) must sign.
 
@@ -547,6 +547,7 @@ Upgrade the on-chain schema version to `CURRENT_SCHEMA_VERSION`. Returns `Alread
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `admin` | `Address` | Must match the stored admin address |
+| `subscribers` | `Vec<(Address, Address)>` | Subscriber and merchant pairs whose records should be rewritten |
 
 #### Return value
 
@@ -557,8 +558,9 @@ Upgrade the on-chain schema version to `CURRENT_SCHEMA_VERSION`. Returns `Alread
 | Error | Code | Trigger |
 |-------|------|---------|
 | `NotInitialized` | 17 | `initialize` has not been called |
-| `NotAdmin` | 16 | `admin` does not match the stored admin address |
-| `AlreadyMigrated` | 15 | Schema version is already `CURRENT_SCHEMA_VERSION` |
+| `Unauthorized` | 6 | `admin` does not match the stored admin address |
+| `NoActiveSubscription` | 4 | A listed subscriber and merchant pair has no stored subscription |
+| `AlreadyMigrated` | 15 | Stored schema version is newer than this contract |
 
 ---
 

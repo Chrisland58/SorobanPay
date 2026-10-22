@@ -8,7 +8,7 @@ use soroban_sdk::{contract, contractimpl, symbol_short, token, Address, BytesN, 
 
 use crate::error::ContractError;
 use crate::storage::{
-    subscription_key, DataKey, SubscriptionData, CONTRACT_VERSION, CURRENT_SCHEMA_VERSION,
+    subscription_key, DataKey, LegacySubscriptionData, SubscriptionData, CONTRACT_VERSION, CURRENT_SCHEMA_VERSION,
     MAX_AMOUNT, MAX_TTL_LEDGERS, MIN_TTL_LEDGERS,
 };
 
@@ -101,10 +101,15 @@ impl SubscriptionProtocol {
             .unwrap_or(0_u32)
     }
 
-    /// Migrate the contract schema to `CURRENT_SCHEMA_VERSION`.
+    /// Rewrite subscription records and migrate the schema to the current version.
     ///
-    /// Requires admin auth.  Returns `AlreadyMigrated` if already current.
-    pub fn migrate(env: Env, admin: Address) -> Result<(), ContractError> {
+    /// Requires the stored admin's authorization. Existing records are rewritten
+    /// with the current schema, so adding defaulted fields remains backward-compatible.
+    pub fn migrate(
+        env: Env,
+        admin: Address,
+        subscribers: Vec<(Address, Address)>,
+    ) -> Result<(), ContractError> {
         admin.require_auth();
 
         let stored_admin: Address = env
@@ -114,7 +119,7 @@ impl SubscriptionProtocol {
             .ok_or(ContractError::NotInitialized)?;
 
         if admin != stored_admin {
-            return Err(ContractError::NotAdmin);
+            return Err(ContractError::Unauthorized);
         }
 
         let current_version: u32 = env
@@ -123,15 +128,48 @@ impl SubscriptionProtocol {
             .get(&DataKey::SchemaVersion)
             .unwrap_or(0_u32);
 
-        if current_version >= CURRENT_SCHEMA_VERSION {
+        if current_version > CURRENT_SCHEMA_VERSION {
             return Err(ContractError::AlreadyMigrated);
+        }
+
+        for (subscriber, merchant) in subscribers.iter() {
+            let hash = subscription_key(&env, &subscriber, &merchant);
+            let key = DataKey::Subscription(hash);
+            let data = if current_version < CURRENT_SCHEMA_VERSION {
+                let legacy: LegacySubscriptionData = env
+                    .storage()
+                    .persistent()
+                    .get(&key)
+                    .ok_or(ContractError::NoActiveSubscription)?;
+                SubscriptionData {
+                    token: legacy.token,
+                    amount: legacy.amount,
+                    interval: legacy.interval,
+                    next_payment: legacy.next_payment,
+                    is_paused: legacy.is_paused,
+                    grace_period: None,
+                    paused_until: None,
+                    overdue_since: None,
+                }
+            } else {
+                env.storage()
+                    .persistent()
+                    .get(&key)
+                    .ok_or(ContractError::NoActiveSubscription)?
+            };
+            env.storage().persistent().set(&key, &data);
+            env.storage()
+                .persistent()
+                .extend_ttl(&key, MIN_TTL_LEDGERS, MAX_TTL_LEDGERS);
         }
 
         env.storage()
             .instance()
             .set(&DataKey::SchemaVersion, &CURRENT_SCHEMA_VERSION);
 
-        events::emit_contract_migrated(&env, &admin, CURRENT_SCHEMA_VERSION);
+        if current_version < CURRENT_SCHEMA_VERSION {
+            events::emit_contract_migrated(&env, &admin, CURRENT_SCHEMA_VERSION);
+        }
 
         Ok(())
     }
@@ -244,6 +282,9 @@ impl SubscriptionProtocol {
             interval,
             next_payment,
             is_paused: false,
+            grace_period: None,
+            paused_until: None,
+            overdue_since: None,
         };
 
         // Compact key (#347): sha256(subscriber_xdr ++ merchant_xdr).
@@ -431,3 +472,6 @@ mod security_tests;
 
 #[cfg(test)]
 mod property_tests;
+
+#[cfg(all(test, feature = "upgrade-test"))]
+mod test_upgrade;

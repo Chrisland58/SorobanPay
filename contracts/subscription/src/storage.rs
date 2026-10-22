@@ -6,7 +6,7 @@ pub const CONTRACT_VERSION: &str = "1.0.0";
 pub const CONTRACT_NAME: &str = "SorobanPay-SubscriptionProtocol";
 
 /// Current on-chain schema version.  Increment when `SubscriptionData` changes.
-pub const CURRENT_SCHEMA_VERSION: u32 = 1;
+pub const CURRENT_SCHEMA_VERSION: u32 = 2;
 
 // ==================== Key helpers ====================
 
@@ -77,6 +77,41 @@ pub struct SubscriptionData {
     pub next_payment: u64,
     /// True when subscription payments are suspended
     pub is_paused:    bool,
+    /// Grace-period duration in seconds, if configured for this subscription.
+    pub grace_period: Option<u64>,
+    /// Timestamp until which payments are paused.
+    pub paused_until: Option<u64>,
+    /// Timestamp when the subscription first became overdue.
+    pub overdue_since: Option<u64>,
+}
+
+/// Subscription layout stored before schema version 2.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct LegacySubscriptionData {
+    pub token: Address,
+    pub amount: i128,
+    pub interval: u64,
+    pub next_payment: u64,
+    pub is_paused: bool,
+}
+
+impl SubscriptionData {
+    pub fn grace_period_secs(&self) -> u64 {
+        self.grace_period.unwrap_or(0)
+    }
+
+    pub fn paused_until_ts(&self) -> u64 {
+        self.paused_until.unwrap_or(0)
+    }
+
+    pub fn overdue_since_ts(&self) -> u64 {
+        self.overdue_since.unwrap_or(0)
+    }
+
+    pub fn is_paused(&self, now: u64) -> bool {
+        self.is_paused || self.paused_until.map(|until| until > now).unwrap_or(false)
+    }
 }
 
 /// Safe upper bound for a single subscription payment amount (1 × 10¹⁸ stroops).
