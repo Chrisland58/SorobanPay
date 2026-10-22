@@ -13,6 +13,8 @@
  *  - A button to create another subscription
  */
 
+import { stellarExpertUrl } from '@/lib/utils';
+
 export interface SuccessCardData {
   /** Stellar transaction hash (hex or base64) */
   txHash: string;
@@ -60,9 +62,15 @@ export function SuccessCard({ data, onReset }: SuccessCardProps) {
       {/* Tx hash */}
       <div className="bg-gray-800/50 rounded-lg p-3 border border-gray-700/50">
         <p className="text-gray-400 text-xs mb-1.5 font-medium">Transaction hash</p>
-        <p className="text-gray-200 break-all font-mono text-xs leading-relaxed">
-          {data.txHash}
-        </p>
+        <a
+          href={stellarExpertUrl('tx', data.txHash)}
+          target="_blank"
+          rel="noopener noreferrer"
+          aria-label={`View transaction ${data.txHash} on Stellar Expert`}
+          className="text-blue-400 hover:text-blue-300 hover:underline break-all font-mono text-xs leading-relaxed inline-block"
+        >
+          {data.txHash} ↗
+        </a>
       </div>
 
       {/* Summary */}
