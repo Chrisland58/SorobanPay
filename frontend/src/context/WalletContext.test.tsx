@@ -8,7 +8,7 @@
  *  - useWallet throws outside provider
  */
 import React from 'react';
-import { render, screen, act } from '@testing-library/react';
+import { render, screen, act, waitFor } from '@testing-library/react';
 import { WalletProvider } from '@/context/WalletContext';
 import { useWallet } from '@/hooks/useWallet';
 
@@ -17,12 +17,24 @@ import { useWallet } from '@/hooks/useWallet';
 jest.mock('@/lib/wallet_manager', () => ({
   detectFreighter: jest.fn(),
   connectWallet:   jest.fn(),
+  restoreWalletSession: jest.fn(),
 }));
 
 import * as walletManager from '@/lib/wallet_manager';
 
 const mockDetect  = walletManager.detectFreighter as jest.Mock;
 const mockConnect = walletManager.connectWallet   as jest.Mock;
+const mockRestore = walletManager.restoreWalletSession as jest.Mock;
+
+const WALLET_CACHE_KEY = 'sorobanpay_wallet_public_key';
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((res) => {
+    resolve = res;
+  });
+  return { promise, resolve };
+}
 
 // ── Test component ────────────────────────────────────────────────────────────
 
@@ -50,6 +62,12 @@ function renderWithProvider() {
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
+beforeEach(() => {
+  jest.clearAllMocks();
+  window.sessionStorage.clear();
+  mockRestore.mockResolvedValue(null);
+});
+
 describe('WalletContext – disconnect flow', () => {
   beforeEach(() => {
     mockDetect.mockResolvedValue(true);
@@ -67,6 +85,9 @@ describe('WalletContext – disconnect flow', () => {
       screen.getByTestId('connect-btn').click();
     });
     expect(screen.getByTestId('pk').textContent).toBe('GPUBLICKEY123');
+    expect(window.sessionStorage.getItem(WALLET_CACHE_KEY)).toBe(
+      'GPUBLICKEY123',
+    );
   });
 
   it('resets publicKey to null on disconnect', async () => {
@@ -76,6 +97,7 @@ describe('WalletContext – disconnect flow', () => {
 
     act(() => { screen.getByTestId('disconnect-btn').click(); });
     expect(screen.getByTestId('pk').textContent).toBe('null');
+    expect(window.sessionStorage.getItem(WALLET_CACHE_KEY)).toBeNull();
   });
 
   it('clears connectError on disconnect', async () => {
@@ -140,6 +162,146 @@ describe('WalletContext – reconnect flow', () => {
     await act(async () => { screen.getByTestId('connect-btn').click(); });
     expect(screen.getByTestId('error').textContent).toBe('null');
     expect(screen.getByTestId('pk').textContent).toBe('GNEWKEY');
+  });
+
+  it('ignores a connect result that resolves after an explicit disconnect', async () => {
+    const pendingConnect = deferred<string>();
+    mockConnect.mockReturnValue(pendingConnect.promise);
+
+    renderWithProvider();
+
+    act(() => { screen.getByTestId('connect-btn').click(); });
+    await waitFor(() => expect(mockConnect).toHaveBeenCalled());
+
+    act(() => { screen.getByTestId('disconnect-btn').click(); });
+    expect(screen.getByTestId('connecting').textContent).toBe('false');
+
+    await act(async () => { pendingConnect.resolve('GNEWKEY'); });
+
+    expect(screen.getByTestId('pk').textContent).toBe('null');
+    expect(window.sessionStorage.getItem(WALLET_CACHE_KEY)).toBeNull();
+  });
+});
+
+describe('WalletContext – session persistence', () => {
+  beforeEach(() => {
+    mockDetect.mockResolvedValue(true);
+  });
+
+  it('restores a cached public key when Freighter still returns the same account', async () => {
+    window.sessionStorage.setItem(WALLET_CACHE_KEY, 'GCACHED');
+    mockRestore.mockResolvedValue('GCACHED');
+
+    renderWithProvider();
+
+    await waitFor(() => {
+      expect(screen.getByTestId('pk').textContent).toBe('GCACHED');
+    });
+  });
+
+  it('invalidates the cached key when Freighter returns a different account', async () => {
+    window.sessionStorage.setItem(WALLET_CACHE_KEY, 'GOLDKEY');
+    mockRestore.mockResolvedValue('GNEWKEY');
+
+    renderWithProvider();
+
+    await waitFor(() => {
+      expect(screen.getByTestId('pk').textContent).toBe('null');
+      expect(screen.getByTestId('error').textContent).toContain('account changed');
+    });
+    expect(window.sessionStorage.getItem(WALLET_CACHE_KEY)).toBeNull();
+  });
+
+  it('drops the cached key when Freighter no longer has an active session', async () => {
+    window.sessionStorage.setItem(WALLET_CACHE_KEY, 'GSTALE');
+    mockRestore.mockResolvedValue(null);
+
+    renderWithProvider();
+
+    await waitFor(() => {
+      expect(window.sessionStorage.getItem(WALLET_CACHE_KEY)).toBeNull();
+    });
+    expect(screen.getByTestId('pk').textContent).toBe('null');
+  });
+
+  it('stays disconnected and drops the cache when the silent restore fails', async () => {
+    window.sessionStorage.setItem(WALLET_CACHE_KEY, 'GSTALE');
+    mockRestore.mockRejectedValue(new Error('extension unavailable'));
+
+    renderWithProvider();
+
+    await waitFor(() => {
+      expect(window.sessionStorage.getItem(WALLET_CACHE_KEY)).toBeNull();
+    });
+    expect(screen.getByTestId('pk').textContent).toBe('null');
+  });
+
+  it('does not attempt a silent restore when no key is cached', async () => {
+    renderWithProvider();
+
+    await waitFor(() => {
+      expect(screen.getByTestId('installed').textContent).toBe('true');
+    });
+    expect(mockRestore).not.toHaveBeenCalled();
+  });
+
+  it('clears the cached key when Freighter is unavailable on mount', async () => {
+    window.sessionStorage.setItem(WALLET_CACHE_KEY, 'GSTALE');
+    mockDetect.mockResolvedValue(false);
+
+    renderWithProvider();
+
+    await waitFor(() => {
+      expect(screen.getByTestId('error').textContent).toContain('not installed');
+    });
+    expect(mockRestore).not.toHaveBeenCalled();
+    expect(window.sessionStorage.getItem(WALLET_CACHE_KEY)).toBeNull();
+    expect(screen.getByTestId('pk').textContent).toBe('null');
+  });
+
+  it('does not let a pending restore overwrite an explicit connect', async () => {
+    window.sessionStorage.setItem(WALLET_CACHE_KEY, 'GOLDKEY');
+    const restore = deferred<string | null>();
+    mockRestore.mockReturnValue(restore.promise);
+    mockConnect.mockResolvedValue('GNEWKEY');
+
+    renderWithProvider();
+    await waitFor(() => expect(mockRestore).toHaveBeenCalled());
+
+    await act(async () => {
+      screen.getByTestId('connect-btn').click();
+    });
+    expect(screen.getByTestId('pk').textContent).toBe('GNEWKEY');
+    expect(window.sessionStorage.getItem(WALLET_CACHE_KEY)).toBe('GNEWKEY');
+
+    await act(async () => {
+      restore.resolve('GOLDKEY');
+    });
+
+    expect(screen.getByTestId('pk').textContent).toBe('GNEWKEY');
+    expect(window.sessionStorage.getItem(WALLET_CACHE_KEY)).toBe('GNEWKEY');
+  });
+
+  it('does not reconnect after an explicit disconnect while a restore is pending', async () => {
+    window.sessionStorage.setItem(WALLET_CACHE_KEY, 'GOLDKEY');
+    const restore = deferred<string | null>();
+    mockRestore.mockReturnValue(restore.promise);
+
+    renderWithProvider();
+    await waitFor(() => expect(mockRestore).toHaveBeenCalled());
+
+    act(() => {
+      screen.getByTestId('disconnect-btn').click();
+    });
+    expect(screen.getByTestId('pk').textContent).toBe('null');
+    expect(window.sessionStorage.getItem(WALLET_CACHE_KEY)).toBeNull();
+
+    await act(async () => {
+      restore.resolve('GOLDKEY');
+    });
+
+    expect(screen.getByTestId('pk').textContent).toBe('null');
+    expect(window.sessionStorage.getItem(WALLET_CACHE_KEY)).toBeNull();
   });
 });
 

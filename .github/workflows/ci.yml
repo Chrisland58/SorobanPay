@@ -37,7 +37,7 @@ jobs:
         run: cargo install cargo-audit --locked
 
       - name: Security audit (cargo audit)
-        run: cargo audit --manifest-path contracts/subscription/Cargo.toml
+        run: cargo audit
         working-directory: contracts/subscription
 
       - name: Build (wasm32 release)
@@ -237,9 +237,9 @@ jobs:
         run: cargo install cargo-audit --locked
 
       - name: cargo audit (contract)
+        working-directory: contracts/subscription
         run: |
           cargo audit \
-            --manifest-path contracts/subscription/Cargo.toml \
             2>&1 | tee /tmp/cargo-audit-ci.json || true
 
       - name: Upload cargo audit report

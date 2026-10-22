@@ -1,66 +1,64 @@
-# Contract hardening: token validation, nonce events, property tests, mutation coverage
+# Subscription pause/resume, wallet persistence, and dependency audit fixes
 
 ## Summary
 
-This PR addresses four contract reliability issues in the subscription protocol:
+This PR addresses four issues across the contract and frontend:
 
-- Enforces `InvalidTokenAddress` when `subscribe` is called with the contract's own address as the payment token.
-- Adds `payment_nonce` to the `executed` event payload so off-chain indexers can deduplicate payments deterministically.
-- Adds property-based coverage for the double-payment prevention invariant, time-lock advancement, nonce monotonicity, and subscribe boundary inputs.
-- Documents the mutation-testing target and surviving-mutant process so the contract stays above the > 80% mutation score target.
+- Completes the pause/resume flow, including auto-resume and paused-subscription handling.
+- Returns a unique, documented `SameMerchant` error for no-op subscription transfers.
+- Makes `cargo audit` pass with justified, narrowly scoped advisory suppressions and fixes the CI audit commands.
+- Persists the Freighter wallet session across reloads with stale-session invalidation and race protection.
 
-Closes #1353
-Closes #1354
-Closes #1355
-Closes #1356
+Closes #1348
+Closes #1357
+Closes #1315
+Closes #1323
 
 ## Changes
 
-### Contract
+### Contract: pause/resume (`#1348`)
 
-- `contracts/subscription/src/lib.rs`
-  - `subscribe` now returns `ContractError::InvalidTokenAddress` (code 11) when `token == env.current_contract_address()`.
-  - Returns the normal success result from `execute_payment` after marker and event handling.
-- `contracts/subscription/src/events.rs`
-  - `emit_executed` now carries `(amount: i128, payment_nonce: u32)`.
-  - Event schema documentation updated to include the nonce in the data payload.
-- `contracts/subscription/src/storage.rs`
-  - Reconciled storage schema with the current contract API.
-  - `SubscriptionData::payment_nonce` is a `u32` and execution markers are keyed by `(subscription_hash, nonce)`.
-  - Restored storage migration helpers and schema-version tests.
+- `pause_subscription` keeps requiring subscriber auth, rejects double pauses with `SubscriptionPaused`, and stores an optional `paused_until`.
+- `resume_subscription` clears pause state, recomputes `next_payment`, persists it, and emits `resumed`.
+- `execute_payment` now auto-resumes a timed pause when `paused_until` has elapsed, persists the cleared state, and emits `resumed`.
+- `batch_execute_payment` skips paused subscriptions instead of charging them.
+- Pause/resume entry points and `SubscriptionData` pause fields are documented in `docs/contract-api.md`.
 
-### Tests
+### Contract: error codes and `SameMerchant` (`#1357`)
 
-- Property-based tests cover:
-  - `execute_payment` called twice inside one interval always returns `PaymentNotDue`.
-  - `next_payment` advances by exactly one interval on success.
-  - `payment_nonce` increments monotonically.
-  - `subscribe` boundary values do not panic.
-- Unit test covers `subscribe` with `token == contract address` returning error 11.
-- Event test decodes the `executed` payload and asserts the nonce is present and increments.
+- Error discriminants are unique across the contract.
+- `SubscriptionPaused` is code `12`; `SameMerchant` is code `20`.
+- `transfer_subscription` returns `SameMerchant` when `old_merchant == new_merchant`.
+- Error tables in `docs/contract-api.md` and `README.md` now match the enum, including codes through `25` (`FeeBpsTooHigh`).
 
-### Documentation
+### Security audit (`#1315`)
 
-- `docs/events.md` documents the new `(amount, payment_nonce)` payload.
-- `docs/contract-api.md` documents `InvalidTokenAddress` (error 11) in the error table.
-- `docs/mutation-report.md` records surviving mutants and the > 80% target.
-- README TypeScript decoding example updated for the nonce-bearing `executed` event.
+- Repaired both audit config files (`audit.toml` and `.cargo/audit.toml`) to use valid cargo-audit 0.22 syntax.
+- `cd contracts/subscription && cargo audit` now exits `0`.
+- Remaining advisories are ignored with explicit justifications because they are pinned by `soroban-env-host` 20:
+  - `RUSTSEC-2024-0344` — `curve25519-dalek` 4.1.2
+  - `RUSTSEC-2026-0009` — `time` 0.3.44
+  - `RUSTSEC-2026-0097` — `rand` 0.8.5
+  - `RUSTSEC-2025-0056` — unmaintained `adler`
+  - `RUSTSEC-2024-0436` — unmaintained `paste`
+- CI audit steps now run from `contracts/subscription`; the unsupported `cargo audit --manifest-path` invocation was removed.
+
+### Frontend: wallet session persistence (`#1323`)
+
+- Persists the connected public key in `sessionStorage` under `sorobanpay_wallet_public_key`.
+- Silently restores an existing Freighter session on mount via `restoreWalletSession()`, which never prompts for access.
+- Invalidates stale sessions when Freighter is unavailable or the active account changed.
+- Clears the cache on disconnect and on failed/stale restores.
+- Guards against races where a pending silent restore could overwrite an explicit connect or reconnect after disconnect.
+- Adds unit coverage for restore, invalidation, failure, unavailable-extension, and race paths.
 
 ## Testing
 
-- `make test` — contract unit, integration, and property tests.
-- `make mutation-test` — cargo-mutants score verified against the >= 80% threshold.
+- `cargo check --offline --manifest-path contracts/subscription/Cargo.toml` — passed.
+- `cd contracts/subscription && cargo audit` — exit `0`.
+- Frontend Jest/TypeScript checks were not run because `frontend/node_modules` is not installed in this workspace.
+- Full contract tests remain blocked by pre-existing merge-damaged test modules unrelated to this PR.
 
 ## Breaking changes
 
-- None to event topics. The `executed` event topic structure is unchanged; only its data payload gained the nonce field as specified in #1354.
-
-## Checklist
-
-- [x] Contract validation and event changes implemented
-- [x] Error code 11 documented
-- [x] Event schema documentation updated
-- [x] Property-based invariant coverage added
-- [x] Mutation coverage process documented
-- [ ] `make test` verified locally
-- [ ] `make mutation-test` verified locally
+- None. The existing pause/resume entry-point signatures and event topics are unchanged.
