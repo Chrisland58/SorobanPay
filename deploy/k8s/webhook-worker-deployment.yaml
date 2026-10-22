@@ -45,6 +45,9 @@ spec:
         prometheus.io/path: "/metrics"
     spec:
       terminationGracePeriodSeconds: 60
+      # Bind the dedicated least-privilege ServiceAccount for the webhook-worker.
+      # The account has read-only access to Secrets and ConfigMaps (see rbac.yaml).
+      serviceAccountName: sorobanpay-webhook-worker
       securityContext:
         runAsNonRoot: true
         runAsUser: 1001

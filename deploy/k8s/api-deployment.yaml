@@ -46,6 +46,9 @@ spec:
         prometheus.io/path: "/metrics"
     spec:
       terminationGracePeriodSeconds: 30
+      # Bind the dedicated least-privilege ServiceAccount for the API.
+      # The account has read-only access to Secrets and ConfigMaps (see rbac.yaml).
+      serviceAccountName: sorobanpay-api
       securityContext:
         runAsNonRoot: true
         runAsUser: 1001
