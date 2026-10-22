@@ -28,6 +28,12 @@ rules, and step-by-step checklist — see [docs/release-process.md](docs/release
 - **[Docs]** Add issue naming conventions (`Bug:`, `Feature:`, `Docs:`, `Chore:` prefixes) to `CONTRIBUTING.md`. (Closes #78)
 - **[Docs]** Expand README security model section with full sub-sections: non-custodial design, per-invocation auth table, allowance emergency stop, time-lock enforcement, storage TTL, input validation, and read-only backend. (Closes #79)
 - **[Docs]** Add `docs/release-process.md` with versioning rules, changelog hygiene guide, release note template, step-by-step release checklist, and component-specific notes for contract, frontend, and deploy releases. (Closes #80)
+- Kubernetes NetworkPolicy resources in `deploy/k8s/` restricting pod-to-pod
+  communication: default deny-all, API ingress from ingress controller only,
+  indexer pull-only egress to RPC and DB, webhook worker egress to DB and
+  external HTTPS, and PostgreSQL ingress limited to the three app pods.
+  Kustomize manifest and `deploy/k8s/README.md` with minikube + Calico test
+  instructions. Closes #1441.
 
 ### Changed
 

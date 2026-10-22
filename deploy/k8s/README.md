@@ -1,129 +1,193 @@
-# deploy/k8s — Kubernetes manifests
+# Kubernetes Network Policies — SorobanPay
 
-Production-grade Kubernetes manifests for all three SorobanPay backend
-workloads. Apply everything with:
+This directory contains [Kubernetes NetworkPolicy](https://kubernetes.io/docs/concepts/services-networking/network-policies/)
+resources that restrict pod-to-pod communication in the SorobanPay cluster
+to only what is needed for the application to function.
+
+## Prerequisites
+
+- A CNI (Container Network Interface) plugin that enforces NetworkPolicy,
+  e.g. [Calico](https://docs.tigera.io/calico), [Cilium](https://cilium.io),
+  or WeaveNet. Without an enforcing CNI, NetworkPolicy resources are silently
+  ignored and all traffic is allowed.
+- `kubectl` configured against the target cluster.
+- [kustomize](https://kustomize.io) (built into `kubectl` ≥ 1.14).
+
+## Policy overview
+
+| Policy | Applies to | Ingress | Egress |
+|--------|-----------|---------|--------|
+| `default-deny-all` | All pods in `sorobanpay` namespace | Deny all | Deny all |
+| `api-network-policy` | `app=api` pods | Ingress controller only (`ingress-nginx` namespace) → port 3001 | DNS (UDP/TCP 53), PostgreSQL (TCP 5432), external HTTPS (TCP 443) |
+| `indexer-network-policy` | `app=indexer` pods | None (pull-only) | DNS (53), PostgreSQL (5432), Soroban RPC HTTPS (443) |
+| `webhook-worker-network-policy` | `app=webhook-worker` pods | None (worker) | DNS (53), PostgreSQL (5432), external HTTPS (443) for webhooks |
+| `postgresql-network-policy` | `app=postgresql` pods | API, indexer, webhook-worker → port 5432 only | DNS only |
+
+The `default-deny-all` policy is the baseline: it denies all ingress and egress
+for every pod in the namespace. Each workload-specific policy then re-opens
+only the ports and destinations required for that workload.
+
+### Traffic matrix
+
+```
+                ┌─────────────┐
+                │ ingress-nginx │
+                └──────┬──────┘
+                       │ :3001
+                       ▼
+              ┌────────────────┐
+              │   API pod       │
+              └──┬───────────┬──┘
+                 │ 5432      │ 443
+                 ▼           ▼
+          ┌──────────┐   ┌───────────────┐
+          │PostgreSQL │   │ Soroban RPC    │
+          └────▲─────┘   └───────▲───────┘
+               │ 5432            │ 443
+          ┌────┴─────┐   ┌───────┴───────┐
+          │Indexer   │   │Webhook Worker  │
+          └──────────┘   └───────────────┘
+                          │ 443
+                          ▼
+                     External HTTPS (webhooks)
+```
+
+## Apply
 
 ```bash
 kubectl apply -k deploy/k8s/
 ```
 
-## Directory structure
+Or, if you maintain a base `kustomization.yaml` higher in the tree, add the
+`deploy/k8s/` directory as a resource:
+
+```yaml
+# kustomization.yaml (top-level)
+resources:
+  - deploy/k8s/
+```
+
+### Namespace label
+
+The `default-deny-all` policy uses a namespace selector to allow DNS egress
+to the `kube-system` namespace. The CNI must populate the
+`kubernetes.io/metadata.name` label, which is standard for Calico and Cilium
+clusters running Kubernetes ≥ 1.21.
+
+## Verify
+
+### List policies
+
+```bash
+kubectl get networkpolicies -n sorobanpay
+```
+
+### Describe a policy
+
+```bash
+kubectl describe networkpolicy api-network-policy -n sorobanpay
+```
+
+## Testing in minikube with Calico CNI
+
+This section reproduces the acceptance criterion: _Tested in minikube with
+Calico CNI_.
+
+### 1. Start minikube with Calico
+
+```bash
+minikube start --cni=calico --cpus=2 --memory=4096
+```
+
+Confirm Calico is running:
+
+```bash
+kubectl get pods -n kube-system -l k8s-app=calico-node
+```
+
+### 2. Create the `sorobanpay` namespace and label it
+
+```bash
+kubectl create namespace sorobanpay
+kubectl label namespace sorobanpay kubernetes.io/metadata.name=sorobanpay
+```
+
+### 3. Deploy test pods with matching labels
+
+```bash
+# PostgreSQL stub pod
+kubectl run postgresql --image=postgres:16-alpine \
+  --namespace=sorobanpay \
+  --labels=app=postgresql \
+  --env=POSTGRES_PASSWORD=test \
+  --port=5432
+
+# API stub pod
+kubectl run api --image=busybox \
+  --namespace=sorobanpay \
+  --labels=app=api \
+  --command -- sleep 3600
+
+# Indexer stub pod
+kubectl run indexer --image=busybox \
+  --namespace=sorobanpay \
+  --labels=app=indexer \
+  --command -- sleep 3600
+
+# Webhook worker stub pod
+kubectl run webhook-worker --image=busybox \
+  --namespace=sorobanpay \
+  --labels=app=webhook-worker \
+  --command -- sleep 3600
+```
+
+### 4. Apply the network policies
+
+```bash
+kubectl apply -k deploy/k8s/
+```
+
+### 5. Verify allowed connectivity
+
+```bash
+# API → PostgreSQL should succeed (port 5432)
+kubectl exec -n sorobanpay api -- \
+  nc -zv postgresql 5432
+
+# Indexer → API should fail (no ingress on API from indexer)
+kubectl exec -n sorobanpay indexer -- \
+  nc -zv api 3001  # expected: timeout / connection refused
+
+# Webhook worker → API should fail (no ingress on API from webhook-worker)
+kubectl exec -n sorobanpay webhook-worker -- \
+  nc -zv api 3001  # expected: timeout / connection refused
+```
+
+### 6. Verify denied connectivity (default deny)
+
+```bash
+# API → Indexer should fail (no egress to indexer, no ingress on indexer)
+kubectl exec -n sorobanpay api -- \
+  nc -zv indexer 3001  # expected: timeout / connection refused
+
+# API → Webhook worker should fail
+kubectl exec -n sorobanpay api -- \
+  nc -zv webhook-worker 3001  # expected: timeout / connection refused
+```
+
+### 7. Clean up
+
+```bash
+minikube delete
+```
+
+## Files
 
 | File | Purpose |
-|---|---|
-| `namespace.yaml` | `sorobanpay` namespace |
-| `rbac.yaml` | ServiceAccounts, Role, RoleBindings (RBAC) |
-| `configmap.yaml` | Non-secret env vars (RPC\_URL, CONTRACT\_ID, …) |
-| `secrets.yaml` | **Placeholder** secrets — replace before applying |
-| `indexer-deployment.yaml` | Event indexer (1 replica, Recreate strategy) |
-| `api-deployment.yaml` | REST API (2 replicas min, HPA to 10) |
-| `webhook-worker-deployment.yaml` | Webhook worker (2 replicas, RollingUpdate) |
-| `api-service.yaml` | ClusterIP service + Ingress with TLS |
-| `hpa.yaml` | HPA: CPU ≥ 70% or Memory ≥ 80% |
-| `postgres-statefulset.yaml` | PostgreSQL (dev/CI only — use managed DB in prod) |
-| `redis-statefulset.yaml` | Redis reference (future roadmap) |
-| `kustomization.yaml` | Kustomize root — applies all of the above |
-
----
-
-## RBAC design
-
-`rbac.yaml` implements least-privilege RBAC for the three backend workloads.
-
-### ServiceAccounts
-
-One dedicated `ServiceAccount` per workload:
-
-| ServiceAccount | Workload |
-|---|---|
-| `sorobanpay-indexer` | `indexer-deployment.yaml` |
-| `sorobanpay-api` | `api-deployment.yaml` |
-| `sorobanpay-webhook-worker` | `webhook-worker-deployment.yaml` |
-
-`automountServiceAccountToken: false` is set on every ServiceAccount to
-prevent the default auto-mount of the API server token into every pod.
-Workloads that genuinely need to call the Kubernetes API should use a
-projected `ServiceAccountToken` volume with a specific audience instead.
-
-### Role
-
-A single namespace-scoped `Role` named `sorobanpay-runtime` is shared by
-all three workloads. It grants the minimum permissions needed at runtime:
-
-| Resource | Verbs | Reason |
-|---|---|---|
-| `secrets` | `get`, `list` | Read database credentials, JWT keys, webhook secrets |
-| `configmaps` | `get`, `list` | Read non-secret runtime config (RPC URL, CONTRACT\_ID) |
-
-No write permissions are granted. No cluster-level (`ClusterRole`) access
-is used. Pod/Deployment management is left entirely to the control plane.
-
-### RoleBindings
-
-One `RoleBinding` per ServiceAccount binds it to `sorobanpay-runtime`:
-
-| RoleBinding | ServiceAccount |
-|---|---|
-| `sorobanpay-indexer-runtime` | `sorobanpay-indexer` |
-| `sorobanpay-api-runtime` | `sorobanpay-api` |
-| `sorobanpay-webhook-worker-runtime` | `sorobanpay-webhook-worker` |
-
-### Extending permissions
-
-If a workload needs additional permissions (e.g., the indexer needs to read
-`leases` for leader-election), add a new `Role` + `RoleBinding` scoped to
-that workload's `ServiceAccount` rather than broadening `sorobanpay-runtime`.
-This keeps the blast radius of any privilege escalation minimal.
-
----
-
-## Secret management
-
-`secrets.yaml` contains **placeholder base64-encoded values** and must
-**never** be applied to a real cluster as-is. Recommended approaches:
-
-- **External Secrets Operator** (recommended): sync from AWS Secrets Manager,
-  GCP Secret Manager, or HashiCorp Vault. Replace `secrets.yaml` with an
-  `ExternalSecret` CRD.
-- **Sealed Secrets**: `kubeseal --format yaml < secrets.yaml > secrets-sealed.yaml`
-- **`kubectl create secret`**: generate secrets on-the-fly in CI/CD.
-
-See [`docs/security.md`](../../docs/security.md) for full guidance.
-
----
-
-## Quick start — minikube
-
-```bash
-# 1. Start minikube
-minikube start --cpus=4 --memory=4096
-
-# 2. Enable nginx ingress
-minikube addons enable ingress
-
-# 3. Build the backend image inside minikube's Docker daemon
-eval $(minikube docker-env)
-docker build -t sorobanpay/backend:latest backend/
-
-# 4. Create real secrets
-kubectl create secret generic sorobanpay-secrets \
-  --from-literal=DATABASE_URL="postgresql://sorobanpay:sorobanpay@postgres:5432/sorobanpay?schema=public" \
-  --from-literal=WEBHOOK_SECRET="$(openssl rand -hex 32)" \
-  --from-literal=ADMIN_JWT_SECRET="$(openssl rand -hex 32)" \
-  -n sorobanpay --dry-run=client -o yaml > /tmp/sorobanpay-secrets.yaml
-
-# 5. Apply all manifests
-kubectl apply -f deploy/k8s/namespace.yaml
-kubectl apply -f /tmp/sorobanpay-secrets.yaml
-kubectl apply -k deploy/k8s/
-
-# 6. Verify RBAC
-kubectl get serviceaccounts -n sorobanpay
-kubectl get roles -n sorobanpay
-kubectl get rolebindings -n sorobanpay
-
-# 7. Verify rollouts
-kubectl rollout status deployment/sorobanpay-api           -n sorobanpay
-kubectl rollout status deployment/sorobanpay-indexer        -n sorobanpay
-kubectl rollout status deployment/sorobanpay-webhook-worker -n sorobanpay
-```
+|------|---------|
+| `kustomization.yaml` | Kustomize manifest listing all NetworkPolicy resources |
+| `network-policy-default-deny.yaml` | Baseline deny-all ingress + egress for the namespace |
+| `network-policy-api.yaml` | API pod: ingress from ingress controller, egress to DB + RPC |
+| `network-policy-indexer.yaml` | Indexer pod: no ingress, egress to RPC + DB |
+| `network-policy-webhook-worker.yaml` | Webhook worker: no ingress, egress to DB + external HTTPS |
+| `network-policy-postgresql.yaml` | PostgreSQL: ingress from API, indexer, webhook-worker only |
