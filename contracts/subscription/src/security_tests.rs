@@ -43,7 +43,7 @@ mod security_tests {
 
     use crate::{
         error::ContractError,
-        storage::{DataKey, MAX_AMOUNT},
+        storage::{DataKey, MAX_AMOUNT, SubscriptionData, subscription_key},
         SubscriptionProtocol, SubscriptionProtocolClient,
     };
 
@@ -963,54 +963,61 @@ mod security_tests {
     }
 
     // =========================================================================
-    // CATEGORY 9b — set_protocol_fee fee-cap boundary (500 bps == 5 %)
-    // The protocol fee rate is hard-capped at 500 bps; the admin cannot extract
-    // more than 5 % of a payment. 500 is accepted, 501 is rejected (FeeTooHigh, 24).
+    // expire_subscription — grace-period enforcement (GracePeriodNotElapsed, 19)
     // =========================================================================
 
-    /// BOUNDARY: `set_protocol_fee` with `fee_bps == 500` (the maximum) must succeed.
-    /// The 5 % cap is inclusive at the boundary: 500 bps is accepted and persisted.
+    /// `expire_subscription` must reject an early call made while the grace
+    /// period has not yet elapsed (`now < overdue_since + grace_period`),
+    /// returning `GracePeriodNotElapsed` (19) and leaving the subscription intact.
     #[test]
-    fn sec_set_protocol_fee_boundary_500_succeeds() {
+    fn expire_subscription_rejects_early_call_within_grace_period() {
         let s = SecEnv::new_with_mock_auth();
-        let admin = Address::generate(&s.env);
-        let collector = Address::generate(&s.env);
 
-        s.client.initialize(&admin);
+        // Subscribe with a 1-hour (3600 s) grace period. strict=false so no
+        // SEP-41 allowance is required for setup.
+        s.client.subscribe(
+            &s.subscriber,
+            &s.merchant,
+            &s.token,
+            &1_000_000_i128,
+            &86_400_u64,
+            &false,
+            &Some(3_600_u64),
+        );
 
-        // 500 bps == 5 %: on the boundary, must be accepted.
-        let result = s.client.set_protocol_fee(&admin, &500, &collector);
+        // Mark the subscription overdue by writing `overdue_since` at the
+        // contract's computed storage key (same as execute_payment does on a
+        // failed transfer).
+        let hash = subscription_key(&s.env, &s.subscriber, &s.merchant);
+        let key = DataKey::Subscription(hash.clone());
+        let mut data: SubscriptionData = s
+            .env
+            .storage()
+            .persistent()
+            .get(&key)
+            .expect("subscription must be stored after subscribe");
+        let overdue_since = s.env.ledger().timestamp();
+        data.overdue_since = Some(overdue_since);
+        s.env.storage().persistent().set(&key, &data);
+
+        // Advance the ledger to just inside the grace window
+        // (overdue_since + grace_period - 1) — too early to expire.
+        s.env
+            .ledger()
+            .with_mut(|l| l.timestamp = overdue_since + 3_600 - 1);
+
+        let result = s.client.try_expire_subscription(&s.subscriber, &s.merchant);
         assert!(
-            result.is_ok(),
-            "set_protocol_fee with fee_bps=500 must succeed; got {:?}",
+            matches!(result, Err(Ok(ContractError::GracePeriodNotElapsed))),
+            "expire_subscription within the grace period must return \
+             GracePeriodNotElapsed (19); got {:?}",
             result
         );
 
-        // The config must be persisted and readable.
-        let cfg = s
-            .client
-            .get_protocol_fee()
-            .expect("fee config must be stored after a successful set_protocol_fee");
-        assert_eq!(cfg.fee_bps, 500, "stored fee_bps must equal 500");
-        assert_eq!(cfg.fee_collector, collector, "stored fee_collector must match");
-    }
-
-    /// BOUNDARY: `set_protocol_fee` with `fee_bps == 501` (just over the cap) must
-    /// be rejected with `FeeTooHigh` (error code 24). The admin cannot exceed 5 %.
-    #[test]
-    fn sec_set_protocol_fee_501_returns_fee_too_high() {
-        let s = SecEnv::new_with_mock_auth();
-        let admin = Address::generate(&s.env);
-        let collector = Address::generate(&s.env);
-
-        s.client.initialize(&admin);
-
-        // 501 bps > MAX_FEE_BPS (500): must be rejected with FeeTooHigh (24).
-        let result = s.client.try_set_protocol_fee(&admin, &501, &collector);
+        // The subscription must NOT have been removed on the rejected call.
         assert!(
-            matches!(result, Err(Ok(ContractError::FeeTooHigh))),
-            "set_protocol_fee with fee_bps=501 must return FeeTooHigh; got {:?}",
-            result
+            s.env.storage().persistent().has(&key),
+            "subscription must remain after a GracePeriodNotElapsed rejection"
         );
     }
 

@@ -16,6 +16,7 @@ Full reference for all `SubscriptionProtocol` entry points, types, and error cod
    - [execute_payment](#execute_payment)
    - [batch_execute_payment](#batch_execute_payment)
    - [cancel](#cancel)
+   - [expire_subscription](#expire_subscription)
    - [get_subscription](#get_subscription)
    - [initialize](#initialize)
    - [migrate](#migrate)
@@ -448,6 +449,45 @@ fn test_cancel_removes_subscription() {
 
 ---
 
+### `expire_subscription`
+
+Expire a subscription once its unpaid grace period has fully elapsed (issue #contract-expire). When a payment transfer fails, `execute_payment` records `overdue_since` on the subscription; `expire_subscription` removes the subscription only after `overdue_since + grace_period` has passed.
+
+Calling it before the grace window has elapsed is rejected with `GracePeriodNotElapsed` (19) — the subscription is left untouched and no event is emitted.
+
+**Authorization:** `merchant` must sign.
+
+#### Parameters
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `subscriber` | `Address` | Subscriber whose subscription is being expired |
+| `merchant` | `Address` | Caller — must sign |
+
+#### Return value
+
+`Result<(), ContractError>` — returns `()` on success.
+
+#### Error codes
+
+| Error | Code | Trigger |
+|-------|------|---------|
+| `NoActiveSubscription` | 4 | No subscription found for this `(subscriber, merchant)` pair |
+| `GracePeriodNotElapsed` | 19 | `now < overdue_since + grace_period` (called too early), or the subscription is not overdue (`overdue_since` is `None`) |
+| `InvalidTimestamp` | 8 | `overdue_since + grace_period` overflows `u64` |
+
+#### Behaviour
+
+| Condition | Result |
+|-----------|--------|
+| Not overdue (`overdue_since == None`) | `Err(GracePeriodNotElapsed)` — subscription kept |
+| Overdue, `now < overdue_since + grace_period` | `Err(GracePeriodNotElapsed)` — subscription kept |
+| Overdue, `now >= overdue_since + grace_period` | `Ok` — subscription removed, `cancel` event with reason `grace_period_expired` (3) |
+
+> **Note:** `GracePeriodNotElapsed` (19) reuses the code formerly allocated to `GracePeriodActive`; the variant was renamed to reflect the `expire_subscription` semantics. The numeric code 19 is unchanged.
+
+---
+
 ### `get_subscription`
 
 Query active subscription details for a subscriber-merchant pair. This is a read-only call; it requires no authorization. As a side effect, it extends the entry's TTL if it is below the minimum threshold.
@@ -693,7 +733,7 @@ Return all subscription key hashes indexed for a given merchant. Off-chain tools
 
 ## Error code reference
 
-Complete table of all error codes with trigger conditions, affected entry points, and resolution guidance.
+Complete table of all 17 error codes with trigger conditions, affected entry points, and resolution guidance.
 
 | Code | Name | Entry points | Trigger condition | Resolution |
 |------|------|-------------|-------------------|------------|
@@ -708,33 +748,24 @@ Complete table of all error codes with trigger conditions, affected entry points
 | 9 | `AmountTooLarge` | `subscribe` | `amount > 10¹⁸` | Use an amount within the safe range |
 | 10 | `SelfSubscription` | `subscribe` | `subscriber == merchant` | Use distinct addresses for subscriber and merchant |
 | 11 | `InvalidTokenAddress` | `subscribe` | `token == contract address` | Use a valid SEP-41 token contract address |
-| 12 | `NotInitialized` | `migrate`, admin ops | `initialize` not yet called | Call `initialize(admin)` first |
-| 15 | `InsufficientAllowance` | `subscribe` | `strict == true` and allowance < `amount` | Approve a higher SEP-41 allowance first, or use `strict = false` |
-| 16 | `AlreadyMigrated` | `migrate` | Schema already at `CURRENT_SCHEMA_VERSION` | No action needed |
-| 17 | `NotAdmin` | `migrate` | Caller ≠ stored admin address | Use the admin identity set during `initialize` |
-| 18 | `AmountExceedsLimit` | `subscribe` | `amount > configured max_amount` | Use an amount within the operator-configured limit |
-| 19 | `GracePeriodActive` | `execute_payment` | Subscription is within an active grace period | Wait for the grace period to elapse |
-| 20 | `SubscriptionPaused` | `execute_payment`, `pause_subscription` | Subscription is paused or already paused | Resume subscription before collecting payment |
-| 21 | `SubscriptionAlreadyExists` | `transfer_subscription` | A subscription for `(subscriber, new_merchant)` already exists | Cancel the conflicting subscription before transferring |
-| 22 | `EmptyBatch` | `batch_execute_payment` | `subscribers` vector is empty | Pass at least one subscriber |
-| 23 | `BatchTooLarge` | `batch_execute_payment` | `subscribers.len() > 50` | Split into batches of ≤ 50 |
-| 24 | `SameMerchant` | `transfer_subscription` | `old_merchant == new_merchant` | Use a different destination merchant address |
-| 25 | `SubscriptionNotPaused` | `resume_subscription` | Subscription is not currently paused | Only call `resume_subscription` on a paused subscription |
-| 26 | `DuplicateExecution` | `execute_payment` | Same payment nonce was already executed | No action needed — payment was already processed |
+| 12 | `EmptyBatch` | `batch_execute_payment` | `subscribers` vector is empty | Pass at least one subscriber |
+| 13 | `BatchTooLarge` | `batch_execute_payment` | `subscribers.len() > 50` | Split into batches of ≤ 50 |
+| 14 | `InsufficientAllowance` | `subscribe` | `strict == true` and allowance < `amount` | Approve a higher SEP-41 allowance first, or use `strict = false` |
+| 15 | `AlreadyMigrated` | `migrate` | Schema already at `CURRENT_SCHEMA_VERSION` | No action needed |
+| 16 | `NotAdmin` | `migrate` | Caller ≠ stored admin address | Use the admin identity set during `initialize` |
+| 17 | `NotInitialized` | `migrate` | `initialize` not yet called | Call `initialize(admin)` first |
+| 19 | `GracePeriodNotElapsed` | `expire_subscription` | `now < overdue_since + grace_period` (called before the grace window elapsed), or not overdue | Wait until `overdue_since + grace_period` has passed |
 
 ### Errors returned per entry point
 
 | Entry point | Possible errors |
 |-------------|----------------|
-| `subscribe` | 1, 2, 3, 8, 9, 10, 11, 15, 18 |
-| `execute_payment` | 4, 5, 6, 7, 8, 19, 20, 26 |
-| `batch_execute_payment` | 6, 8, 22, 23 |
+| `subscribe` | 1, 2, 3, 8, 9, 10, 11, 14 |
+| `execute_payment` | 4, 5, 6, 7, 8 |
+| `batch_execute_payment` | 8, 12, 13 |
 | `cancel` | 4 |
-| `transfer_subscription` | 4, 21, 24 |
-| `pause_subscription` | 4, 20 |
-| `resume_subscription` | 4, 25 |
 | `get_subscription` | _(none — returns `Option`)_ |
-| `migrate` | 12, 16, 17 |
+| `migrate` | 15, 16, 17 |
 
 ---
 
