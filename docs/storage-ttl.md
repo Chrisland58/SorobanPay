@@ -590,11 +590,64 @@ There is no repository-supported, atomic tenant-erasure command. Treat a deletio
 
 If a deletion batch partially fails, stop further batches, retain the error and affected table/count, and do not claim completion. Use the approved rollback/restore plan against an isolated database first; request data-owner review before restoring or replaying any production data, since restoration can reintroduce records that were meant to be erased.
 
+## Emergency TTL Extension Procedure
+
+Use this procedure when a subscription's TTL is critically low (< 7 days remaining) and a regular `execute_payment` cannot be triggered in time — for example, when the subscriber's balance is insufficient but the merchant wants to keep the subscription record alive for a retry window.
+
+### When to use
+
+- TTL < 7 days remaining and the next scheduled payment is more than 7 days away.
+- The subscriber has temporarily insufficient balance but intends to pay.
+- You detect an at-risk entry via your monitoring and need to buy time without charging the subscriber.
+
+### Option 1 — Trigger a no-op payment simulation
+
+The cheapest way to extend TTL is to call `execute_payment` successfully. If the subscriber adds balance and a payment succeeds, `execute_payment` calls `extend_ttl` internally. Coordinate with the subscriber to top up their balance before the TTL window closes.
+
+### Option 2 — Subscriber re-subscribes (overwrite)
+
+A subscriber can call `subscribe` again with the same parameters. `subscribe` always writes to storage and calls `extend_ttl`, which resets the TTL to `MAX_TTL_LEDGERS` (~365 days) without changing the billing cycle (`next_payment` is preserved for existing subscriptions).
+
+```bash
+# Subscriber re-calls subscribe with identical parameters to refresh TTL
+stellar contract invoke \
+  --id $CONTRACT_ID \
+  --source $SUBSCRIBER_IDENTITY \
+  --network mainnet \
+  -- subscribe \
+  --subscriber $SUBSCRIBER_ADDRESS \
+  --merchant   $MERCHANT_ADDRESS \
+  --token      $TOKEN_ADDRESS \
+  --amount     $AMOUNT \
+  --interval   $INTERVAL \
+  --strict     false \
+  --grace-period 0
+```
+
+This is safe and idempotent for TTL purposes — calling `subscribe` on an existing entry updates the TTL without resetting `next_payment`.
+
+### Option 3 — Extend TTL via off-chain `restoreFootprint` (archived entries only)
+
+If the entry has already expired (TTL = 0) and been archived by the Soroban host, it can be restored using a `restoreFootprint` transaction. This is significantly more expensive than keeping the entry alive. See the [Operations Guide](./operations.md#3-programmatic-ttl-extension) for the full `restoreFootprint` procedure.
+
+> **Prevention is far cheaper than restoration.** Use Option 2 proactively when your monitoring alerts fire.
+
+### Emergency TTL extension checklist
+
+- [ ] Confirm TTL remaining via `getLedgerEntries` RPC call (see [Operations Guide](./operations.md#2-detecting-at-risk-entries)).
+- [ ] Determine whether the subscriber can add balance for an immediate payment (Option 1).
+- [ ] If not, coordinate with the subscriber to call `subscribe` again with the same parameters (Option 2).
+- [ ] Confirm TTL reset by re-querying `getLedgerEntries` after the transaction confirms.
+- [ ] Update your monitoring alert to increase the alert threshold for this subscription.
+
+---
+
 ## Related Documentation
 
-- [Soroban Events API](events.md) - Event indexing for TTL monitoring
-- [Contract API Documentation](contract-api.md) - Full contract interface reference
-- [Architecture Overview](architecture.md) - System design and integration patterns
+- [Soroban Events API](events.md) — Event indexing for TTL monitoring
+- [Contract API Documentation](contract-api.md) — Full contract interface reference
+- [Architecture Overview](architecture.md) — System design and integration patterns
+- [Operations Guide](./operations.md) — Detecting at-risk entries, programmatic TTL extension, alert thresholds, runbooks
 
 ---
 
