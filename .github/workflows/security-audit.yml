@@ -4,12 +4,16 @@
 # at 04:00 UTC.  Any HIGH or CRITICAL finding causes the job to fail AND opens
 # a GitHub issue so the team is notified without having to watch the Actions log.
 #
+# Duplicate-issue prevention: before creating a new issue the workflow searches
+# for an existing open issue with the same title. If one is found the workflow
+# adds a comment to that issue instead of opening a duplicate.
+#
 # Triggers:
 #   • Weekly schedule (Monday 04:00 UTC)
 #   • Manual dispatch for on-demand scans
 #
 # Permissions:
-#   • issues: write  — to create the vulnerability issue
+#   • issues: write  — to create / comment on the vulnerability issue
 #   • contents: read — standard checkout
 
 name: "[OPS-121] Weekly security audit"
@@ -66,31 +70,59 @@ jobs:
           name: npm-audit-frontend
           path: /tmp/npm-audit-frontend.json
 
-      - name: Open GitHub issue on HIGH/CRITICAL findings
+      - name: Open or update GitHub issue on HIGH/CRITICAL findings
         if: failure() && steps.npm_audit_frontend.outputs.exit_code != '0'
         uses: actions/github-script@v7
         with:
           script: |
-            const fs = require('fs');
-            let body = '## :rotating_light: npm audit — frontend vulnerabilities detected\n\n';
-            body += `**Workflow run:** ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\n\n`;
-            body += 'HIGH or CRITICAL advisories were found in `frontend/` dependencies.\n\n';
-            body += '### Next steps\n';
-            body += '1. Run `npm audit` locally in `frontend/` to see the full report.\n';
-            body += '2. Run `npm audit fix` for automatically fixable issues.\n';
-            body += '3. For issues requiring manual intervention, follow the advisory guidance or pin to a safe version.\n';
-            body += '4. Close this issue once all HIGH/CRITICAL advisories are resolved.\n\n';
-            body += '_Opened automatically by the [OPS-121 security audit workflow](' +
-              '${{ github.server_url }}/${{ github.repository }}/actions/workflows/security-audit.yml' +
-              ')._\n';
+            const ISSUE_TITLE = '[OPS-121] HIGH/CRITICAL npm vulnerabilities detected in frontend';
 
-            await github.rest.issues.create({
+            // Search for an existing open issue with this exact title
+            const { data: existingIssues } = await github.rest.issues.listForRepo({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              title: '[OPS-121] HIGH/CRITICAL npm vulnerabilities detected in frontend',
-              body,
-              labels: ['security', 'dependencies', 'frontend'],
+              state: 'open',
+              labels: 'security',
+              per_page: 50,
             });
+
+            const existing = existingIssues.find(i => i.title === ISSUE_TITLE);
+
+            const runUrl = `${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}`;
+            const workflowUrl = `${{ github.server_url }}/${{ github.repository }}/actions/workflows/security-audit.yml`;
+
+            if (existing) {
+              // Add a comment to the existing issue instead of opening a duplicate
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: existing.number,
+                body: `## :rotating_light: Re-scan on ${new Date().toISOString().slice(0,10)} — vulnerabilities still present\n\n` +
+                      `**Workflow run:** ${runUrl}\n\n` +
+                      `HIGH or CRITICAL advisories were **still present** in \`frontend/\` dependencies as of this run.\n\n` +
+                      `_Comment added automatically by the [OPS-121 security audit workflow](${workflowUrl})._`,
+              });
+              console.log(`Commented on existing issue #${existing.number}`);
+            } else {
+              // No existing open issue — create a new one
+              let body = '## :rotating_light: npm audit — frontend vulnerabilities detected\n\n';
+              body += `**Workflow run:** ${runUrl}\n\n`;
+              body += 'HIGH or CRITICAL advisories were found in `frontend/` dependencies.\n\n';
+              body += '### Next steps\n';
+              body += '1. Run `npm audit` locally in `frontend/` to see the full report.\n';
+              body += '2. Run `npm audit fix` for automatically fixable issues.\n';
+              body += '3. For issues requiring manual intervention, follow the advisory guidance or pin to a safe version.\n';
+              body += '4. Close this issue once all HIGH/CRITICAL advisories are resolved.\n\n';
+              body += `_Opened automatically by the [OPS-121 security audit workflow](${workflowUrl})._\n`;
+
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title: ISSUE_TITLE,
+                body,
+                labels: ['security', 'dependencies', 'frontend'],
+              });
+            }
 
   # ── npm audit — backend ─────────────────────────────────────────────────
   npm-audit-backend:
@@ -129,30 +161,56 @@ jobs:
           name: npm-audit-backend
           path: /tmp/npm-audit-backend.json
 
-      - name: Open GitHub issue on HIGH/CRITICAL findings
+      - name: Open or update GitHub issue on HIGH/CRITICAL findings
         if: failure() && steps.npm_audit_backend.outputs.exit_code != '0'
         uses: actions/github-script@v7
         with:
           script: |
-            let body = '## :rotating_light: npm audit — backend vulnerabilities detected\n\n';
-            body += `**Workflow run:** ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\n\n`;
-            body += 'HIGH or CRITICAL advisories were found in `backend/` dependencies.\n\n';
-            body += '### Next steps\n';
-            body += '1. Run `npm audit` locally in `backend/` to see the full report.\n';
-            body += '2. Run `npm audit fix` for automatically fixable issues.\n';
-            body += '3. For issues requiring manual intervention, follow the advisory guidance or pin to a safe version.\n';
-            body += '4. Close this issue once all HIGH/CRITICAL advisories are resolved.\n\n';
-            body += '_Opened automatically by the [OPS-121 security audit workflow](' +
-              '${{ github.server_url }}/${{ github.repository }}/actions/workflows/security-audit.yml' +
-              ')._\n';
+            const ISSUE_TITLE = '[OPS-121] HIGH/CRITICAL npm vulnerabilities detected in backend';
 
-            await github.rest.issues.create({
+            const { data: existingIssues } = await github.rest.issues.listForRepo({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              title: '[OPS-121] HIGH/CRITICAL npm vulnerabilities detected in backend',
-              body,
-              labels: ['security', 'dependencies', 'backend'],
+              state: 'open',
+              labels: 'security',
+              per_page: 50,
             });
+
+            const existing = existingIssues.find(i => i.title === ISSUE_TITLE);
+
+            const runUrl = `${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}`;
+            const workflowUrl = `${{ github.server_url }}/${{ github.repository }}/actions/workflows/security-audit.yml`;
+
+            if (existing) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: existing.number,
+                body: `## :rotating_light: Re-scan on ${new Date().toISOString().slice(0,10)} — vulnerabilities still present\n\n` +
+                      `**Workflow run:** ${runUrl}\n\n` +
+                      `HIGH or CRITICAL advisories were **still present** in \`backend/\` dependencies as of this run.\n\n` +
+                      `_Comment added automatically by the [OPS-121 security audit workflow](${workflowUrl})._`,
+              });
+              console.log(`Commented on existing issue #${existing.number}`);
+            } else {
+              let body = '## :rotating_light: npm audit — backend vulnerabilities detected\n\n';
+              body += `**Workflow run:** ${runUrl}\n\n`;
+              body += 'HIGH or CRITICAL advisories were found in `backend/` dependencies.\n\n';
+              body += '### Next steps\n';
+              body += '1. Run `npm audit` locally in `backend/` to see the full report.\n';
+              body += '2. Run `npm audit fix` for automatically fixable issues.\n';
+              body += '3. For issues requiring manual intervention, follow the advisory guidance or pin to a safe version.\n';
+              body += '4. Close this issue once all HIGH/CRITICAL advisories are resolved.\n\n';
+              body += `_Opened automatically by the [OPS-121 security audit workflow](${workflowUrl})._\n`;
+
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title: ISSUE_TITLE,
+                body,
+                labels: ['security', 'dependencies', 'backend'],
+              });
+            }
 
   # ── cargo audit — smart contract ────────────────────────────────────────
   cargo-audit:
@@ -192,7 +250,7 @@ jobs:
           name: cargo-audit-report
           path: /tmp/cargo-audit.json
 
-      - name: Open GitHub issue on vulnerabilities found
+      - name: Open or update GitHub issue on vulnerabilities found
         if: failure() && steps.cargo_audit.outputs.exit_code != '0'
         uses: actions/github-script@v7
         with:
@@ -209,13 +267,49 @@ jobs:
               '${{ github.server_url }}/${{ github.repository }}/actions/workflows/security-audit.yml' +
               ')._\n';
 
-            await github.rest.issues.create({
+            const { data: existingIssues } = await github.rest.issues.listForRepo({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              title: '[OPS-121] Security advisories detected in Cargo dependencies (contract)',
-              body,
-              labels: ['security', 'dependencies', 'contract'],
+              state: 'open',
+              labels: 'security',
+              per_page: 50,
             });
+
+            const existing = existingIssues.find(i => i.title === ISSUE_TITLE);
+
+            const runUrl = `${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}`;
+            const workflowUrl = `${{ github.server_url }}/${{ github.repository }}/actions/workflows/security-audit.yml`;
+
+            if (existing) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: existing.number,
+                body: `## :rotating_light: Re-scan on ${new Date().toISOString().slice(0,10)} — advisories still present\n\n` +
+                      `**Workflow run:** ${runUrl}\n\n` +
+                      `Security advisories were **still present** in \`contracts/subscription/\` Cargo dependencies as of this run.\n\n` +
+                      `_Comment added automatically by the [OPS-121 security audit workflow](${workflowUrl})._`,
+              });
+              console.log(`Commented on existing issue #${existing.number}`);
+            } else {
+              let body = '## :rotating_light: cargo audit — contract vulnerabilities detected\n\n';
+              body += `**Workflow run:** ${runUrl}\n\n`;
+              body += 'Security advisories were found in `contracts/subscription/` Cargo dependencies.\n\n';
+              body += '### Next steps\n';
+              body += '1. Run `cargo audit --manifest-path contracts/subscription/Cargo.toml` locally.\n';
+              body += '2. Update the affected crates in `Cargo.toml` / `Cargo.lock` to patched versions.\n';
+              body += '3. If no fix is available, add an `[advisories]` ignore entry in `audit.toml` with a justification.\n';
+              body += '4. Close this issue once all advisories are resolved or acknowledged.\n\n';
+              body += `_Opened automatically by the [OPS-121 security audit workflow](${workflowUrl})._\n`;
+
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title: ISSUE_TITLE,
+                body,
+                labels: ['security', 'dependencies', 'contract'],
+              });
+            }
 
   # ── Summary ──────────────────────────────────────────────────────────────
   # A lightweight fan-in job so the overall workflow status is easy to read
