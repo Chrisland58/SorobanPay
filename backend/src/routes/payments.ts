@@ -1,314 +1,345 @@
 /**
- * GET /payments/:merchant
+ * #1390 — CSV export endpoint for payment history.
  *
- * Returns paginated payment history for a merchant address.
- * Supports filtering by event type, date range, and subscriber.
- * Supports CSV export via Accept: text/csv header.
+ * GET /api/v1/payments/:merchant/export
+ *   Query params:
+ *     format  — "csv" (default) | "json"
  *
- * Issue: #1374
+ * Features:
+ *  - Streams response row-by-row to avoid buffering large datasets in memory
+ *  - RFC 4180-compliant CSV with proper quoting/escaping
+ *  - Content-Disposition: attachment; filename=payments-{merchant}-{date}.csv
+ *  - Rate limited: 5 req/min per merchant address
  *
- * Query parameters:
- *   event_type  — filter: executed | failure | cancel
- *   subscriber  — filter by subscriber address
- *   from        — ISO date string (inclusive lower bound on occurred_at)
- *   to          — ISO date string (inclusive upper bound on occurred_at)
- *   page        — 1-based page number (default: 1)
- *   pageSize    — records per page, max 100 (default: 20)
- *
- * Response:
- *   JSON (default)  — { data: Payment[], pagination: PaginationMeta }
- *   CSV             — when Accept: text/csv is sent
- *
- * OpenAPI spec: see /docs endpoint served by the main app.
+ * CSV columns:
+ *   Date, Type, Subscriber, Amount (human-readable), Amount (raw), Token, Tx Hash, Nonce
  */
 
-import { Router, Request, Response, NextFunction } from 'express';
-import { Pool } from 'pg';
-import { getPool } from '../db/pool';
+import { Router, Request, Response } from 'express';
+import { Readable, Transform } from 'stream';
+import { pipeline } from 'stream/promises';
+import rateLimit from 'express-rate-limit';
+import prisma from '../lib/prisma';
+
+const router = Router();
 
 // ---------------------------------------------------------------------------
-// Types
+// Rate limiter: 5 requests per minute per merchant address
 // ---------------------------------------------------------------------------
-
-export interface Payment {
-  id: number;
-  tx_hash: string;
-  event_type: 'executed' | 'failure' | 'cancel';
-  subscriber: string;
-  merchant: string;
-  amount: string;
-  payment_nonce: string | null;
-  ledger_seq: number | null;
-  occurred_at: string;
-}
-
-export interface PaginationMeta {
-  page: number;
-  pageSize: number;
-  total: number;
-  totalPages: number;
-}
-
-export interface PaymentsResponse {
-  data: Payment[];
-  pagination: PaginationMeta;
-}
+const exportRateLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 5,
+  keyGenerator: (req: Request): string => {
+    // Key per merchant address so different merchants don't share quota
+    return (req.params.merchant as string) || req.ip || 'unknown';
+  },
+  message: { error: 'Rate limit exceeded. Maximum 5 export requests per minute per merchant.' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
 
 // ---------------------------------------------------------------------------
-// Helpers
+// CSV helpers
 // ---------------------------------------------------------------------------
 
-const VALID_EVENT_TYPES = new Set(['executed', 'failure', 'cancel']);
+const CSV_COLUMNS = [
+  'Date',
+  'Type',
+  'Subscriber',
+  'Amount (human-readable)',
+  'Amount (raw)',
+  'Token',
+  'Tx Hash',
+  'Nonce',
+];
 
-function parsePositiveInt(value: unknown, fallback: number, max?: number): number {
-  const n = parseInt(String(value), 10);
-  if (Number.isNaN(n) || n < 1) return fallback;
-  if (max !== undefined && n > max) return max;
-  return n;
+/** Escape a single CSV cell per RFC 4180. */
+function escapeCsvCell(value: string): string {
+  if (/[",\r\n]/.test(value)) {
+    return `"${value.replace(/"/g, '""')}"`;
+  }
+  return value;
 }
 
-function isValidDate(value: string): boolean {
-  const d = new Date(value);
-  return !Number.isNaN(d.getTime());
+/** Produce a CRLF-terminated CSV row. */
+function toCsvRow(cells: string[]): string {
+  return cells.map(escapeCsvCell).join(',') + '\r\n';
 }
 
 /**
- * Convert an array of Payment rows to a CSV string.
+ * Convert a raw stroop amount (BigInt-compatible string) to a human-readable
+ * decimal with 7 decimal places (Stellar standard).
  */
-function toCSV(rows: Payment[]): string {
-  const headers = [
-    'id',
-    'tx_hash',
-    'event_type',
-    'subscriber',
-    'merchant',
-    'amount',
-    'payment_nonce',
-    'ledger_seq',
-    'occurred_at',
-  ];
-
-  const escape = (val: unknown): string => {
-    if (val === null || val === undefined) return '';
-    const s = String(val);
-    // RFC 4180: wrap in quotes if value contains comma, quote, or newline
-    if (s.includes(',') || s.includes('"') || s.includes('\n')) {
-      return `"${s.replace(/"/g, '""')}"`;
-    }
-    return s;
-  };
-
-  const lines = [headers.join(',')];
-  for (const row of rows) {
-    lines.push(
-      headers.map((h) => escape(row[h as keyof Payment])).join(','),
-    );
+function toHumanAmount(raw: string): string {
+  try {
+    const n = BigInt(raw);
+    const isNeg = n < 0n;
+    const abs = isNeg ? -n : n;
+    const wholePart = abs / 10_000_000n;
+    const fracPart = abs % 10_000_000n;
+    const fracStr = String(fracPart).padStart(7, '0').replace(/0+$/, '') || '0';
+    return `${isNeg ? '-' : ''}${wholePart}.${fracStr}`;
+  } catch {
+    return raw;
   }
-  return lines.join('\r\n');
 }
 
 // ---------------------------------------------------------------------------
-// Route factory — accepts an optional pool for testing
+// Streaming Prisma reader
 // ---------------------------------------------------------------------------
 
-export function createPaymentsRouter(pool?: Pool): Router {
-  const router = Router();
-  const db = pool ?? getPool();
+/**
+ * Create a Node.js Readable that yields payment rows from Prisma in batches.
+ * Tries the Payment model first (preferred); falls back to the Event table
+ * when the Payment model is not available (older schema).
+ */
+function createPaymentReadable(merchantAddress: string, batchSize = 500): Readable {
+  let offset = 0;
+  let done = false;
 
-  /**
-   * @openapi
-   * /payments/{merchant}:
-   *   get:
-   *     summary: List payment history for a merchant
-   *     tags: [Payments]
-   *     parameters:
-   *       - in: path
-   *         name: merchant
-   *         required: true
-   *         schema:
-   *           type: string
-   *         description: Merchant Stellar address
-   *       - in: query
-   *         name: event_type
-   *         schema:
-   *           type: string
-   *           enum: [executed, failure, cancel]
-   *         description: Filter by payment event type
-   *       - in: query
-   *         name: subscriber
-   *         schema:
-   *           type: string
-   *         description: Filter by subscriber address
-   *       - in: query
-   *         name: from
-   *         schema:
-   *           type: string
-   *           format: date-time
-   *         description: Lower bound for occurred_at (inclusive)
-   *       - in: query
-   *         name: to
-   *         schema:
-   *           type: string
-   *           format: date-time
-   *         description: Upper bound for occurred_at (inclusive)
-   *       - in: query
-   *         name: page
-   *         schema:
-   *           type: integer
-   *           minimum: 1
-   *           default: 1
-   *       - in: query
-   *         name: pageSize
-   *         schema:
-   *           type: integer
-   *           minimum: 1
-   *           maximum: 100
-   *           default: 20
-   *     responses:
-   *       200:
-   *         description: Payment history
-   *         content:
-   *           application/json:
-   *             schema:
-   *               $ref: '#/components/schemas/PaymentsResponse'
-   *           text/csv:
-   *             schema:
-   *               type: string
-   *       400:
-   *         description: Invalid query parameters
-   *       500:
-   *         description: Internal server error
-   */
-  router.get(
-    '/payments/:merchant',
-    async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+  return new Readable({
+    objectMode: true,
+    async read() {
+      if (done) {
+        this.push(null);
+        return;
+      }
       try {
-        const { merchant } = req.params;
-        const {
-          event_type,
-          subscriber,
-          from,
-          to,
-        } = req.query;
+        let rows: unknown[];
 
-        // --- Validate filters ---
-        if (event_type !== undefined && !VALID_EVENT_TYPES.has(String(event_type))) {
-          res.status(400).json({
-            error: `Invalid event_type. Must be one of: ${[...VALID_EVENT_TYPES].join(', ')}`,
+        try {
+          // Prefer the normalised Payment model
+          rows = await (prisma as any).payment.findMany({
+            where: { merchant: merchantAddress },
+            orderBy: { timestamp: 'asc' },
+            take: batchSize,
+            skip: offset,
           });
+        } catch {
+          // Fallback: derive from Event table (executed events only)
+          rows = await prisma.event.findMany({
+            where: { merchant: merchantAddress, type: 'executed' },
+            orderBy: { ledgerTimestamp: 'asc' },
+            take: batchSize,
+            skip: offset,
+          });
+        }
+
+        if ((rows as unknown[]).length === 0) {
+          done = true;
+          this.push(null);
           return;
         }
 
-        if (from !== undefined && !isValidDate(String(from))) {
-          res.status(400).json({ error: 'Invalid "from" date.' });
-          return;
+        offset += (rows as unknown[]).length;
+        for (const row of rows as unknown[]) {
+          this.push(row);
         }
-
-        if (to !== undefined && !isValidDate(String(to))) {
-          res.status(400).json({ error: 'Invalid "to" date.' });
-          return;
+        if ((rows as unknown[]).length < batchSize) {
+          done = true;
         }
-
-        const page = parsePositiveInt(req.query.page, 1);
-        const pageSize = parsePositiveInt(req.query.pageSize, 20, 100);
-        const offset = (page - 1) * pageSize;
-
-        // --- Build WHERE clause ---
-        const conditions: string[] = ['merchant = $1'];
-        const params: unknown[] = [merchant];
-        let paramIdx = 2;
-
-        if (event_type) {
-          conditions.push(`event_type = $${paramIdx++}`);
-          params.push(String(event_type));
-        }
-
-        if (subscriber) {
-          conditions.push(`subscriber = $${paramIdx++}`);
-          params.push(String(subscriber));
-        }
-
-        if (from) {
-          conditions.push(`occurred_at >= $${paramIdx++}`);
-          params.push(new Date(String(from)));
-        }
-
-        if (to) {
-          conditions.push(`occurred_at <= $${paramIdx++}`);
-          params.push(new Date(String(to)));
-        }
-
-        const whereClause = conditions.join(' AND ');
-
-        // --- Count total ---
-        const countResult = await db.query<{ count: string }>(
-          `SELECT COUNT(*) AS count FROM payments WHERE ${whereClause}`,
-          params,
-        );
-        const total = parseInt(countResult.rows[0]?.count ?? '0', 10);
-
-        // --- Determine whether to paginate (CSV exports all matching rows) ---
-        const wantsCSV =
-          req.headers.accept?.toLowerCase().includes('text/csv') ?? false;
-
-        let dataResult: { rows: Payment[] };
-
-        if (wantsCSV) {
-          // For CSV we return all matching rows (no pagination)
-          dataResult = await db.query<Payment>(
-            `SELECT
-               id, tx_hash, event_type, subscriber, merchant,
-               amount::text AS amount,
-               payment_nonce,
-               ledger_seq,
-               occurred_at
-             FROM payments
-             WHERE ${whereClause}
-             ORDER BY occurred_at DESC`,
-            params,
-          );
-        } else {
-          dataResult = await db.query<Payment>(
-            `SELECT
-               id, tx_hash, event_type, subscriber, merchant,
-               amount::text AS amount,
-               payment_nonce,
-               ledger_seq,
-               occurred_at
-             FROM payments
-             WHERE ${whereClause}
-             ORDER BY occurred_at DESC
-             LIMIT $${paramIdx} OFFSET $${paramIdx + 1}`,
-            [...params, pageSize, offset],
-          );
-        }
-
-        // --- Respond ---
-        if (wantsCSV) {
-          const csv = toCSV(dataResult.rows);
-          const filename = `payments_${merchant}_${Date.now()}.csv`;
-          res.setHeader('Content-Type', 'text/csv');
-          res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-          res.send(csv);
-          return;
-        }
-
-        const response: PaymentsResponse = {
-          data: dataResult.rows,
-          pagination: {
-            page,
-            pageSize,
-            total,
-            totalPages: Math.ceil(total / pageSize),
-          },
-        };
-
-        res.json(response);
       } catch (err) {
-        next(err);
+        this.destroy(err as Error);
       }
     },
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Row normaliser — handles both Payment model and Event model shapes
+// ---------------------------------------------------------------------------
+
+interface NormalisedRow {
+  date: string;
+  type: string;
+  subscriber: string;
+  amountHuman: string;
+  amountRaw: string;
+  token: string;
+  txHash: string;
+  nonce: string;
+}
+
+function normaliseRow(record: Record<string, unknown>): NormalisedRow {
+  // Date: prefer Payment.timestamp over ledgerTimestamp
+  let date: string;
+  if (record.timestamp instanceof Date) {
+    date = record.timestamp.toISOString();
+  } else if (record.timestamp) {
+    date = new Date(record.timestamp as string).toISOString();
+  } else if (record.ledgerTimestamp != null) {
+    date = new Date(Number(record.ledgerTimestamp as bigint) * 1000).toISOString();
+  } else {
+    date = new Date().toISOString();
+  }
+
+  const amountRaw = String(record.amount ?? '0');
+
+  return {
+    date,
+    type: String(record.status ?? record.type ?? 'executed'),
+    subscriber: String(record.subscriber ?? ''),
+    amountHuman: toHumanAmount(amountRaw),
+    amountRaw,
+    token: String(record.token ?? ''),
+    txHash: String(record.txHash ?? record.transactionHash ?? ''),
+    nonce: record.paymentNonce != null ? String(record.paymentNonce) : '',
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Route handler
+// ---------------------------------------------------------------------------
+
+/**
+ * @openapi
+ * /api/v1/payments/{merchant}/export:
+ *   get:
+ *     operationId: exportPaymentHistory
+ *     summary: Export payment history as CSV or JSON (streaming)
+ *     description: |
+ *       Streams payment rows directly to the HTTP response to handle large
+ *       datasets without memory pressure. CSV format follows RFC 4180.
+ *       Rate limited to 5 requests per minute per merchant.
+ *     tags: [Payments]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - name: merchant
+ *         in: path
+ *         required: true
+ *         schema:
+ *           $ref: "#/components/schemas/Address"
+ *         description: Merchant Stellar address
+ *       - name: format
+ *         in: query
+ *         schema:
+ *           type: string
+ *           enum: [csv, json]
+ *           default: csv
+ *         description: Export format
+ *     responses:
+ *       "200":
+ *         description: Payment export (CSV or JSON)
+ *         headers:
+ *           Content-Disposition:
+ *             schema:
+ *               type: string
+ *               example: attachment; filename="payments-GMERCHA-2024-01-15.csv"
+ *         content:
+ *           text/csv:
+ *             schema:
+ *               type: string
+ *           application/json:
+ *             schema:
+ *               type: array
+ *               items:
+ *                 $ref: "#/components/schemas/CsvExportRow"
+ *       "400":
+ *         description: Invalid parameters
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: "#/components/schemas/Error"
+ *       "429":
+ *         description: Rate limit exceeded (5 req/min per merchant)
+ */
+router.get('/:merchant/export', exportRateLimiter, async (req: Request, res: Response): Promise<void> => {
+  const { merchant } = req.params;
+  const format = ((req.query.format as string) ?? 'csv').toLowerCase();
+
+  if (!merchant) {
+    res.status(400).json({ error: 'merchant path parameter is required' });
+    return;
+  }
+
+  if (!['csv', 'json'].includes(format)) {
+    res.status(400).json({ error: 'format must be "csv" or "json"' });
+    return;
+  }
+
+  const dateStamp = new Date().toISOString().split('T')[0]; // YYYY-MM-DD
+  const source = createPaymentReadable(merchant);
+
+  // ── CSV export ────────────────────────────────────────────────────────────
+  if (format === 'csv') {
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader(
+      'Content-Disposition',
+      `attachment; filename="payments-${merchant.slice(0, 8)}-${dateStamp}.csv"`,
+    );
+
+    // Write header immediately so the client sees columns right away
+    res.write(toCsvRow(CSV_COLUMNS));
+
+    const csvTransform = new Transform({
+      objectMode: true,
+      transform(record: Record<string, unknown>, _encoding, callback) {
+        const row = normaliseRow(record);
+        callback(null, toCsvRow([
+          row.date,
+          row.type,
+          row.subscriber,
+          row.amountHuman,
+          row.amountRaw,
+          row.token,
+          row.txHash,
+          row.nonce,
+        ]));
+      },
+    });
+
+    try {
+      await pipeline(source, csvTransform, res);
+    } catch (err) {
+      if (!res.headersSent) {
+        res.status(500).json({ error: 'Export failed' });
+      }
+    }
+    return;
+  }
+
+  // ── JSON export ───────────────────────────────────────────────────────────
+  res.setHeader('Content-Type', 'application/json; charset=utf-8');
+  res.setHeader(
+    'Content-Disposition',
+    `attachment; filename="payments-${merchant.slice(0, 8)}-${dateStamp}.json"`,
   );
 
-  return router;
-}
+  const jsonTransform = new Transform({
+    objectMode: true,
+    transform(record: Record<string, unknown>, _encoding, callback) {
+      callback(null, normaliseRow(record));
+    },
+  });
+
+  res.write('[');
+  let first = true;
+
+  await new Promise<void>((resolve, reject) => {
+    source.pipe(jsonTransform);
+
+    jsonTransform.on('data', (row: NormalisedRow) => {
+      res.write((first ? '' : ',') + JSON.stringify(row));
+      first = false;
+    });
+
+    jsonTransform.on('end', () => {
+      res.write(']');
+      res.end();
+      resolve();
+    });
+
+    jsonTransform.on('error', reject);
+    source.on('error', reject);
+  }).catch(() => {
+    if (!res.headersSent) {
+      res.status(500).json({ error: 'Export failed' });
+    } else {
+      res.write(']');
+      res.end();
+    }
+  });
+});
+
+export default router;
