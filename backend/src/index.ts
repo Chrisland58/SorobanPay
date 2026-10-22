@@ -33,6 +33,7 @@ import adminRouter from './routes/admin';
 import cancellationAuditRouter from './routes/cancellationAudit';  // #1382
 import authRouter from './routes/auth';                        // BE-55: merchant auth
 import { buildHealthRouter } from './routes/health';
+import docsRouter from './routes/docs';                        // #1389: Swagger UI
 import { requireMerchant } from './middleware/merchantAuth';  // BE-55: JWT guard
 import { reconcile } from './services/reconciler';
 import { PrismaSubscriptionDB, fetchChainEventsFromDB } from './services/reconciler';
@@ -204,6 +205,7 @@ app.use('/api/v1/admin',         adminRouter);          // BE-75: admin dashboar
 app.use('/api/v1/admin/cancellations', cancellationAuditRouter); // #1382: cancellation audit trail
 app.use('/api/v1/analytics',     requireMerchant, analyticsRouter);  // FE-50: revenue analytics
 app.use('/api/v1/reports',       requireMerchant, reportsRouter);    // BE-58 / #798: payment reports export
+app.use('/docs',                 docsRouter);                          // #1389: Swagger UI
 
 // ─── Prometheus metrics (unauthenticated — restrict to internal network) ─────
 app.get('/metrics', (_req, res) => {

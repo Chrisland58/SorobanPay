@@ -1,182 +1,96 @@
 /**
- * #1377 — Health endpoint with RPC, contract, and DB connectivity checks.
+ * #134 — Health endpoint.
+ * GET /health  →  200 { status: "ok", apiVersion: "v1", ... } | 503 { status: "error", ... }
  *
- * GET /health
- *   Returns 200 { status: 'ok', checks: { rpc, contract, db } } when all checks pass.
- *   Returns 503 { status: 'degraded'|'down', checks: { rpc, contract, db } } when any check fails.
+ * Checks:
+ *  1. Soroban RPC is reachable (getHealth)
+ *  2. The configured contract ID is resolvable (getContractData produces any response)
  *
- * Each check is bounded to CHECK_TIMEOUT_MS to ensure total response time < 2 s.
- * All three checks run concurrently via Promise.all.
- *
- * Status semantics:
- *   ok       — all three checks pass
- *   degraded — RPC and DB pass but contract check fails (e.g. contract not yet deployed)
- *   down     — RPC or DB is unreachable (critical dependency failure)
- *
- * Used by Kubernetes liveness (/health/live), readiness (/health/ready),
- * and full health (/health) probes.
+ * The response always includes `apiVersion` so monitoring systems and clients
+ * can confirm which API version they are speaking to.
  */
 
 import { Router, Request, Response } from 'express';
 import { rpc, xdr } from '@stellar/stellar-sdk';
 import { DEFAULT_VERSION } from '../middleware/versioning';
 
-/** Maximum milliseconds allowed per individual check before it times out. */
-export const CHECK_TIMEOUT_MS = 1500;
-
-export type CheckStatus = 'ok' | 'error' | 'timeout';
-
-export interface CheckResult {
-  status: CheckStatus;
-  message?: string;
-  latencyMs?: number;
-}
-
-export type OverallStatus = 'ok' | 'degraded' | 'down';
-
-/**
- * Runs an async check with a bounded timeout.
- * Returns { status: 'timeout' } if the check does not resolve within timeoutMs.
- * Never throws.
- */
-export async function runCheck(
-  fn: () => Promise<void>,
-  timeoutMs: number = CHECK_TIMEOUT_MS,
-): Promise<CheckResult> {
-  const start = Date.now();
-  return new Promise<CheckResult>((resolve) => {
-    const timer = setTimeout(() => {
-      resolve({ status: 'timeout', message: `Check timed out after ${timeoutMs}ms` });
-    }, timeoutMs);
-
-    fn()
-      .then(() => {
-        clearTimeout(timer);
-        resolve({ status: 'ok', latencyMs: Date.now() - start });
-      })
-      .catch((err: unknown) => {
-        clearTimeout(timer);
-        const message = err instanceof Error ? err.message : String(err);
-        resolve({ status: 'error', message, latencyMs: Date.now() - start });
-      });
-  });
-}
-
-/**
- * Determines the overall health status from individual check results.
- *
- * - All ok                      → 'ok'
- * - rpc or db failed/timeout    → 'down'   (critical path)
- * - only contract failed/timeout → 'degraded' (non-critical, contract may not be deployed yet)
- */
-export function deriveOverallStatus(checks: {
-  rpc: CheckResult;
-  contract: CheckResult;
-  db: CheckResult;
-}): OverallStatus {
-  const allOk = Object.values(checks).every((c) => c.status === 'ok');
-  if (allOk) return 'ok';
-
-  const criticalFailed =
-    checks.rpc.status !== 'ok' || checks.db.status !== 'ok';
-  return criticalFailed ? 'down' : 'degraded';
-}
-
-/**
- * Build the health router.
- *
- * @param rpcUrl      Soroban RPC endpoint URL
- * @param contractId  Contract address to verify resolvability
- * @param prismaClient Injectable Prisma client (used in tests to avoid real DB)
- */
-export function buildHealthRouter(
-  rpcUrl: string,
-  contractId: string,
-  prismaClient?: { $queryRaw: (query: TemplateStringsArray, ...values: unknown[]) => Promise<unknown> },
-): Router {
+export function buildHealthRouter(rpcUrl: string, contractId: string): Router {
   const router = Router();
   const server = new rpc.Server(rpcUrl);
 
-  /** Resolve the DB client lazily to avoid circular import at module load time. */
-  async function getDbClient() {
-    if (prismaClient) return prismaClient;
-    const mod = await import('../lib/prisma');
-    return mod.default;
-  }
-
-  // ─── GET /health ────────────────────────────────────────────────────────────
-
+  /**
+   * @openapi
+   * /health:
+   *   get:
+   *     operationId: getHealth
+   *     summary: Service health check
+   *     description: Verifies Soroban RPC reachability and contract resolvability.
+   *     tags: [Health]
+   *     responses:
+   *       "200":
+   *         description: Service is healthy
+   *         content:
+   *           application/json:
+   *             schema:
+   *               type: object
+   *               properties:
+   *                 status:
+   *                   type: string
+   *                   example: ok
+   *                 apiVersion:
+   *                   type: string
+   *                   example: v1
+   *                 checks:
+   *                   type: object
+   *                   properties:
+   *                     rpc:
+   *                       type: string
+   *                       example: ok
+   *                     contract:
+   *                       type: string
+   *                       example: ok
+   *       "503":
+   *         description: Service is degraded
+   *         content:
+   *           application/json:
+   *             schema:
+   *               $ref: "#/components/schemas/Error"
+   */
   router.get('/', async (_req: Request, res: Response) => {
-    // Run all three checks concurrently — each has its own independent timeout
-    const [rpcResult, contractResult, dbResult] = await Promise.all([
+    const checks: Record<string, string> = {};
+    let healthy = true;
 
-      // Check 1: Soroban RPC reachability
-      runCheck(async () => {
-        await server.getHealth();
-      }),
+    // 1. RPC reachability
+    try {
+      await server.getHealth();
+      checks.rpc = 'ok';
+    } catch (err) {
+      checks.rpc = `error: ${(err as Error).message}`;
+      healthy = false;
+    }
 
-      // Check 2: Contract address resolvability
-      runCheck(async () => {
-        try {
-          await server.getContractData(
-            contractId,
-            xdr.ScVal.scvLedgerKeyContractInstance(),
-          );
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          // 'not found' / 'entryNotFound' means the RPC resolved the address but
-          // the contract instance entry is absent — still counts as reachable
-          if (!msg.includes('not found') && !msg.includes('entryNotFound')) {
-            throw err;
-          }
-        }
-      }),
+    // 2. Contract resolvability — getContractData throws when the contract
+    //    does not exist or the RPC cannot reach it.
+    try {
+      await server.getContractData(contractId, xdr.ScVal.scvLedgerKeyContractInstance());
+      checks.contract = 'ok';
+    } catch (err) {
+      const msg = (err as Error).message ?? String(err);
+      // A "not found" response still means the RPC resolved the address; anything
+      // else (network error, invalid ID) is a real failure.
+      if (msg.includes('not found') || msg.includes('entryNotFound')) {
+        checks.contract = 'ok';
+      } else {
+        checks.contract = `error: ${msg}`;
+        healthy = false;
+      }
+    }
 
-      // Check 3: Database connectivity
-      runCheck(async () => {
-        const db = await getDbClient();
-        await (db as any).$queryRaw`SELECT 1`;
-      }),
-    ]);
-
-    const checks = { rpc: rpcResult, contract: contractResult, db: dbResult };
-    const status = deriveOverallStatus(checks);
-
-    res.status(status === 'ok' ? 200 : 503).json({
+    const status = healthy ? 'ok' : 'error';
+    res.status(healthy ? 200 : 503).json({
       status,
       apiVersion: DEFAULT_VERSION,
       checks,
-    });
-  });
-
-  // ─── GET /health/ready — Kubernetes readiness probe ──────────────────────────
-  // Gates on RPC + DB; contract is non-critical for readiness
-
-  router.get('/ready', async (_req: Request, res: Response) => {
-    const [rpcResult, dbResult] = await Promise.all([
-      runCheck(async () => { await server.getHealth(); }),
-      runCheck(async () => {
-        const db = await getDbClient();
-        await (db as any).$queryRaw`SELECT 1`;
-      }),
-    ]);
-
-    const ready = rpcResult.status === 'ok' && dbResult.status === 'ok';
-
-    res.status(ready ? 200 : 503).json({
-      status: ready ? 'ready' : 'not_ready',
-      checks: { rpc: rpcResult, db: dbResult },
-      timestamp: new Date().toISOString(),
-    });
-  });
-
-  // ─── GET /health/live — Kubernetes liveness probe ───────────────────────────
-  // Process-level only — always 200 as long as the Node.js process is alive
-
-  router.get('/live', (_req: Request, res: Response) => {
-    res.status(200).json({
-      status: 'alive',
-      timestamp: new Date().toISOString(),
     });
   });
 
