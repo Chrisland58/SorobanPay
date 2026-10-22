@@ -294,62 +294,46 @@ Keep old contract addresses in `deployments.json` with a `deprecated_at` field f
 
 ---
 
-## 6. How to Verify You Are on the Correct Network
+## 6. How to verify you're on the correct network
 
-Before making any real transaction, confirm every layer of the stack is pointing to the same network.
+Run these checks any time you suspect a network mismatch between your environment
+variables, Freighter, and the deployed contract.
 
-### 6.1 Check the Stellar CLI identity network
-
-```bash
-# Print the public key for your active identity
-stellar keys address $STELLAR_IDENTITY
-
-# Confirm the network the CLI will use for the next command
-echo "Network: $STELLAR_NETWORK"
-# Expected for mainnet: mainnet
-# Expected for testnet: testnet
-```
-
-### 6.2 Check the deployed contract is on the expected network
+### 6.1 Verify the RPC endpoint
 
 ```bash
-# Testnet — contract should exist; returns WASM hash and entry points
-stellar contract info \
-  --id "$CONTRACT_ID" \
-  --rpc-url "https://soroban-testnet.stellar.org" \
-  --network-passphrase "Test SDF Network ; September 2015"
-
-# Mainnet — same contract ID will NOT exist on testnet (and vice versa)
-stellar contract info \
-  --id "$MAINNET_CONTRACT_ID" \
-  --rpc-url "https://mainnet.stellar.validationcloud.io/v1/<API_KEY>" \
-  --network-passphrase "Public Global Stellar Network ; September 2015"
+# Should return 200 OK and a JSON health status
+curl -s -X POST \
+  -H "Content-Type: application/json" \
+  --data '{"jsonrpc":"2.0","id":1,"method":"getHealth"}' \
+  "$RPC_URL" | jq .result
+# Testnet expected: {"status":"healthy"}
+# Mainnet expected: {"status":"healthy"}
+# Wrong URL / offline: connection error or non-JSON response
 ```
 
-If you accidentally pass a testnet contract ID with mainnet credentials, the command returns `contract_not_found`. This is the fastest way to detect a mismatch.
+### 6.2 Verify the network passphrase
 
-### 6.3 Check the frontend environment
+The passphrase is embedded in every signed transaction. Use this quick check to
+confirm your configured passphrase matches the target network:
 
-```bash
-# Print active env values (from the running Next.js process or .env.local)
-grep "NEXT_PUBLIC_" frontend/.env.local
+```typescript
+import { Networks } from "@stellar/stellar-sdk";
+
+const configured = process.env.NEXT_PUBLIC_NETWORK_PASSPHRASE;
+const testnet  = Networks.TESTNET;  // "Test SDF Network ; September 2015"
+const mainnet  = Networks.PUBLIC;   // "Public Global Stellar Network ; September 2015"
+
+if (configured === testnet) {
+  console.log("✅ Configured for TESTNET");
+} else if (configured === mainnet) {
+  console.log("✅ Configured for MAINNET");
+} else {
+  console.error("❌ UNKNOWN passphrase — check NEXT_PUBLIC_NETWORK_PASSPHRASE");
+}
 ```
 
-Expected output for testnet:
-
-```
-NEXT_PUBLIC_RPC_URL=https://soroban-testnet.stellar.org
-NEXT_PUBLIC_NETWORK_PASSPHRASE=Test SDF Network ; September 2015
-NEXT_PUBLIC_CONTRACT_ID=C...
-```
-
-Both `RPC_URL` and `NETWORK_PASSPHRASE` must match the same network. A mismatch causes silent `tx_bad_auth` failures.
-
-### 6.4 Check Freighter is on the correct network
-
-Open Freighter and look at the network indicator in the top-right corner. It should say **Testnet** or **Mainnet** to match your `.env.local`.
-
-To check programmatically from the frontend:
+### 6.3 Verify Freighter is on the correct network
 
 ```typescript
 import { getNetworkDetails } from "@stellar/freighter-api";
@@ -358,33 +342,126 @@ const details = await getNetworkDetails();
 const expected = process.env.NEXT_PUBLIC_NETWORK_PASSPHRASE;
 
 if (details.networkPassphrase !== expected) {
-  console.error(
-    `Freighter is on "${details.network}" but app expects "${expected}". ` +
-    `Switch Freighter's network to match.`
+  alert(
+    `Freighter is on the wrong network.\n` +
+    `Expected: ${expected}\n` +
+    `Freighter: ${details.networkPassphrase}\n\n` +
+    `Please switch networks in the Freighter extension.`
   );
 }
 ```
 
-### 6.5 Quick verification table
+### 6.4 Verify the contract is deployed on this network
 
-| Check | Testnet expected value | Mainnet expected value |
+```bash
+stellar contract invoke \
+  --id "$CONTRACT_ID" \
+  --network "$STELLAR_NETWORK" \
+  -- get_version
+# Expected: "1.0.0" (or whatever the deployed version is)
+# Wrong network / wrong address: "ERROR: contract not found" or RPC error
+```
+
+### 6.5 Check the deployed address registry
+
+```bash
+cat deploy/deployments.json | jq ".${STELLAR_NETWORK}.contract_id"
+# Expected: your contract address for that network
+# Mismatch: CONTRACT_ID env var doesn't match what was deployed
+```
+
+### Quick-reference checklist
+
+| Check | Command / tool | Expected result |
 |---|---|---|
-| `STELLAR_NETWORK` env var | `testnet` | `mainnet` |
-| `NEXT_PUBLIC_RPC_URL` | `https://soroban-testnet.stellar.org` | `https://mainnet.stellar.validationcloud.io/v1/<KEY>` |
-| `NEXT_PUBLIC_NETWORK_PASSPHRASE` | `Test SDF Network ; September 2015` | `Public Global Stellar Network ; September 2015` |
-| Freighter network pill | **Testnet** | **Mainnet** |
-| `stellar contract info` result | Contract found | Contract found (different address) |
-| Friendbot available? | Yes | No |
+| RPC reachable | `curl ... getHealth` | `{"status":"healthy"}` |
+| Network passphrase | SDK `Networks.*` comparison | Matches `NEXT_PUBLIC_NETWORK_PASSPHRASE` |
+| Freighter network | `getNetworkDetails()` | Passphrase matches env var |
+| Contract deployed | `stellar contract invoke ... get_version` | Version string returned |
+| Contract address correct | `deploy/deployments.json` | Address matches `CONTRACT_ID` env var |
+
+---
+
+## 7. Mainnet funding instructions
+
+Mainnet requires **real XLM**. There is no Friendbot; every account must be funded
+by an existing funded account or by purchasing XLM on an exchange.
+
+### Minimum balance requirements
+
+| Use | Minimum XLM | Reason |
+|---|---|---|
+| Identity (deployer) account | 2 XLM | 1 XLM base reserve + 1 XLM for transaction fees and contract upload |
+| Subscriber account | 0.5 XLM | Transaction fee per `subscribe` + `execute_payment` call |
+| Merchant account | 0.5 XLM | Transaction fee per `execute_payment` |
+
+> These are minimums. For production, fund deployer accounts with at least 10 XLM
+> to cover multiple deployments, fee spikes, and unexpected transactions.
+
+### Step 1 — Create a Stellar mainnet identity
+
+```bash
+# Generate a new keypair (one-time, per role)
+stellar keys generate prod-deployer
+stellar keys generate prod-subscriber  # for testing subscriber flows
+
+# Print the public key to fund it
+stellar keys show prod-deployer
+# Output: G<56-character Stellar public key>
+```
+
+### Step 2 — Acquire XLM
+
+Purchase XLM from a regulated exchange (Coinbase, Kraken, Binance, etc.) or have
+another funded account send XLM to your public key. The minimum to activate an
+account is **1 XLM** (the Stellar base reserve).
+
+> **Security:** Never share your secret key. The public key (starting with `G`) is
+> safe to share and is what you send XLM to.
+
+### Step 3 — Send XLM to your identity
+
+From an exchange withdrawal or another wallet, send XLM to the public key printed
+in Step 1. Wait for the transaction to confirm on-chain (usually within 5 seconds).
+
+### Step 4 — Verify the account is funded
+
+```bash
+# Check via Stellar CLI
+stellar account info "$(stellar keys show prod-deployer)" --network mainnet
+
+# Or via Horizon REST API
+curl "https://horizon.stellar.org/accounts/$(stellar keys show prod-deployer)" | jq .balances
+# Expected: at least one entry with asset_type "native" and balance >= "1.0000000"
+```
+
+### Step 5 — Verify on Stellar Expert
+
+Paste your public key into [Stellar Expert](https://stellar.expert/explorer/public)
+(mainnet explorer) and confirm the account is active with sufficient XLM balance.
+
+### Funding via Friendbot — testnet only
+
+On testnet you can skip the above entirely and use Friendbot:
+
+```bash
+stellar keys fund "$IDENTITY" --network testnet
+# Or via curl:
+curl "https://friendbot.stellar.org?addr=$(stellar keys show $IDENTITY)"
+```
+
+Friendbot funds with 10,000 XLM on testnet. **Friendbot does not exist on mainnet.**
 
 ---
 
 ## See Also
 
 - [Storage TTL Management Guide](./operations.md) — alert thresholds, TTL detection scripts
-- [Storage TTL Guide](./storage-ttl.md) — TTL constants and subscription lifetime
-- [Versioning and Migration Guide](./versioning.md) — contract address management across versions
+- [Versioning and Migration Guide](./versioning.md) — updating contract addresses after a new deployment
 - [Backend API Cookbook](./api-cookbook.md) — recipes for all API operations
 - `deploy/deploy.sh` — network-aware deployment script
+- `deploy/deployments.json` — per-network contract address registry
 - `frontend/.env.example` — environment variable template
 - [Stellar Documentation — Networks](https://developers.stellar.org/docs/learn/fundamentals/networks)
+- [Stellar Expert (mainnet explorer)](https://stellar.expert/explorer/public)
 - [Freighter API](https://docs.freighter.app)
