@@ -410,3 +410,21 @@ Full policy: [docs/security.md](docs/security.md#8-security-disclosure-policy).
 | `good first issue` | Small, well-bounded; newcomer-friendly |
 | `help wanted` | Community contributions welcome |
 | `P0` / `P1` / `P2` / `P3` | Priority levels |
+
+---
+
+## 9. Internationalisation (i18n)
+
+SorobanPay uses [`next-intl`](https://next-intl-docs.vercel.app/) for internationalisation.
+
+### Adding a New Locale
+
+1. **Create message translation file**:
+   Add `frontend/messages/<locale>.json` modeled after `frontend/messages/en.json`.
+2. **Register locale**:
+   Add the locale code to `locales` in `frontend/src/i18n.ts`. If the locale is right-to-left (e.g. Arabic, Hebrew), also add it to `rtlLocales`.
+3. **Add language label**:
+   Add the localized display name to the `"languageSelector"` block in all message files.
+4. **Test**:
+   Verify that the language selector in the header switches to your new language and that layout direction matches (LTR or RTL).
+

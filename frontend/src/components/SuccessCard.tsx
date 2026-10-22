@@ -13,17 +13,24 @@
  *  - A button to create another subscription
  */
 
+import { useState, useCallback } from 'react';
+import { downloadReceipt } from './SubscriptionReceipt';
+
 export interface SuccessCardData {
   /** Stellar transaction hash (hex or base64) */
   txHash: string;
   /** Merchant's Stellar public key */
   merchant: string;
+  /** Subscriber's Stellar public key */
+  subscriber?: string;
   /** SEP-41 token contract address */
   token: string;
   /** Payment amount in token units */
   amount: string;
   /** Billing interval in seconds */
   interval: string;
+  /** Next payment timestamp or formatted date string */
+  nextPayment?: number | string;
 }
 
 export interface SuccessCardProps {
@@ -34,7 +41,61 @@ export interface SuccessCardProps {
 }
 
 export function SuccessCard({ data, onReset }: SuccessCardProps) {
+  const [isDownloading, setIsDownloading] = useState(false);
+  const [shareFeedback, setShareFeedback] = useState<string | null>(null);
+
   const days = Math.round(Number(data.interval) / 86400);
+
+  const nextPaymentDate = data.nextPayment
+    ? typeof data.nextPayment === 'number'
+      ? new Date(data.nextPayment * 1000).toLocaleDateString(undefined, { year: 'numeric', month: 'long', day: 'numeric' })
+      : data.nextPayment
+    : new Date(Date.now() + (Number(data.interval) || 86400) * 1000).toLocaleDateString(undefined, { year: 'numeric', month: 'long', day: 'numeric' });
+
+  const passphrase = typeof process !== "undefined" ? (process.env.NEXT_PUBLIC_NETWORK_PASSPHRASE ?? "") : "";
+  const network = passphrase.includes("Test SDF") ? "testnet" : "public";
+  const explorerUrl = `https://stellar.expert/explorer/${network}/tx/${data.txHash}`;
+
+  const handleDownloadPdf = async () => {
+    setIsDownloading(true);
+    try {
+      await downloadReceipt({
+        txHash: data.txHash,
+        merchant: data.merchant,
+        subscriber: data.subscriber || "Connected Wallet",
+        token: data.token,
+        amount: data.amount,
+        interval: data.interval,
+        issuedAt: new Date().toISOString(),
+      });
+    } catch (err) {
+      console.error('PDF download failed:', err);
+    } finally {
+      setIsDownloading(false);
+    }
+  };
+
+  const handleShare = useCallback(async () => {
+    const shareText = `SorobanPay Subscription Receipt:\nAmount: ${data.amount} tokens\nMerchant: ${data.merchant}\nNext payment: ${nextPaymentDate}\nVerify on Stellar Expert: ${explorerUrl}`;
+    if (typeof navigator !== 'undefined' && navigator.share) {
+      try {
+        await navigator.share({
+          title: 'SorobanPay Subscription Receipt',
+          text: shareText,
+          url: explorerUrl,
+        });
+        return;
+      } catch {
+        // Fall back to clipboard if share was dismissed or failed
+      }
+    }
+
+    if (typeof navigator !== 'undefined' && navigator.clipboard) {
+      await navigator.clipboard.writeText(shareText);
+      setShareFeedback('Receipt copied to clipboard!');
+      setTimeout(() => setShareFeedback(null), 3000);
+    }
+  }, [data, nextPaymentDate, explorerUrl]);
 
   return (
     <div
@@ -65,9 +126,57 @@ export function SuccessCard({ data, onReset }: SuccessCardProps) {
         <span className="font-medium">
           every {days} day{days !== 1 ? 's' : ''}
         </span>
+        <span className="text-gray-400 font-medium">Next Payment</span>
+        <span className="font-medium text-green-300">{nextPaymentDate}</span>
         <span className="text-gray-400 font-medium break-all">Merchant</span>
         <span className="break-all font-mono text-xs">{data.merchant}</span>
       </div>
+
+      {/* Explorer link */}
+      <div className="text-center pt-1">
+        <a
+          href={explorerUrl}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="inline-flex items-center gap-1.5 text-xs text-blue-400 hover:text-blue-300 hover:underline"
+        >
+          View transaction on Stellar Expert ↗
+        </a>
+      </div>
+
+      {/* Share / PDF action buttons */}
+      <div className="grid grid-cols-2 gap-3 pt-2">
+        <button
+          type="button"
+          onClick={handleDownloadPdf}
+          disabled={isDownloading}
+          aria-label="Download subscription receipt as PDF"
+          className="flex items-center justify-center gap-2 rounded-lg bg-gray-800 hover:bg-gray-700 border border-gray-700 py-2.5 px-3 text-xs font-semibold text-gray-200 transition-colors"
+        >
+          <svg className="w-4 h-4 text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+          </svg>
+          {isDownloading ? 'Generating PDF…' : 'Download PDF'}
+        </button>
+
+        <button
+          type="button"
+          onClick={handleShare}
+          aria-label="Share subscription receipt"
+          className="flex items-center justify-center gap-2 rounded-lg bg-gray-800 hover:bg-gray-700 border border-gray-700 py-2.5 px-3 text-xs font-semibold text-gray-200 transition-colors"
+        >
+          <svg className="w-4 h-4 text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8.684 13.342C8.886 12.938 9 12.482 9 12c0-.482-.114-.938-.316-1.342m0 2.684a3 3 0 110-2.684m0 2.684l6.632 3.316m-6.632-6l6.632-3.316m0 0a3 3 0 105.367-2.684 3 3 0 00-5.367 2.684zm0 9.316a3 3 0 105.368 2.684 3 3 0 00-5.368-2.684z" />
+          </svg>
+          Share Receipt
+        </button>
+      </div>
+
+      {shareFeedback && (
+        <p role="status" aria-live="polite" className="text-center text-xs text-green-300 font-medium">
+          {shareFeedback}
+        </p>
+      )}
 
       {/* Next steps */}
       <div className="border-t border-green-800/60 pt-4 space-y-2.5">
