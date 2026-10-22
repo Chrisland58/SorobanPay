@@ -4,6 +4,7 @@
       "name": "DS_PROMETHEUS",
       "label": "Prometheus",
       "description": "SorobanPay Prometheus data source",
+      "description": "Prometheus datasource for SorobanPay metrics",
       "type": "datasource",
       "pluginId": "prometheus",
       "pluginName": "Prometheus"
@@ -18,6 +19,51 @@
   ],
   "annotations": { "list": [] },
   "description": "SorobanPay system monitoring — indexer lag, webhook delivery rates, RPC health",
+    {
+      "type": "grafana",
+      "id": "grafana",
+      "name": "Grafana",
+      "version": "10.0.0"
+    },
+    {
+      "type": "datasource",
+      "id": "prometheus",
+      "name": "Prometheus",
+      "version": "1.0.0"
+    },
+    {
+      "type": "panel",
+      "id": "timeseries",
+      "name": "Time series",
+      "version": ""
+    },
+    {
+      "type": "panel",
+      "id": "gauge",
+      "name": "Gauge",
+      "version": ""
+    },
+    {
+      "type": "panel",
+      "id": "stat",
+      "name": "Stat",
+      "version": ""
+    }
+  ],
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": { "type": "grafana", "uid": "-- Grafana --" },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "description": "SorobanPay observability dashboard — events, webhooks, RPC latency, subscriptions, payment failures, API metrics, pod resources, and DB pool.",
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,
@@ -50,6 +96,35 @@
           "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
           "expr": "indexer_lag_seconds",
           "legendFormat": "Lag (s)"
+      "id": 1,
+      "title": "Events Indexed per Minute",
+      "description": "Rate of Soroban contract events (subscribe, executed, cancel, payment_transfer_failure) indexed per minute.",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi", "sort": "none" }
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "sum(rate(sorobanpay_events_indexed_total{namespace=~\"$namespace\"}[1m])) by (event_type)",
+          "legendFormat": "{{ event_type }}",
+          "refId": "A"
         }
       ]
     },
@@ -78,6 +153,44 @@
           "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
           "expr": "events_processed_total",
           "legendFormat": "Events"
+      "id": 2,
+      "title": "Webhook Delivery Success Rate",
+      "description": "Percentage of webhook deliveries that succeeded (HTTP 2xx response) over the last 5 minutes.",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "yellow", "value": 0.95 },
+              { "color": "green", "value": 0.99 }
+            ]
+          },
+          "color": { "mode": "thresholds" },
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "single", "sort": "none" }
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "sum(rate(sorobanpay_webhook_deliveries_total{namespace=~\"$namespace\",status=\"success\"}[5m])) / sum(rate(sorobanpay_webhook_deliveries_total{namespace=~\"$namespace\"}[5m]))",
+          "legendFormat": "Success rate",
+          "refId": "A"
         }
       ]
     },
@@ -86,6 +199,101 @@
       "fieldConfig": {
         "defaults": {
           "color": { "mode": "thresholds" },
+      "id": 3,
+      "title": "RPC Poll Duration (p50 / p95 / p99)",
+      "description": "Latency of Soroban RPC getEvents() poll calls — 50th, 95th, and 99th percentiles.",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 5,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi", "sort": "none" }
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "histogram_quantile(0.50, sum(rate(sorobanpay_rpc_poll_duration_seconds_bucket{namespace=~\"$namespace\"}[5m])) by (le)) * 1000",
+          "legendFormat": "p50",
+          "refId": "A"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "histogram_quantile(0.95, sum(rate(sorobanpay_rpc_poll_duration_seconds_bucket{namespace=~\"$namespace\"}[5m])) by (le)) * 1000",
+          "legendFormat": "p95",
+          "refId": "B"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "histogram_quantile(0.99, sum(rate(sorobanpay_rpc_poll_duration_seconds_bucket{namespace=~\"$namespace\"}[5m])) by (le)) * 1000",
+          "legendFormat": "p99",
+          "refId": "C"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Active Subscriptions",
+      "description": "Total number of active on-chain subscriptions tracked by the indexer.",
+      "type": "gauge",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "blue", "value": null },
+              { "color": "green", "value": 1 }
+            ]
+          },
+          "color": { "mode": "thresholds" }
+        },
+        "overrides": []
+      },
+      "options": {
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        },
+        "showThresholdLabels": false,
+        "showThresholdMarkers": true
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "sum(sorobanpay_active_subscriptions_total{namespace=~\"$namespace\"})",
+          "legendFormat": "Active subscriptions",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "Payment Failure Rate",
+      "description": "Rate of payment_transfer_failure events per minute — indicates subscribers with insufficient balance.",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": { "mode": "fixed", "fixedColor": "red" },
           "thresholds": {
             "mode": "absolute",
             "steps": [
@@ -108,6 +316,28 @@
           "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
           "expr": "webhook_delivery_total{status=\"failure\"} / (webhook_delivery_total{status=\"success\"} + webhook_delivery_total{status=\"failure\"})",
           "legendFormat": "Failure rate"
+              { "color": "yellow", "value": 1 },
+              { "color": "red", "value": 5 }
+            ]
+          },
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 15,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "single", "sort": "none" }
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "sum(rate(sorobanpay_events_indexed_total{namespace=~\"$namespace\",event_type=\"payment_transfer_failure\"}[1m]))",
+          "legendFormat": "Failures / min",
+          "refId": "A"
         }
       ]
     },
@@ -137,6 +367,53 @@
           "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
           "expr": "rate(webhook_delivery_total{status=\"failure\"}[5m])",
           "legendFormat": "Failures/s"
+      "id": 6,
+      "title": "API Request Rate and Latency",
+      "description": "HTTP request throughput (req/s) and p95 response latency for the SorobanPay backend REST API.",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 5,
+            "showPoints": "never"
+          }
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "Latency p95 (ms)" },
+            "properties": [
+              { "id": "unit", "value": "ms" },
+              { "id": "custom.axisPlacement", "value": "right" }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "Requests/s" },
+            "properties": [
+              { "id": "unit", "value": "reqps" }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi", "sort": "none" }
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "sum(rate(sorobanpay_http_requests_total{namespace=~\"$namespace\"}[1m]))",
+          "legendFormat": "Requests/s",
+          "refId": "A"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "histogram_quantile(0.95, sum(rate(sorobanpay_http_request_duration_seconds_bucket{namespace=~\"$namespace\"}[5m])) by (le)) * 1000",
+          "legendFormat": "Latency p95 (ms)",
+          "refId": "B"
         }
       ]
     },
@@ -198,6 +475,53 @@
           "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
           "expr": "sorobanpay_active_subscriptions_gauge",
           "legendFormat": "Active Subscriptions"
+      "id": 7,
+      "title": "Pod CPU and Memory Usage",
+      "description": "CPU cores and memory (RSS) consumed by SorobanPay backend pods.",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 24 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 5,
+            "showPoints": "never"
+          }
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byRegexp", "options": "Memory.*" },
+            "properties": [
+              { "id": "unit", "value": "bytes" },
+              { "id": "custom.axisPlacement", "value": "right" }
+            ]
+          },
+          {
+            "matcher": { "id": "byRegexp", "options": "CPU.*" },
+            "properties": [
+              { "id": "unit", "value": "short" }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi", "sort": "none" }
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "sum(rate(container_cpu_usage_seconds_total{namespace=~\"$namespace\",container=\"sorobanpay-backend\"}[1m])) by (pod)",
+          "legendFormat": "CPU — {{ pod }}",
+          "refId": "A"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "sum(container_memory_rss{namespace=~\"$namespace\",container=\"sorobanpay-backend\"}) by (pod)",
+          "legendFormat": "Memory RSS — {{ pod }}",
+          "refId": "B"
         }
       ]
     },
@@ -256,6 +580,61 @@
           "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
           "expr": "rate(sorobanpay_rate_limit_hits_total[5m])",
           "legendFormat": "{{method}}"
+      "id": 8,
+      "title": "DB Connection Pool Utilization",
+      "description": "Active vs. idle database connections and pool utilization percentage.",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 24 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 5,
+            "showPoints": "never"
+          }
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "Pool utilization (%)" },
+            "properties": [
+              { "id": "unit", "value": "percent" },
+              { "id": "custom.axisPlacement", "value": "right" },
+              { "id": "min", "value": 0 },
+              { "id": "max", "value": 100 }
+            ]
+          },
+          {
+            "matcher": { "id": "byRegexp", "options": "(Active|Idle).*" },
+            "properties": [
+              { "id": "unit", "value": "short" }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi", "sort": "none" }
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "sum(sorobanpay_db_pool_connections_active{namespace=~\"$namespace\"})",
+          "legendFormat": "Active connections",
+          "refId": "A"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "sum(sorobanpay_db_pool_connections_idle{namespace=~\"$namespace\"})",
+          "legendFormat": "Idle connections",
+          "refId": "B"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "sum(sorobanpay_db_pool_connections_active{namespace=~\"$namespace\"}) / sum(sorobanpay_db_pool_size{namespace=~\"$namespace\"}) * 100",
+          "legendFormat": "Pool utilization (%)",
+          "refId": "C"
         }
       ]
     }
@@ -269,4 +648,48 @@
   "title": "SorobanPay System Overview",
   "uid": "sorobanpay-system",
   "version": 2
+  "tags": ["sorobanpay", "stellar", "soroban", "payments"],
+  "templating": {
+    "list": [
+      {
+        "current": {},
+        "hide": 0,
+        "includeAll": false,
+        "label": "Datasource",
+        "multi": false,
+        "name": "datasource",
+        "options": [],
+        "query": "prometheus",
+        "refresh": 1,
+        "regex": "",
+        "type": "datasource"
+      },
+      {
+        "current": {},
+        "datasource": { "type": "prometheus", "uid": "${datasource}" },
+        "definition": "label_values(sorobanpay_events_indexed_total, namespace)",
+        "hide": 0,
+        "includeAll": true,
+        "label": "Namespace",
+        "multi": false,
+        "name": "namespace",
+        "options": [],
+        "query": {
+          "query": "label_values(sorobanpay_events_indexed_total, namespace)",
+          "refId": "StandardVariableQuery"
+        },
+        "refresh": 2,
+        "regex": "",
+        "sort": 1,
+        "type": "query"
+      }
+    ]
+  },
+  "time": { "from": "now-1h", "to": "now" },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "SorobanPay — Overview",
+  "uid": "sorobanpay-overview",
+  "version": 1,
+  "weekStart": ""
 }
