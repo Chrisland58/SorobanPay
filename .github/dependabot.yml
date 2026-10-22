@@ -1,6 +1,6 @@
 version: 2
 updates:
-  # ── Rust (Cargo) — smart contract ─────────────────────────────────────────────
+  # ── Rust (Cargo) — smart contract ──────────────────────────────────────────
   - package-ecosystem: cargo
     directory: /contracts/subscription
     schedule:
@@ -13,8 +13,16 @@ updates:
     open-pull-requests-limit: 5
     commit-message:
       prefix: "chore(contract):"
+    # Patch and minor: auto-merge policy handled by auto-merge.yml
+    # Major updates: require manual review (labeled major-update)
+    groups:
+      # Group all Cargo patch/minor updates into a single PR
+      cargo-minor:
+        update-types:
+          - minor
+          - patch
 
-  # ── npm — frontend ─────────────────────────────────────────────────────────────
+  # ── npm — frontend ──────────────────────────────────────────────────────────
   - package-ecosystem: npm
     directory: /frontend
     schedule:
@@ -25,12 +33,24 @@ updates:
       - dependencies
       - frontend
     open-pull-requests-limit: 10
-    # Skip patch updates (too noisy) — let security-scan.yml catch those
-    ignore:
-      - dependency-name: "*"
-        update-types: ["version-update:semver-patch"]
     commit-message:
       prefix: "chore(frontend):"
+    groups:
+      # Group all @stellar/* packages into a single PR to reduce PR noise
+      stellar-sdk:
+        patterns:
+          - "@stellar/*"
+        update-types:
+          - minor
+          - patch
+      # Group remaining minor/patch npm updates
+      npm-minor-frontend:
+        update-types:
+          - minor
+          - patch
+        exclude-patterns:
+          - "@stellar/*"
+    # Major updates remain ungrouped so each gets individual review
 
   # ── npm — root gas-estimation scripts ─────────────────────────────────────────
   - package-ecosystem: npm
@@ -57,22 +77,31 @@ updates:
       - dependencies
       - backend
     open-pull-requests-limit: 10
-    ignore:
-      - dependency-name: "*"
-        update-types: ["version-update:semver-patch"]
     commit-message:
       prefix: "chore(backend):"
+    groups:
+      # Group all backend minor/patch updates into a single PR
+      npm-minor-backend:
+        update-types:
+          - minor
+          - patch
 
-  # ── GitHub Actions ─────────────────────────────────────────────────────────────
+  # ── GitHub Actions ────────────────────────────────────────────────────────────
+  # Monthly schedule per README — GitHub Actions updates are bundled monthly
+  # since Actions use immutable SHA/tag pins and breaking changes are rare.
   - package-ecosystem: github-actions
     directory: /
     schedule:
-      interval: weekly
-      day: monday
-      time: "08:00"
+      interval: monthly
     labels:
       - dependencies
       - ci
     open-pull-requests-limit: 5
     commit-message:
       prefix: "chore(ci):"
+    groups:
+      # Group all Actions updates into a single monthly PR
+      github-actions:
+        update-types:
+          - minor
+          - patch
