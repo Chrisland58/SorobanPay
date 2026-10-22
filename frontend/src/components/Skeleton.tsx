@@ -7,6 +7,7 @@
  * Uses a motion-safe pulse so reduced-motion preferences are respected.
  *
  * FE-46: Add skeleton loading states for all async data fetches.
+ * #1430: Loading skeleton screens for all async components.
  *
  * ## Components
  * - `SkeletonLine`  — a single line of placeholder text
@@ -14,13 +15,20 @@
  * - `SkeletonRow`   — a horizontal row (table/list item)
  * - `SkeletonBadge` — a small badge / pill placeholder
  * - `SkeletonForm`  — a full form skeleton (used by SubscriptionForm pre-mount)
- * - `SkeletonPaymentHistory` — payment history section placeholder
+ * - `SkeletonPaymentHistory` — payment history table rows placeholder
+ * - `SkeletonMerchantSubscriberList` — merchant portal subscriber list
+ * - `SkeletonSubscriptionList` — My Subscriptions list
+ * - `SkeletonSubscriptionDetail` — single subscription detail with next payment date
+ * - `SkeletonTokenBalance` — token balance display
  *
  * All skeletons carry `aria-busy="true"` and `aria-label="Loading…"` so screen
  * readers announce that content is being loaded.
+ *
+ * The `useMinLoadingDuration` hook ensures skeletons are shown for at least
+ * 200 ms to prevent a jarring flash when data arrives immediately.
  */
 
-import React from "react";
+import React, { useEffect, useRef, useState } from "react";
 
 // ─── Base skeleton block ───────────────────────────────────────────────────────
 
@@ -321,6 +329,234 @@ export function SkeletonWallet({ className = "" }: { className?: string }) {
       aria-label="Loading wallet status…"
     >
       <SkeletonBlock className="h-11 w-full rounded-lg" />
+    </div>
+  );
+}
+
+// ─── useMinLoadingDuration ────────────────────────────────────────────────────
+
+/**
+ * Ensures a skeleton is shown for at least `minMs` milliseconds (default 200)
+ * to prevent a jarring flash when data arrives immediately.
+ *
+ * @param isLoading  — the "real" loading flag from your data hook
+ * @param minMs      — minimum time (ms) to show skeleton (default 200)
+ * @returns          — true while the skeleton should remain visible
+ *
+ * @example
+ * const showSkeleton = useMinLoadingDuration(isLoading);
+ * return showSkeleton ? <SkeletonPaymentHistory /> : <PaymentTable />;
+ */
+export function useMinLoadingDuration(isLoading: boolean, minMs = 200): boolean {
+  const [show, setShow] = useState(isLoading);
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const startedAt = useRef<number | null>(null);
+
+  useEffect(() => {
+    if (isLoading) {
+      startedAt.current = Date.now();
+      setShow(true);
+    } else {
+      const elapsed = startedAt.current !== null ? Date.now() - startedAt.current : minMs;
+      const remaining = Math.max(0, minMs - elapsed);
+      if (remaining === 0) {
+        setShow(false);
+      } else {
+        timerRef.current = setTimeout(() => setShow(false), remaining);
+      }
+    }
+    return () => {
+      if (timerRef.current !== null) {
+        clearTimeout(timerRef.current);
+      }
+    };
+  }, [isLoading, minMs]);
+
+  return show;
+}
+
+// ─── SkeletonMerchantSubscriberList ──────────────────────────────────────────
+
+interface SkeletonMerchantSubscriberListProps {
+  /** Number of subscriber rows to render */
+  rows?: number;
+  className?: string;
+}
+
+/**
+ * Merchant Portal subscriber list skeleton.
+ * Matches the shape of MerchantSubscriptionsTable rows:
+ * checkbox | address | amount | interval | next payment | status | action
+ */
+export function SkeletonMerchantSubscriberList({
+  rows = 5,
+  className = "",
+}: SkeletonMerchantSubscriberListProps) {
+  return (
+    <section
+      className={`w-full rounded-2xl border border-gray-800 bg-gray-900/40 overflow-hidden ${className}`}
+      aria-busy="true"
+      aria-label="Loading subscriber list…"
+    >
+      {/* Table header skeleton */}
+      <div className="flex items-center gap-3 border-b border-gray-800 bg-gray-900/60 px-4 py-3">
+        <SkeletonBlock className="h-4 w-4 rounded flex-shrink-0" />
+        <SkeletonLine width="w-32" height="h-3" />
+        <SkeletonLine width="w-20" height="h-3" className="ml-auto" />
+        <SkeletonLine width="w-20" height="h-3" />
+        <SkeletonLine width="w-24" height="h-3" />
+        <SkeletonBadge className="w-16" />
+        <SkeletonBlock className="h-7 w-20 rounded-lg" />
+      </div>
+
+      {/* Subscriber rows */}
+      <div className="divide-y divide-gray-800/60" role="list" aria-label="Loading subscriber rows">
+        {Array.from({ length: rows }).map((_, i) => (
+          <div
+            key={i}
+            className="flex items-center gap-3 px-4 py-3"
+            role="listitem"
+            aria-hidden="true"
+          >
+            <SkeletonBlock className="h-4 w-4 rounded flex-shrink-0" />
+            {/* Address */}
+            <SkeletonLine width="w-36" height="h-4" />
+            {/* Amount */}
+            <SkeletonLine width="w-16" height="h-4" className="ml-auto" />
+            {/* Interval */}
+            <SkeletonLine width="w-16" height="h-4" />
+            {/* Next payment */}
+            <SkeletonLine width="w-24" height="h-4" />
+            {/* Status badge */}
+            <SkeletonBadge className="w-14" />
+            {/* Collect button */}
+            <SkeletonBlock className="h-7 w-16 rounded-lg" />
+          </div>
+        ))}
+      </div>
+      <span className="sr-only">Loading subscriber list…</span>
+    </section>
+  );
+}
+
+// ─── SkeletonSubscriptionList ─────────────────────────────────────────────────
+
+interface SkeletonSubscriptionListProps {
+  /** Number of subscription cards to render */
+  cards?: number;
+  className?: string;
+}
+
+/**
+ * My Subscriptions list skeleton.
+ * Matches the shape of SubscriptionCard: header, amount/interval, status, CTA row.
+ */
+export function SkeletonSubscriptionList({
+  cards = 3,
+  className = "",
+}: SkeletonSubscriptionListProps) {
+  return (
+    <div
+      className={`space-y-4 ${className}`}
+      aria-busy="true"
+      aria-label="Loading subscriptions…"
+    >
+      {Array.from({ length: cards }).map((_, i) => (
+        <div
+          key={i}
+          className="rounded-2xl border border-gray-800 bg-gray-900/40 p-5 space-y-3"
+          aria-hidden="true"
+        >
+          {/* Card header: merchant address + status badge */}
+          <div className="flex items-center justify-between gap-3">
+            <div className="flex items-center gap-2">
+              <SkeletonBlock className="h-8 w-8 rounded-full flex-shrink-0" />
+              <SkeletonLine width="w-40" height="h-4" />
+            </div>
+            <SkeletonBadge className="w-16" />
+          </div>
+
+          {/* Amount and interval row */}
+          <div className="flex items-center gap-4">
+            <SkeletonLine width="w-24" height="h-5" />
+            <SkeletonLine width="w-20" height="h-3" />
+          </div>
+
+          {/* Next payment date row */}
+          <SkeletonLine width="w-48" height="h-3" />
+
+          {/* Action row */}
+          <div className="flex items-center gap-3 pt-1">
+            <SkeletonBlock className="h-8 w-24 rounded-lg" />
+            <SkeletonBlock className="h-8 w-20 rounded-lg" />
+          </div>
+        </div>
+      ))}
+      <span className="sr-only">Loading subscriptions…</span>
+    </div>
+  );
+}
+
+// ─── SkeletonSubscriptionDetail ───────────────────────────────────────────────
+
+interface SkeletonSubscriptionDetailProps {
+  className?: string;
+}
+
+/**
+ * Single subscription detail skeleton — shown while a specific subscription's
+ * on-chain data (next payment date, amount, interval) is being fetched.
+ * Shape matches the SubscriptionCard expanded / detail view.
+ */
+export function SkeletonSubscriptionDetail({
+  className = "",
+}: SkeletonSubscriptionDetailProps) {
+  return (
+    <div
+      className={`rounded-2xl border border-gray-800 bg-gray-900/40 p-6 space-y-4 ${className}`}
+      aria-busy="true"
+      aria-label="Loading subscription details…"
+    >
+      {/* Header */}
+      <div className="flex items-center justify-between gap-3">
+        <SkeletonLine width="w-48" height="h-6" />
+        <SkeletonBadge className="w-20" />
+      </div>
+
+      {/* Merchant / token addresses */}
+      <div className="space-y-2.5">
+        <div className="flex items-center gap-2">
+          <SkeletonLine width="w-20" height="h-3" />
+          <SkeletonLine width="w-48" height="h-3" />
+        </div>
+        <div className="flex items-center gap-2">
+          <SkeletonLine width="w-20" height="h-3" />
+          <SkeletonLine width="w-48" height="h-3" />
+        </div>
+      </div>
+
+      {/* Amount + interval */}
+      <div className="flex items-baseline gap-2">
+        <SkeletonLine width="w-32" height="h-8" />
+        <SkeletonLine width="w-24" height="h-4" />
+      </div>
+
+      {/* Next payment date — the key field per issue #1430 */}
+      <div
+        className="rounded-lg border border-gray-800 bg-gray-900/60 px-4 py-3 space-y-1.5"
+        aria-label="Loading next payment date…"
+      >
+        <SkeletonLine width="w-32" height="h-3" />
+        <SkeletonLine width="w-48" height="h-5" />
+      </div>
+
+      {/* Action buttons */}
+      <div className="flex gap-3 pt-2">
+        <SkeletonBlock className="h-10 flex-1 rounded-lg" />
+        <SkeletonBlock className="h-10 w-24 rounded-lg" />
+      </div>
+
+      <span className="sr-only">Loading subscription details…</span>
     </div>
   );
 }
