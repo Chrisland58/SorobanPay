@@ -1,12 +1,13 @@
 # ─── SorobanPay Contract — Cargo Audit Configuration ─────────────────────────
 #
-# Run: cargo audit --manifest-path contracts/subscription/Cargo.toml
+# Run: cd contracts/subscription && cargo audit
 #
-# cargo-audit reads this file from the package root automatically when running
-# with --manifest-path pointing to this package.
+# cargo-audit reads ./.cargo/audit.toml (see the mirrored copy in this
+# package's .cargo directory). This package-root file documents the same
+# suppression list for tools that look for a package-level audit config.
 #
 # All advisories below are TRANSITIVE dependencies locked in by
-# soroban-sdk = "20.0.0" (specifically soroban-env-host 20.3.0 and its
+# soroban-sdk = "20.5.0" (specifically soroban-env-host 20.3.0 and its
 # sub-dependencies). They cannot be resolved by a simple version bump because:
 #
 #   curve25519-dalek — soroban-env-host 20.3.0 pins ">=4.1.1, <=4.1.2";
@@ -14,10 +15,9 @@
 #   time             — time 0.3.47 requires serde_core =1.0.220, which
 #                      conflicts with soroban-env-common's hard pin of
 #                      serde =1.0.192.
-#   adler/paste/rand — compile-time-only or testing deps embedded in
-#                      soroban-sdk 20's dependency tree.
-#   idna             — transitive dep of soroban-sdk v20; unused at runtime
-#                      inside the Wasm contract binary.
+#   adler/paste/rand — unmaintained/unsound helper crates embedded in
+#                      soroban-sdk 20's dependency tree; no fixed release is
+#                      compatible with the current pins.
 #
 # Migrating to soroban-sdk 21+ would resolve all advisories but introduces
 # breaking API changes requiring a full contract rewrite. Tracked as a planned
@@ -29,19 +29,6 @@
 
 [advisories]
 ignore = [
-    # RUSTSEC-2024-0421 — `idna` accepts Punycode labels that do not produce
-    # any non-ASCII when decoded.
-    #
-    # This crate is a transitive dependency pulled in by soroban-sdk v20.
-    # SorobanPay does NOT perform any hostname or IDNA validation; the `idna`
-    # crate is unused at runtime inside the Wasm contract binary. The
-    # vulnerability does not apply to this use case.
-    #
-    # Remediation path: upgrade to soroban-sdk v21+ once the Stellar network
-    # protocol upgrade to Protocol 22 is deployed and available on testnet and
-    # mainnet. Track: https://github.com/stellar/rs-soroban-sdk/releases
-    "RUSTSEC-2024-0421",
-
     # RUSTSEC-2024-0344 — Timing variability in curve25519-dalek's Scalar sub
     # Crate:   curve25519-dalek 4.1.2  |  Fix: >= 4.1.3
     # Blocker: soroban-env-host 20.3.0 pins ">=4.1.1, <=4.1.2" — 4.1.3 is
@@ -81,8 +68,8 @@ ignore = [
     "RUSTSEC-2026-0097",
 ]
 
-# Treat unmaintained crates as warnings rather than errors, because
-# soroban-sdk v20 pins several older helper crates that are now archived.
+# Vulnerabilities are always denied by cargo-audit. Keep unsound warnings fatal;
+# unmaintained and yanked crates remain warnings (cargo-audit's default).
 [output]
-deny = ["vulnerability", "unsound"]
-warn = ["unmaintained", "notice"]
+deny = ["unsound"]
+quiet = false

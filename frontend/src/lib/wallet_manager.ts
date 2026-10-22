@@ -108,6 +108,23 @@ export async function connectWallet(): Promise<string> {
   return keyResult.address;
 }
 
+/**
+ * Silently retrieve the public key for an already-authorised session.
+ *
+ * Unlike `connectWallet`, this never prompts the user: it only succeeds when
+ * Freighter already has an active allowance for the site. Returns `null` when
+ * the extension is unavailable, access was not granted, or the key is empty.
+ */
+export async function restoreWalletSession(): Promise<string | null> {
+  try {
+    const result = await getAddress();
+    if (result.error || !result.address) return null;
+    return result.address;
+  } catch {
+    return null;
+  }
+}
+
 // ─── Transaction signing ──────────────────────────────────────────────────────
 
 /**

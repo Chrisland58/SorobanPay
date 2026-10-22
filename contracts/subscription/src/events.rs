@@ -32,7 +32,7 @@ use soroban_sdk::{contracttype, Address, Env, Symbol};
 // | Symbol discriminant         | Topics (after symbol)              | Data type                    | Since |
 // |-----------------------------|-------------------------------------|------------------------------|-------|
 // | `subscribe`                 | subscriber, merchant, token         | i128 (amount)                | v1.0  |
-// | `executed`                  | subscriber, merchant, token         | (i128, u64) (amount, nonce)  | v1.0  |
+// | `executed`                  | subscriber, merchant, token         | (i128, u32) (amount, nonce)  | v1.0  |
 // | `payment_transfer_failure`  | subscriber, merchant                | (i128, u64) (amount, overdue)| v1.0  |
 // | `payment_transfer_success`  | subscriber, merchant                | i128 (amount)                | v1.0  |
 // | `cancel`                    | subscriber, merchant                | u32 (reason)                 | v1.0  |
@@ -172,10 +172,14 @@ pub fn emit_payment_transfer_failure(env: &Env, subscriber: &Address, merchant: 
 /// and the `next_payment` timestamp has been advanced.
 ///
 /// Topics:  (symbol("executed"), subscriber, merchant, token)
-/// Data:    (amount: i128, nonce: u64)
+/// Data:    (amount: i128, payment_nonce: u32)
+///
+/// The `payment_nonce` uniquely identifies a successful execution for the
+/// `(subscriber, merchant)` pair, allowing off-chain indexers to deduplicate
+/// payment events deterministically (#1354).
 ///
 /// Schema version: 1 (stable in v1.x.x — topic structure and data type are locked)
-pub fn emit_executed(env: &Env, subscriber: &Address, merchant: &Address, token: &Address, amount: i128, nonce: u64) {
+pub fn emit_executed(env: &Env, subscriber: &Address, merchant: &Address, token: &Address, amount: i128, nonce: u32) {
     env.events().publish(
         (
             Symbol::new(env, "executed"),
