@@ -1,39 +1,45 @@
 ---
 name: Feature Request
-about: Suggest an improvement or new capability for SorobanPay
-title: "[FEATURE] "
+about: Suggest an improvement or new feature for SorobanPay
+title: "[Feature] "
 labels: enhancement
 assignees: ""
 ---
 
-## Problem Statement
+## Use Case
 
-<!-- Describe the problem or limitation this feature would solve.
-     e.g. "As a merchant, I cannot see a summary of failed payments, so I miss revenue collection opportunities." -->
+<!-- Describe the use case or problem this feature addresses.
+     What are you trying to accomplish? Why does the current state fall short? -->
 
 ## Proposed Solution
 
-<!-- Describe the solution you have in mind. Be as specific as possible about the interface, behavior, or API changes. -->
-
-## Alternatives Considered
-
-<!-- List any alternative approaches you evaluated and why you ruled them out. -->
-
-## Affected Layer(s)
-
-<!-- Check all that apply. -->
-- [ ] Smart contract (`contracts/subscription/`)
-- [ ] Frontend (`frontend/`)
-- [ ] Backend / Indexer (`backend/`)
-- [ ] Deployment / CI (`deploy/`, `.github/`)
-- [ ] Documentation (`docs/`, `README.md`)
+<!-- A clear and concise description of the feature you'd like to see implemented.
+     How should it work from the user's perspective? -->
 
 ## Acceptance Criteria
 
-<!-- What observable behavior would confirm this feature is complete? -->
-- [ ]
-- [ ]
+<!-- Define what "done" looks like for this feature. Use a checklist: -->
+
+- [ ] ...
+- [ ] ...
+- [ ] ...
+
+## Alternatives Considered
+
+<!-- Describe any alternative solutions or workarounds you've considered
+     and why they don't fully solve the problem. -->
+
+## Affected Component(s)
+
+<!-- Check all that apply -->
+- [ ] Smart contract (`contracts/`)
+- [ ] Frontend (`frontend/`)
+- [ ] Backend / indexer (`backend/`)
+- [ ] Deployment / scripts (`deploy/`)
+- [ ] Documentation (`docs/`)
+- [ ] CI/CD (`.github/workflows/`)
 
 ## Additional Context
 
-<!-- Links to relevant specs (SEP-41, Soroban docs), screenshots, prototypes, or prior discussions. -->
+<!-- Any mockups, references, related issues, or external examples that would help
+     clarify the feature request. -->
