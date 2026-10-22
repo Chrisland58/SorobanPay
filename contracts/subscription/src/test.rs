@@ -22,6 +22,7 @@ struct T {
     subscriber:  Address,
     merchant:    Address,
     token:       Address,
+    admin:       Address,
     contract_id: Address,
 }
 
@@ -38,6 +39,7 @@ impl T {
         StellarAssetClient::new(&env, &token).mint(&subscriber, &10_000_000_i128);
 
         let contract_id = env.register(SubscriptionProtocol, ());
+        SubscriptionProtocolClient::new(&env, &contract_id).initialize(&admin);
 
         token::Client::new(&env, &token).approve(
             &subscriber,
@@ -46,7 +48,7 @@ impl T {
             &(env.ledger().sequence() + 100_000_u32),
         );
 
-        Self { env, subscriber, merchant, token, contract_id }
+        Self { env, subscriber, merchant, token, admin, contract_id }
     }
 
     fn client(&self) -> SubscriptionProtocolClient {
@@ -122,6 +124,57 @@ fn test_subscribe_stores_data_and_emits_event() {
     if let Ok(emitted_amount) = data.try_into_val::<_, i128>(&t.env) {
         assert_eq!(emitted_amount, amt, "emitted amount must match subscription amount");
     }
+}
+
+#[test]
+fn test_max_amount_defaults_to_unlimited() {
+    let t = T::new();
+    assert_eq!(t.client().get_max_amount(), None);
+
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &100_i128, &86_400_u64, &false);
+    assert!(t.has_sub());
+}
+
+#[test]
+fn test_max_amount_is_admin_configurable_and_enforced_by_subscribe() {
+    let t = T::new();
+    t.client().set_max_amount(&t.admin, &500_i128).unwrap();
+    assert_eq!(t.client().get_max_amount(), Some(500_i128));
+
+    let result = t.client().try_subscribe(
+        &t.subscriber,
+        &t.merchant,
+        &t.token,
+        &501_i128,
+        &86_400_u64,
+        &false,
+    );
+    assert!(matches!(result, Err(Ok(ContractError::AmountExceedsLimit))));
+    assert!(!t.has_sub());
+}
+
+#[test]
+fn test_max_amount_is_enforced_by_update_subscription() {
+    let t = T::new();
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &100_i128, &86_400_u64, &false);
+    t.client().set_max_amount(&t.admin, &500_i128).unwrap();
+
+    let result = t.client().try_update_subscription(
+        &t.subscriber,
+        &t.merchant,
+        &501_i128,
+        &172_800_u64,
+    );
+    assert!(matches!(result, Err(Ok(ContractError::AmountExceedsLimit))));
+    assert_eq!(t.get_sub().amount, 100_i128);
+
+    t.client().update_subscription(
+        &t.subscriber,
+        &t.merchant,
+        &500_i128,
+        &172_800_u64,
+    ).unwrap();
+    assert_eq!(t.get_sub().amount, 500_i128);
 }
 
 // ─── Requirement 13.1 — Full lifecycle ───────────────────────────────────────
@@ -383,7 +436,6 @@ fn test_is_paused_with_future_timestamp() {
         amount:       100,
         interval:     86_400,
         next_payment: now + 86_400,
-        ver:          1,
         grace_period: None,
         paused_until: Some(now + 3_600), // paused for 1 more hour
         overdue_since: None,
@@ -402,7 +454,6 @@ fn test_grace_period_getter_with_value() {
         amount:       100,
         interval:     86_400,
         next_payment: 86_400,
-        ver:          1,
         grace_period: Some(3_600),
         paused_until: None,
         overdue_since: None,
@@ -420,7 +471,6 @@ fn test_overdue_since_getter_with_value() {
         amount:       100,
         interval:     86_400,
         next_payment: 86_400,
-        ver:          1,
         grace_period: None,
         paused_until: None,
         overdue_since: Some(999_999),

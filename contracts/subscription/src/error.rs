@@ -39,4 +39,6 @@ pub enum ContractError {
     NotAdmin              = 16,
     /// Admin address not initialised; call `initialize` first
     NotInitialized        = 17,
+    /// Requested subscription amount exceeds the configured deployment cap
+    AmountExceedsLimit    = 18,
 }

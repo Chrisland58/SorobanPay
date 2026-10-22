@@ -3,7 +3,7 @@
 Full reference for all `SubscriptionProtocol` entry points, types, and error codes.
 
 **Contract version:** `1.0.0`  
-**Schema version:** `1`  
+**Schema version:** `2`
 **Network:** Stellar / Soroban
 
 ---
@@ -13,11 +13,14 @@ Full reference for all `SubscriptionProtocol` entry points, types, and error cod
 1. [Type reference](#type-reference)
 2. [Entry points](#entry-points)
    - [subscribe](#subscribe)
+  - [update_subscription](#update_subscription)
    - [execute_payment](#execute_payment)
    - [batch_execute_payment](#batch_execute_payment)
    - [cancel](#cancel)
    - [get_subscription](#get_subscription)
    - [initialize](#initialize)
+  - [set_max_amount](#set_max_amount)
+  - [get_max_amount](#get_max_amount)
    - [migrate](#migrate)
    - [get_version](#get_version)
    - [get_schema_version](#get_schema_version)
@@ -42,6 +45,9 @@ The on-chain record persisted under `DataKey::Subscription(sha256(subscriber_xdr
 | `interval` | `u64` | `[86400, 31536000]` | Seconds between successive payments (1 day – 365 days) |
 | `next_payment` | `u64` | `> 0`, no overflow | Unix timestamp of the next valid payment window |
 | `is_paused` | `bool` | — | `true` when subscription payments are suspended (reserved for future use) |
+| `grace_period` | `Option<u64>` | — | Optional grace-period duration in seconds |
+| `paused_until` | `Option<u64>` | — | Optional timestamp until which payments are paused |
+| `overdue_since` | `Option<u64>` | — | Optional timestamp when the subscription became overdue |
 
 **Amount units:** All `amount` values are in the token's smallest unit (stroops for USDC-equivalent tokens with 7 decimals: divide by `10_000_000` to get the display value). See [docs/token-decimals.md](token-decimals.md) for full guidance.
 
@@ -83,6 +89,7 @@ Create or update a recurring payment subscription. Calling `subscribe` a second 
 | `SelfSubscription` | 10 | `subscriber == merchant` |
 | `AmountMustBePositive` | 1 | `amount ≤ 0` |
 | `AmountTooLarge` | 9 | `amount > 10¹⁸` |
+| `AmountExceedsLimit` | 18 | A configured deployment cap exists and `amount` exceeds it |
 | `IntervalTooShort` | 2 | `interval < 86400` |
 | `IntervalTooLong` | 3 | `interval > 31536000` |
 | `InvalidTimestamp` | 8 | Ledger timestamp is zero or `now + interval` overflows `u64` |
@@ -149,6 +156,32 @@ const simResult = await server.simulateTransaction(tx);
 // Expected: { status: "SUCCESS" }
 // Subscription stored; `subscribe` event emitted.
 ```
+
+---
+
+### `update_subscription`
+
+Update the amount and interval for an existing subscription. The token and optional subscription metadata are preserved.
+
+**Authorization:** `subscriber` must sign.
+
+`update_subscription(subscriber, merchant, amount, interval)` validates the amount and interval using the same limits as `subscribe`. It also enforces the configured deployment amount cap and returns `NoActiveSubscription` when the pair has no record.
+
+---
+
+### `set_max_amount`
+
+Set the deployment-wide maximum subscription amount. Requires authorization from the admin set by `initialize`. A missing cap means no deployment-specific limit.
+
+`set_max_amount(admin, max_amount) -> Result<(), ContractError>`
+
+---
+
+### `get_max_amount`
+
+Return the configured deployment cap, or `None` when no cap has been configured. No authorization is required.
+
+`get_max_amount() -> Option<i128>`
 
 #### Rust test example
 
@@ -640,7 +673,7 @@ Return all subscription key hashes indexed for a given merchant. Off-chain tools
 
 ## Error code reference
 
-Complete table of all 17 error codes with trigger conditions, affected entry points, and resolution guidance.
+Complete table of all 18 error codes with trigger conditions, affected entry points, and resolution guidance.
 
 | Code | Name | Entry points | Trigger condition | Resolution |
 |------|------|-------------|-------------------|------------|
@@ -658,20 +691,23 @@ Complete table of all 17 error codes with trigger conditions, affected entry poi
 | 12 | `EmptyBatch` | `batch_execute_payment` | `subscribers` vector is empty | Pass at least one subscriber |
 | 13 | `BatchTooLarge` | `batch_execute_payment` | `subscribers.len() > 50` | Split into batches of ≤ 50 |
 | 14 | `InsufficientAllowance` | `subscribe` | `strict == true` and allowance < `amount` | Approve a higher SEP-41 allowance first, or use `strict = false` |
-| 15 | `AlreadyMigrated` | `migrate` | Schema already at `CURRENT_SCHEMA_VERSION` | No action needed |
-| 16 | `NotAdmin` | `migrate` | Caller ≠ stored admin address | Use the admin identity set during `initialize` |
-| 17 | `NotInitialized` | `migrate` | `initialize` not yet called | Call `initialize(admin)` first |
+| 15 | `AlreadyMigrated` | `migrate` | Stored schema is newer than this contract | Upgrade the contract implementation first |
+| 16 | `NotAdmin` | `migrate` | Legacy error; current admin checks return code 6 | Use the admin identity set during `initialize` |
+| 17 | `NotInitialized` | `migrate`, `set_max_amount` | `initialize` not yet called | Call `initialize(admin)` first |
+| 18 | `AmountExceedsLimit` | `subscribe`, `update_subscription` | `amount` exceeds the configured deployment cap | Lower the amount or increase the cap as admin |
 
 ### Errors returned per entry point
 
 | Entry point | Possible errors |
 |-------------|----------------|
-| `subscribe` | 1, 2, 3, 8, 9, 10, 11, 14 |
+| `subscribe` | 1, 2, 3, 8, 9, 10, 11, 14, 18 |
+| `update_subscription` | 1, 2, 3, 4, 8, 9, 18 |
+| `set_max_amount` | 6, 17 |
 | `execute_payment` | 4, 5, 6, 7, 8 |
 | `batch_execute_payment` | 8, 12, 13 |
 | `cancel` | 4 |
 | `get_subscription` | _(none — returns `Option`)_ |
-| `migrate` | 15, 16, 17 |
+| `migrate` | 4, 6, 15, 17 |
 
 ---
 
