@@ -124,6 +124,19 @@ fn test_subscribe_stores_data_and_emits_event() {
     }
 }
 
+#[test]
+fn test_version_entry_points_return_constants_without_auth() {
+    let t = T::new();
+    let admin = Address::generate(&t.env);
+
+    assert_eq!(
+        t.client().get_version(),
+        soroban_sdk::String::from_str(&t.env, "1.0.0"),
+    );
+    t.client().initialize(&admin);
+    assert_eq!(t.client().get_schema_version(), 1);
+}
+
 // ─── Requirement 13.1 — Full lifecycle ───────────────────────────────────────
 
 #[test]

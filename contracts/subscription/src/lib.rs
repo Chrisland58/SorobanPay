@@ -89,8 +89,8 @@ impl SubscriptionProtocol {
     }
 
     /// Return the contract semantic version string (e.g. `"1.0.0"`).
-    pub fn get_version(_env: Env) -> &'static str {
-        CONTRACT_VERSION
+    pub fn get_version(env: Env) -> soroban_sdk::String {
+        soroban_sdk::String::from_str(&env, CONTRACT_VERSION)
     }
 
     /// Return the on-chain schema version set during the last `migrate` call.
