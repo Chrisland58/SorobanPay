@@ -98,6 +98,21 @@ pub fn emit_cancel(env: &Env, subscriber: &Address, merchant: &Address) {
     );
 }
 
+/// Emit the `expired` event after a subscription is removed following its grace period.
+///
+/// Topics: (symbol("expired"), subscriber, merchant, token)
+pub fn emit_expired(env: &Env, subscriber: &Address, merchant: &Address, token: &Address) {
+    env.events().publish(
+        (
+            Symbol::new(env, "expired"),
+            subscriber.clone(),
+            merchant.clone(),
+            token.clone(),
+        ),
+        (),
+    );
+}
+
 /// Emit the `batch_execute_initiated` event after batch payment execution starts.
 ///
 /// This event provides telemetry for off-chain services to track batch execution operations.

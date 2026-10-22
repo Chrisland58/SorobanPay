@@ -124,6 +124,50 @@ fn test_subscribe_stores_data_and_emits_event() {
     }
 }
 
+#[test]
+fn test_expire_subscription_checks_grace_and_emits_topics() {
+    let t = T::new();
+    let missing = t
+        .client()
+        .try_expire_subscription(&t.subscriber, &t.merchant);
+    assert!(matches!(missing, Err(Ok(ContractError::NoActiveSubscription))));
+
+    t.client.subscribe(
+        &t.subscriber,
+        &t.merchant,
+        &t.token,
+        &100_i128,
+        &86_400_u64,
+        &false,
+    );
+    let key = DataKey::Subscription(subscription_key(&t.env, &t.subscriber, &t.merchant));
+    let mut data: SubscriptionData = t.env.storage().persistent().get(&key).unwrap();
+    let now = t.env.ledger().timestamp();
+    data.overdue_since = Some(now);
+    data.grace_period = Some(3_600);
+    t.env.storage().persistent().set(&key, &data);
+
+    let early = t
+        .client()
+        .try_expire_subscription(&t.subscriber, &t.merchant);
+    assert!(matches!(early, Err(Ok(ContractError::GracePeriodNotElapsed))));
+
+    t.advance(3_600);
+    t.client()
+        .expire_subscription(&t.subscriber, &t.merchant)
+        .unwrap();
+    assert!(!t.has_sub());
+
+    let events = t.env.events().all();
+    let contract_events: Vec<_> = events.iter().filter(|event| event.0 == t.contract_id).collect();
+    let (_, topics, _) = contract_events.last().unwrap();
+    assert_eq!(topics.len(), 4);
+    assert_eq!(topics.get(0).unwrap(), Symbol::new(&t.env, "expired").into_val(&t.env));
+    assert_eq!(topics.get(1).unwrap(), t.subscriber.clone().into_val(&t.env));
+    assert_eq!(topics.get(2).unwrap(), t.merchant.clone().into_val(&t.env));
+    assert_eq!(topics.get(3).unwrap(), t.token.clone().into_val(&t.env));
+}
+
 // ─── Requirement 13.1 — Full lifecycle ───────────────────────────────────────
 
 #[test]

@@ -39,4 +39,6 @@ pub enum ContractError {
     NotAdmin              = 16,
     /// Admin address not initialised; call `initialize` first
     NotInitialized        = 17,
+    /// Subscription grace period has not elapsed
+    GracePeriodNotElapsed = 19,
 }
