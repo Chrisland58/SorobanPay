@@ -204,97 +204,69 @@ router.get('/metrics', (_req: Request, res: Response) => {
   res.send(getPrometheusMetrics());
 });
 
+// ---------------------------------------------------------------------------
+// GET /api/v1/admin/ttl-health  (#1391)
+// ---------------------------------------------------------------------------
 /**
+ * Returns the list of subscriptions currently flagged as at risk of Soroban
+ * storage TTL expiry (no successful payment in the last 300+ days).
+ *
+ * Response 200:
+ * {
+ *   atRiskCount: number,
+ *   thresholdDays: number,   // TTL_RISK_DAYS constant (300)
+ *   subscriptions: TtlAtRiskEntry[]
+ * }
+ *
  * @openapi
- * /api/v1/admin/indexer:
- *   get:
- *     operationId: getIndexerMetrics
- *     summary: Get indexer health metrics
- *     tags: [Admin]
- *     security:
- *       - bearerAuth: []
- *     responses:
- *       "200":
- *         description: Indexer metrics
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 lastCursor:
- *                   type: string
- *                   nullable: true
- *                 lastPollAt:
- *                   type: string
- *                   nullable: true
- *                 eventsProcessedToday:
- *                   type: integer
- *                 lagSeconds:
- *                   type: integer
- *                   nullable: true
- *       "401":
- *         description: Unauthorized
- * /api/v1/admin/webhooks:
- *   get:
- *     operationId: getWebhookMetrics
- *     summary: Get webhook delivery metrics
- *     tags: [Admin]
- *     security:
- *       - bearerAuth: []
- *     responses:
- *       "200":
- *         description: Webhook metrics
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 totalDeliveries:
- *                   type: integer
- *                 successCount:
- *                   type: integer
- *                 failureCount:
- *                   type: integer
- *                 failureRate:
- *                   type: number
- *                 pendingRetries:
- *                   type: integer
- *                 last24hDeliveries:
- *                   type: integer
- *                 last24hFailures:
- *                   type: integer
  * /api/v1/admin/ttl-health:
  *   get:
  *     operationId: getTtlHealth
- *     summary: Get subscriptions at risk of TTL expiry
+ *     summary: List subscriptions at risk of Soroban storage TTL expiry
  *     description: |
- *       Identifies active subscriptions where the last successful payment was
- *       300+ days ago (MEDIUM risk) or 350+ days ago (HIGH risk).
- *       Results are cached in-process for 1 hour.
+ *       Returns subscriptions that have not had a successful payment in the
+ *       last 300 days. Soroban persistent storage has a maximum TTL of ~365
+ *       days; these subscriptions are at risk of on-chain expiry before the
+ *       next collection attempt.
+ *
+ *       Requires admin JWT (`role: "admin"`).
  *     tags: [Admin]
  *     security:
  *       - bearerAuth: []
  *     responses:
  *       "200":
- *         description: List of at-risk subscriptions
+ *         description: At-risk subscription list
  *         content:
  *           application/json:
  *             schema:
  *               type: object
  *               properties:
- *                 atRisk:
+ *                 atRiskCount:
+ *                   type: integer
+ *                 thresholdDays:
+ *                   type: integer
+ *                   example: 300
+ *                 subscriptions:
  *                   type: array
  *                   items:
- *                     $ref: "#/components/schemas/TtlHealthEntry"
- *                 total:
- *                   type: integer
- *                 checkedAt:
- *                   type: string
- *                   format: date-time
+ *                     $ref: "#/components/schemas/TtlAtRiskEntry"
  *       "401":
- *         description: Unauthorized
+ *         description: Missing or invalid admin JWT
  *       "500":
- *         description: Internal error running TTL check
+ *         description: Internal server error
  */
+router.get('/ttl-health', async (_req: Request, res: Response) => {
+  try {
+    const { findAtRiskSubscriptions, TTL_RISK_DAYS } = await import('../services/ttlHealthMonitor');
+    const subscriptions = await findAtRiskSubscriptions();
+    res.json({
+      atRiskCount: subscriptions.length,
+      thresholdDays: TTL_RISK_DAYS,
+      subscriptions,
+    });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to compute TTL health data' });
+  }
+});
 
 export default router;
