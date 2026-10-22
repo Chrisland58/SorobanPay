@@ -802,7 +802,7 @@ impl SubscriptionProtocol {
         // Advance next_payment from now (actual collection time), not from next_payment.
         // This slides the billing window forward from the actual transfer, preventing
         // drift accumulation for merchants who collect consistently late.
-        data.next_payment = now + data.interval;
+        data.next_payment = checked_next_payment(now, data.interval)?;
         data.overdue_since = None;
         data.payment_nonce = data.payment_nonce.checked_add(1).ok_or(ContractError::InvalidTimestamp)?;
         env.storage().persistent().set(&key, &data);
@@ -915,7 +915,7 @@ impl SubscriptionProtocol {
 
             // Advance next_payment from now (actual collection time), consistent
             // with execute_payment behaviour.
-            data.next_payment = now + data.interval;
+            data.next_payment = checked_next_payment(now, data.interval)?;
             data.overdue_since = None;
             data.payment_nonce = data.payment_nonce.checked_add(1).ok_or(ContractError::InvalidTimestamp)?;
             env.storage().persistent().set(&key, &data);
