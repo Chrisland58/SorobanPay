@@ -2,6 +2,21 @@
 
 This guide explains how Soroban persistent-storage TTL works within SorobanPay, how to detect at-risk entries before they expire, how to extend TTL programmatically, and how to integrate TTL health checks into your backend monitoring.
 
+> **Related guides:**
+> - For TTL constants, lifecycle diagrams, and cost implications, see [docs/storage-ttl.md](./storage-ttl.md).
+> - For the monitoring dashboard setup (Grafana/Prometheus), see [Section 7.6 Grafana Dashboard](#76-grafana-dashboard).
+> - For network-specific RPC URLs used in the scripts below, see [docs/networks.md](./networks.md).
+
+**Contents:**
+1. [TTL Concepts Recap](#1-ttl-concepts-recap)
+2. [Detecting At-Risk Entries](#2-detecting-at-risk-entries)
+3. [Programmatic TTL Extension](#3-programmatic-ttl-extension)
+4. [Monitoring TTL in Your Backend Health Check](#4-monitoring-ttl-in-your-backend-health-check)
+5. [Edge Cases](#5-edge-cases)
+6. [Alert Threshold Justification](#6-alert-threshold-justification)
+7. [Stuck or Duplicate Payment Runbook](#7-stuck-or-duplicate-payment-runbook)
+8. [Observability: Logs, Metrics, Traces, and Correlation IDs](#7-observability-logs-metrics-traces-and-correlation-ids)
+
 ---
 
 ## 1. TTL Concepts Recap
@@ -631,9 +646,11 @@ Expected: JSON with `dry_run: true`, `repairs`, and `errors`. A non-empty `error
 
 ## See Also
 
+- [Storage TTL Guide](./storage-ttl.md) — TTL constants, lifecycle diagrams, cost implications, and emergency extension procedure
 - [Network Configuration Guide](./networks.md) — testnet vs. mainnet RPC and passphrase values
 - [Backend API Cookbook](./api-cookbook.md) — Recipe 8: Monitor subscription TTL health
-- `contracts/subscription/src/storage.rs` — TTL constant definitions
+- [Versioning and Migration Guide](./versioning.md) — how contract upgrades interact with TTL and storage schema
+- `contracts/subscription/src/storage.rs` — TTL constant definitions (`MIN_TTL_LEDGERS`, `MAX_TTL_LEDGERS`)
 - [Soroban RPC getLedgerEntries spec](https://developers.stellar.org/docs/data/rpc/api-reference/methods/getLedgerEntries)
 - [Soroban Storage and TTL](https://developers.stellar.org/docs/build/smart-contracts/storage/ttl)
 
