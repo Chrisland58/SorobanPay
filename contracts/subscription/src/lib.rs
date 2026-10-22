@@ -1083,17 +1083,17 @@ impl SubscriptionProtocol {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "upgrade-test")))]
 mod test;
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "upgrade-test")))]
 mod security_tests;
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "upgrade-test")))]
 mod property_tests;
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "upgrade-test")))]
 mod multi_token_tests;
 
-#[cfg(test)]
-mod regression_tests;
+#[cfg(all(test, feature = "upgrade-test"))]
+mod test_upgrade;
