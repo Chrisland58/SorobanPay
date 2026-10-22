@@ -1033,7 +1033,6 @@ impl SubscriptionProtocol {
             &subscriber,
             &old_merchant,
             &new_merchant,
-            data.amount,
         );
 
         Ok(())
