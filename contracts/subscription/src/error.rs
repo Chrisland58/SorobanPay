@@ -90,4 +90,12 @@ pub enum ContractError {
     /// previously committed to an execution marker in temporary storage.  The transfer
     /// is NOT repeated — the subscription state is left unchanged.
     DuplicateExecution        = 22,
+    /// `set_protocol_fee` called with `fee_bps` exceeding the hard cap
+    /// [`crate::storage::MAX_FEE_BPS`] (500 bps == 5 %).
+    ///
+    /// The protocol fee rate is bounded so an admin can never configure a fee higher
+    /// than 5 % of a payment.  `fee_bps == 500` is accepted (on the boundary); any
+    /// value `> 500` (e.g. 501) is rejected with this error before the fee config is
+    /// written.  See [`crate::SubscriptionProtocol::set_protocol_fee`].
+    FeeTooHigh                = 24,
 }
