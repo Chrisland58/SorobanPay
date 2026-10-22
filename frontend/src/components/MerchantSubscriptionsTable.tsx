@@ -327,6 +327,17 @@ export default function MerchantSubscriptionsTable({
           )}
         </div>
         <div className="flex items-center justify-end gap-2">
+          {/* Collect All Due */}
+          {dueCount > 0 && (
+            <button
+              type="button"
+              onClick={() => onBatchCollect(selectableSubscribers)}
+              className="rounded-lg bg-blue-700 hover:bg-blue-600 px-3 py-1.5 text-xs font-semibold text-white transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400"
+              aria-label={`Collect all ${dueCount} due payments`}
+            >
+              Collect All Due ({dueCount})
+            </button>
+          )}
           {/* Batch collect */}
           {selectedCount > 0 && (
             <button

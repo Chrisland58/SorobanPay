@@ -20,24 +20,12 @@
  */
 
 import Link from 'next/link';
-import dynamic from 'next/dynamic';
 import { useCallback, useEffect, useState } from 'react';
 import { useWallet } from '@/hooks/useWallet';
 import { usePaymentHistory } from '@/hooks/usePaymentHistory';
+import PaymentHistoryTable from '@/components/PaymentHistoryTable';
+import { ErrorBoundary } from '@/components/ErrorBoundary';
 import { NETWORK_NAME } from '@/constants/network';
-
-const PaymentHistoryTable = dynamic(
-  () => import('@/components/PaymentHistoryTable'),
-  {
-    ssr: false,
-    loading: () => (
-      <div className="rounded-2xl border border-gray-800 bg-gray-900/60 p-6 animate-pulse" aria-hidden="true">
-        <div className="h-6 w-48 rounded bg-gray-800 mb-4" />
-        <div className="h-40 w-full rounded bg-gray-800" />
-      </div>
-    ),
-  },
-);
 
 const PAGE_SIZE = 20;
 
@@ -170,21 +158,23 @@ export default function HistoryPage() {
         aria-label="Payment history table"
         aria-live="polite"
       >
-        <PaymentHistoryTable
-          events={pageEvents}
-          isLoading={isLoading}
-          error={error}
-          hasMore={hasMore}
-          onLoadMore={loadMore}
-          onRefresh={refreshHistory}
-          currentPage={currentPage}
-          canGoPrevious={currentPage > 1}
-          canGoNext={canGoNext}
-          onPreviousPage={() => updatePageUrl(currentPage - 1)}
-          onNextPage={goToNextPage}
-          isConnected={!!publicKey}
-          networkName={NETWORK_NAME}
-        />
+        <ErrorBoundary name="PaymentHistory">
+          <PaymentHistoryTable
+            events={pageEvents}
+            isLoading={isLoading}
+            error={error}
+            hasMore={hasMore}
+            onLoadMore={loadMore}
+            onRefresh={refreshHistory}
+            currentPage={currentPage}
+            canGoPrevious={currentPage > 1}
+            canGoNext={canGoNext}
+            onPreviousPage={() => updatePageUrl(currentPage - 1)}
+            onNextPage={goToNextPage}
+            isConnected={!!publicKey}
+            networkName={NETWORK_NAME}
+          />
+        </ErrorBoundary>
       </section>
 
       {/* ── Footer note ─────────────────────────────────────────────────── */}

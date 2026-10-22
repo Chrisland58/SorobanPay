@@ -103,7 +103,7 @@ export function TransactionProgressIndicator({
   const statusUnknown = currentStatus === "timeout" || currentStatus === "unknown";
 
   return (
-    <div className="w-full max-w-lg mx-auto p-6">
+    <div className="w-full max-w-lg mx-auto p-6" role="status" aria-live="polite">
       {/* Header */}
       <div className="mb-6 text-center">
         <h2 className="text-xl font-bold text-gray-900 dark:text-white mb-2">
