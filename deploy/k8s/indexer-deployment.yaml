@@ -50,6 +50,9 @@ spec:
     spec:
       # Allow up to 60s for graceful shutdown so in-flight DB writes complete.
       terminationGracePeriodSeconds: 60
+      # Bind the dedicated least-privilege ServiceAccount for the indexer.
+      # The account has read-only access to Secrets and ConfigMaps (see rbac.yaml).
+      serviceAccountName: sorobanpay-indexer
       # Run as a non-root user for security hardening.
       securityContext:
         runAsNonRoot: true

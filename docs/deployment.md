@@ -15,6 +15,26 @@ Before going live on Stellar **Mainnet**, complete every item in this checklist.
 - [ ] Deploy to **Testnet** first and exercise the full user flow manually.
 - [ ] Capture the deployed contract address and set it in `frontend/.env.local` as `NEXT_PUBLIC_CONTRACT_ID`.
 
+## Contract Upgrades
+
+Contract upgrades must preserve data already stored on-chain. New fields added
+to persisted contract types must be optional and safely default for records
+created by earlier versions. Add regression coverage for storage schema or
+entry-point changes before deploying an upgrade.
+
+Run the two-phase compatibility tests with:
+
+```bash
+make test-upgrade
+```
+
+The tests create subscriptions using v1, replace its implementation at the
+same test contract address with a v1.1 implementation, and verify that the old
+subscriptions remain readable with the new optional field unset. They also
+call a v1.1-only entry point against an existing subscription. This uses
+Soroban's native test environment; it does not deploy or upgrade a WASM
+artifact.
+
 ### Frontend
 
 - [ ] Run `npm run test:ci` in `frontend/` — all tests must pass, coverage must be ≥ 80%.

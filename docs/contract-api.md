@@ -3,7 +3,7 @@
 Full reference for all `SubscriptionProtocol` entry points, types, and error codes.
 
 **Contract version:** `1.0.0`  
-**Schema version:** `1`  
+**Schema version:** `2`
 **Network:** Stellar / Soroban
 
 ---
@@ -16,6 +16,8 @@ Full reference for all `SubscriptionProtocol` entry points, types, and error cod
    - [execute_payment](#execute_payment)
    - [batch_execute_payment](#batch_execute_payment)
    - [cancel](#cancel)
+   - [pause_subscription](#pause_subscription)
+   - [resume_subscription](#resume_subscription)
    - [get_subscription](#get_subscription)
    - [initialize](#initialize)
    - [migrate](#migrate)
@@ -41,7 +43,11 @@ The on-chain record persisted under `DataKey::Subscription(sha256(subscriber_xdr
 | `amount` | `i128` | `> 0`, `≤ 10¹⁸` | Payment amount per interval in the token's base unit (stroops) |
 | `interval` | `u64` | `[86400, 31536000]` | Seconds between successive payments (1 day – 365 days) |
 | `next_payment` | `u64` | `> 0`, no overflow | Unix timestamp of the next valid payment window |
-| `is_paused` | `bool` | — | `true` when subscription payments are suspended (reserved for future use) |
+| `is_paused` | `bool` | — | `true` when subscription payments are suspended |
+| `grace_period` | `u64` | — | Seconds after `overdue_since` before the subscription is eligible for expiry |
+| `overdue_since` | `Option<u64>` | — | Unix timestamp of the most recent failed collection, or `None` |
+| `payment_nonce` | `u32` | — | Monotonically increasing counter of successful payments (replay protection) |
+| `paused_until` | `Option<u64>` | — | Unix timestamp at which a paused subscription auto-resumes; `None` means an indefinite pause |
 
 **Amount units:** All `amount` values are in the token's smallest unit (stroops for USDC-equivalent tokens with 7 decimals: divide by `10_000_000` to get the display value). See [docs/token-decimals.md](token-decimals.md) for full guidance.
 
@@ -83,10 +89,12 @@ Create or update a recurring payment subscription. Calling `subscribe` a second 
 | `SelfSubscription` | 10 | `subscriber == merchant` |
 | `AmountMustBePositive` | 1 | `amount ≤ 0` |
 | `AmountTooLarge` | 9 | `amount > 10¹⁸` |
+| `AmountExceedsLimit` | 19 | `amount >` the admin-configured `max_amount` |
 | `IntervalTooShort` | 2 | `interval < 86400` |
 | `IntervalTooLong` | 3 | `interval > 31536000` |
+| `InvalidTokenAddress` | 11 | `token` equals the contract's own address |
 | `InvalidTimestamp` | 8 | Ledger timestamp is zero or `now + interval` overflows `u64` |
-| `InsufficientAllowance` | 14 | `strict == true` and subscriber's token allowance < `amount` |
+| `InsufficientAllowance` | 15 | `strict == true` and subscriber's token allowance < `amount` |
 
 #### Events emitted
 
@@ -218,6 +226,9 @@ Collect the next due payment from a subscriber. Transfers `amount` tokens direct
 | `PaymentNotDue` | 5 | Ledger timestamp < `next_payment` |
 | `TransferFailed` | 7 | Subscriber's token balance < `amount` at payment time |
 | `InvalidTimestamp` | 8 | Ledger timestamp is zero |
+| `SubscriptionPaused` | 12 | Subscription is paused and `paused_until` has not elapsed |
+| `InsufficientAllowance` | 15 | Subscriber's token allowance < `amount` |
+| `DuplicateExecution` | 22 | The payment nonce was already executed (replay guard) |
 
 #### Failure paths
 
@@ -336,8 +347,8 @@ Collect payments from up to 50 subscribers in a single transaction. Each subscri
 
 | Error | Code | Trigger |
 |-------|------|---------|
-| `EmptyBatch` | 12 | `subscribers` vector is empty |
-| `BatchTooLarge` | 13 | `subscribers.len() > 50` |
+| `EmptyBatch` | 13 | `subscribers` vector is empty |
+| `BatchTooLarge` | 14 | `subscribers.len() > 50` |
 | `InvalidTimestamp` | 8 | Ledger timestamp is zero |
 
 #### Events emitted
@@ -444,6 +455,94 @@ fn test_cancel_removes_subscription() {
     let pay_result = client.try_execute_payment(&subscriber, &merchant);
     assert_eq!(pay_result, Err(Ok(ContractError::NoActiveSubscription)));
 }
+```
+
+---
+
+### `pause_subscription`
+
+Temporarily suspend payment collection for an active subscription. While paused, `execute_payment` returns `SubscriptionPaused` and `batch_execute_payment` skips the subscription; no tokens move and `next_payment` is left untouched.
+
+**Authorization:** `subscriber` must sign.
+
+#### Parameters
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `subscriber` | `Address` | Owner of the subscription |
+| `merchant` | `Address` | Merchant counterparty |
+| `token` | `Address` | Token contract address (informational; the subscription is resolved by subscriber + merchant) |
+| `resume_at` | `Option<u64>` | Optional Unix timestamp for automatic resume. `None` pauses indefinitely until an explicit `resume_subscription` call. |
+
+#### Return value
+
+`Result<(), ContractError>` — returns `()` on success.
+
+#### Error codes
+
+| Error | Code | Trigger |
+|-------|------|---------|
+| `NoActiveSubscription` | 4 | No subscription found for this pair |
+| `InvalidTimestamp` | 8 | `resume_at` is not strictly in the future |
+| `SubscriptionPaused` | 12 | Subscription is already paused |
+
+#### Events emitted
+
+- `paused` — data is `Option<u64>` (`resume_at`)
+
+#### CLI example
+
+```bash
+stellar contract invoke \
+  --id $CONTRACT_ID --source alice --network testnet \
+  -- pause_subscription \
+  --subscriber GABC1234...SUBSCRIBER \
+  --merchant   GXYZ5678...MERCHANT \
+  --token      CABC1111...TOKEN \
+  --resume-at  1735689600
+```
+
+---
+
+### `resume_subscription`
+
+Reactivate a paused subscription immediately, clearing `is_paused` and `paused_until`. `next_payment` is recomputed as `now + interval`, so the subscriber is not charged for time spent paused.
+
+**Authorization:** `subscriber` must sign.
+
+#### Parameters
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `subscriber` | `Address` | Owner of the subscription |
+| `merchant` | `Address` | Merchant counterparty |
+| `token` | `Address` | Token contract address (informational; the subscription is resolved by subscriber + merchant) |
+
+#### Return value
+
+`Result<(), ContractError>` — returns `()` on success.
+
+#### Error codes
+
+| Error | Code | Trigger |
+|-------|------|---------|
+| `NoActiveSubscription` | 4 | No subscription found for this pair |
+| `InvalidTimestamp` | 8 | Ledger timestamp is zero or `now + interval` overflows `u64` |
+| `SubscriptionNotPaused` | 24 | Subscription is not currently paused |
+
+#### Events emitted
+
+- `resumed` — data is the recomputed `next_payment` (`u64`)
+
+#### CLI example
+
+```bash
+stellar contract invoke \
+  --id $CONTRACT_ID --source alice --network testnet \
+  -- resume_subscription \
+  --subscriber GABC1234...SUBSCRIBER \
+  --merchant   GXYZ5678...MERCHANT \
+  --token      CABC1111...TOKEN
 ```
 
 ---
@@ -611,21 +710,21 @@ Upgrade the on-chain schema version to `CURRENT_SCHEMA_VERSION`. Returns `Alread
 
 | Error | Code | Trigger |
 |-------|------|---------|
-| `NotInitialized` | 17 | `initialize` has not been called |
-| `NotAdmin` | 16 | `admin` does not match the stored admin address |
-| `AlreadyMigrated` | 15 | Schema version is already `CURRENT_SCHEMA_VERSION` |
+| `NotInitialized` | 18 | `initialize` has not been called |
+| `NotAdmin` | 17 | `admin` does not match the stored admin address |
+| `AlreadyMigrated` | 16 | Schema version is already `CURRENT_SCHEMA_VERSION` |
 
 ---
 
 ### `get_version`
 
-Return the contract semantic version string (e.g. `"1.0.0"`). This is a compile-time constant — no storage read occurs.
+Return the contract semantic version as a Soroban `String`. The current value is `"1.0.0"`; this is a compile-time constant and requires no storage read.
 
 **Authorization:** None required.
 
 #### Return value
 
-`&'static str`
+`String` — `"1.0.0"`
 
 #### CLI example
 
@@ -642,7 +741,7 @@ stellar contract invoke \
 
 ### `get_schema_version`
 
-Return the on-chain schema version stored during the last `migrate` call (or `initialize`). Returns `0` if `initialize` has not been called.
+Return the on-chain schema version stored during the last `migrate` call (or `initialize`). The current contract schema version is `1`. Returns `0` if `initialize` has not been called.
 
 **Authorization:** None required.
 
@@ -693,38 +792,52 @@ Return all subscription key hashes indexed for a given merchant. Off-chain tools
 
 ## Error code reference
 
-Complete table of all 17 error codes with trigger conditions, affected entry points, and resolution guidance.
+Complete table of all 25 error codes with trigger conditions, affected entry points, and resolution guidance.
 
 | Code | Name | Entry points | Trigger condition | Resolution |
 |------|------|-------------|-------------------|------------|
-| 1 | `AmountMustBePositive` | `subscribe` | `amount ≤ 0` | Pass a positive `amount` |
-| 2 | `IntervalTooShort` | `subscribe` | `interval < 86400` | Minimum interval is 86400 s (1 day) |
-| 3 | `IntervalTooLong` | `subscribe` | `interval > 31536000` | Maximum interval is 31536000 s (365 days) |
-| 4 | `NoActiveSubscription` | `execute_payment`, `cancel` | No record for `(subscriber, merchant)` | Verify pair; may have been cancelled or expired |
+| 1 | `AmountMustBePositive` | `subscribe`, `update_subscription` | `amount ≤ 0` | Pass a positive `amount` |
+| 2 | `IntervalTooShort` | `subscribe`, `update_subscription` | `interval < 86400` | Minimum interval is 86400 s (1 day) |
+| 3 | `IntervalTooLong` | `subscribe`, `update_subscription` | `interval > 31536000` | Maximum interval is 31536000 s (365 days) |
+| 4 | `NoActiveSubscription` | `execute_payment`, `cancel`, `update_subscription`, `pause_subscription`, `resume_subscription`, `transfer_subscription` | No record for `(subscriber, merchant)` | Verify pair; may have been cancelled or expired |
 | 5 | `PaymentNotDue` | `execute_payment` | `now < next_payment` | Wait until `next_payment` timestamp has passed |
 | 6 | `Unauthorized` | all auth-required | Signature missing or invalid | Ensure the correct account signs the transaction |
 | 7 | `TransferFailed` | `execute_payment` | Subscriber balance < `amount` | Subscriber must fund their account or top up allowance |
-| 8 | `InvalidTimestamp` | `subscribe`, `execute_payment` | Ledger timestamp is zero or `now + interval` overflows `u64` | Unlikely in production; indicates ledger misconfiguration |
-| 9 | `AmountTooLarge` | `subscribe` | `amount > 10¹⁸` | Use an amount within the safe range |
-| 10 | `SelfSubscription` | `subscribe` | `subscriber == merchant` | Use distinct addresses for subscriber and merchant |
+| 8 | `InvalidTimestamp` | `subscribe`, `execute_payment`, `batch_execute_payment`, `pause_subscription`, `resume_subscription` | Ledger timestamp is zero or `now + interval` overflows `u64` | Unlikely in production; indicates ledger misconfiguration |
+| 9 | `AmountTooLarge` | `subscribe`, `update_subscription`, `set_max_amount` | `amount > 10¹⁸` or an invalid cap | Use an amount within the safe range |
+| 10 | `SelfSubscription` | `subscribe`, `transfer_subscription` | `subscriber == merchant` (or `subscriber == new_merchant`) | Use distinct addresses for subscriber and merchant |
 | 11 | `InvalidTokenAddress` | `subscribe` | `token == contract address` | Use a valid SEP-41 token contract address |
-| 12 | `EmptyBatch` | `batch_execute_payment` | `subscribers` vector is empty | Pass at least one subscriber |
-| 13 | `BatchTooLarge` | `batch_execute_payment` | `subscribers.len() > 50` | Split into batches of ≤ 50 |
-| 14 | `InsufficientAllowance` | `subscribe` | `strict == true` and allowance < `amount` | Approve a higher SEP-41 allowance first, or use `strict = false` |
-| 15 | `AlreadyMigrated` | `migrate` | Schema already at `CURRENT_SCHEMA_VERSION` | No action needed |
-| 16 | `NotAdmin` | `migrate` | Caller ≠ stored admin address | Use the admin identity set during `initialize` |
-| 17 | `NotInitialized` | `migrate` | `initialize` not yet called | Call `initialize(admin)` first |
+| 12 | `SubscriptionPaused` | `execute_payment`, `pause_subscription` | Payment attempted before `paused_until`, or pause on an already-paused subscription | Wait for `paused_until`, call `resume_subscription`, or `cancel` |
+| 13 | `EmptyBatch` | `batch_execute_payment` | `subscribers` vector is empty | Pass at least one subscriber |
+| 14 | `BatchTooLarge` | `batch_execute_payment` | `subscribers.len() > 50` | Split into batches of ≤ 50 |
+| 15 | `InsufficientAllowance` | `subscribe`, `execute_payment` | `strict == true` and allowance < `amount`, or allowance revoked before collection | Approve a higher SEP-41 allowance first |
+| 16 | `AlreadyMigrated` | `migrate` | Schema already at `CURRENT_SCHEMA_VERSION` | No action needed |
+| 17 | `NotAdmin` | `migrate`, `set_max_amount`, `set_protocol_fee` | Caller ≠ stored admin address | Use the admin identity set during `initialize` |
+| 18 | `NotInitialized` | `get_config`, `migrate`, `set_protocol_fee` | `initialize` not yet called | Call `initialize(admin)` first |
+| 19 | `AmountExceedsLimit` | `subscribe` | `amount >` the admin-configured `max_amount` | Lower the amount or have the admin raise the cap |
+| 20 | `SameMerchant` | `transfer_subscription` | `old_merchant == new_merchant` | Choose a distinct destination merchant |
+| 21 | `SubscriptionAlreadyExists` | `transfer_subscription` | A subscription already exists for `(subscriber, new_merchant)` | Cancel the destination subscription first or choose another merchant |
+| 22 | `DuplicateExecution` | `execute_payment` | The payment nonce was already executed (replay guard) | Do not retry the same execution; wait for the next billing cycle |
+| 23 | `GracePeriodActive` | grace-period flows (reserved) | An operation requiring an expired grace period was attempted while grace is still active | Wait until the grace period elapses |
+| 24 | `SubscriptionNotPaused` | `resume_subscription` | Subscription is not currently paused | No action needed, or pause it first |
+| 25 | `FeeBpsTooHigh` | `set_protocol_fee` | `fee_bps > 500` | Use a fee ≤ 500 bps (5%) |
 
 ### Errors returned per entry point
 
 | Entry point | Possible errors |
 |-------------|----------------|
-| `subscribe` | 1, 2, 3, 8, 9, 10, 11, 14 |
-| `execute_payment` | 4, 5, 6, 7, 8 |
-| `batch_execute_payment` | 8, 12, 13 |
-| `cancel` | 4 |
+| `subscribe` | 1, 2, 3, 6, 8, 9, 10, 11, 15, 19 |
+| `update_subscription` | 1, 2, 3, 4, 6, 9 |
+| `execute_payment` | 4, 5, 6, 7, 8, 12, 15, 22 |
+| `batch_execute_payment` | 6, 8, 13, 14 (per-subscriber failures are returned as `false`) |
+| `cancel` | 4, 6 |
+| `pause_subscription` | 4, 6, 8, 12 |
+| `resume_subscription` | 4, 6, 8, 24 |
+| `transfer_subscription` | 4, 6, 10, 20, 21 |
 | `get_subscription` | _(none — returns `Option`)_ |
-| `migrate` | 15, 16, 17 |
+| `migrate` | 16, 17, 18 |
+| `set_max_amount` | 6, 9, 17, 18 |
+| `set_protocol_fee` | 6, 17, 18, 25 |
 
 ---
 
@@ -844,25 +957,33 @@ Returns `Vec<BytesN<32>>`. Returns an empty vector if the merchant has no subscr
 
 | Code | Name | Trigger |
 |------|------|---------|
-| 1 | `AmountMustBePositive` | `amount ≤ 0` in `subscribe` |
-| 2 | `IntervalTooShort` | `interval < 86400` in `subscribe` |
-| 3 | `IntervalTooLong` | `interval > 31536000` in `subscribe` |
+| 1 | `AmountMustBePositive` | `amount ≤ 0` in `subscribe` or `update_subscription` |
+| 2 | `IntervalTooShort` | `interval < 86400` in `subscribe` or `update_subscription` |
+| 3 | `IntervalTooLong` | `interval > 31536000` in `subscribe` or `update_subscription` |
 | 4 | `NoActiveSubscription` | No subscription found for `(subscriber, merchant)` |
 | 5 | `PaymentNotDue` | `now < next_payment` in `execute_payment` |
 | 6 | `Unauthorized` | Authorization check failed |
 | 7 | `TransferFailed` | Insufficient subscriber balance at payment time |
 | 8 | `InvalidTimestamp` | Ledger timestamp is zero or would overflow |
-| 9 | `AmountTooLarge` | `amount > 10¹⁸` in `subscribe` |
-| 10 | `SelfSubscription` | `subscriber == merchant` in `subscribe` |
-| 11 | `InvalidTokenAddress` | `token` is the contract's own address |
-| 12 | `EmptyBatch` | `subscribers` list is empty in `batch_execute_payment` |
-| 13 | `BatchTooLarge` | `subscribers.len() > 50` in `batch_execute_payment` |
-| 14 | `InsufficientAllowance` | `strict == true` and `allowance < amount` in `subscribe` |
-| 15 | `AlreadyMigrated` | Schema already at current version in `migrate` |
-| 16 | `NotAdmin` | Caller is not the stored admin in `migrate` |
-| 17 | `NotInitialized` | `initialize` was never called |
+| 9 | `AmountTooLarge` | `amount > 10¹⁸` in `subscribe` / `update_subscription`, or invalid `set_max_amount` cap |
+| 10 | `SelfSubscription` | `subscriber == merchant` in `subscribe` or `transfer_subscription` |
+| 11 | `InvalidTokenAddress` | `token` is the contract's own address in `subscribe` |
+| 12 | `SubscriptionPaused` | Payment attempted while paused before `paused_until`, or double pause |
+| 13 | `EmptyBatch` | `subscribers` list is empty in `batch_execute_payment` |
+| 14 | `BatchTooLarge` | `subscribers.len() > 50` in `batch_execute_payment` |
+| 15 | `InsufficientAllowance` | `strict == true` and `allowance < amount` in `subscribe`, or allowance revoked before `execute_payment` |
+| 16 | `AlreadyMigrated` | Schema already at current version in `migrate` |
+| 17 | `NotAdmin` | Caller is not the stored admin in `migrate`, `set_max_amount`, or `set_protocol_fee` |
+| 18 | `NotInitialized` | `initialize` was never called |
+| 19 | `AmountExceedsLimit` | `amount` exceeds the admin-configured `max_amount` in `subscribe` |
+| 20 | `SameMerchant` | `old_merchant == new_merchant` in `transfer_subscription` |
+| 21 | `SubscriptionAlreadyExists` | Destination `(subscriber, new_merchant)` pair already has a subscription |
+| 22 | `DuplicateExecution` | Replay guard detected an already-executed payment nonce |
+| 23 | `GracePeriodActive` | Grace-period-dependent operation attempted while grace is still active |
+| 24 | `SubscriptionNotPaused` | `resume_subscription` called on an active subscription |
+| 25 | `FeeBpsTooHigh` | `fee_bps > 500` in `set_protocol_fee` |
 
-Error codes 1–17 are **stable** — they will never be reassigned. New codes will use numbers ≥ 18.
+Error codes 1–25 are **stable** — they will never be reassigned. New codes will use numbers ≥ 26.
 
 ---
 

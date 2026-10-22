@@ -312,6 +312,47 @@ pub fn subscribe(env: Env, subscriber: Address, ...) -> Result<(), ContractError
 }
 ```
 
+### Full `require_auth`-first audit (latest)
+
+Audited every `#[contractimpl]` entry point of `SubscriptionProtocol` (`contracts/subscription/src/lib.rs`). Each restricted entry point was checked to confirm `require_auth()` is its first statement, ahead of any storage read, log, or cross-contract call.
+
+**Result: PASS — all restricted entry points call `require_auth()` as their first statement; all read-only entry points correctly have no auth.**
+
+| Entry point | Class | Authenticating address | `require_auth` first? |
+|-------------|-------|------------------------|-----------------------|
+| `initialize` | constructor (bootstrap) | *(none — see note)* | N/A (exception) |
+| `init` | alias → `initialize` | *(none)* | N/A |
+| `get_config` | read-only | — | N/A (no auth, correct) |
+| `set_max_amount` | restricted | `admin` | ✅ first statement |
+| `get_version` | read-only | — | N/A (no auth, correct) |
+| `get_schema_version` | read-only | — | N/A (no auth, correct) |
+| `migrate` | restricted | `admin` | ✅ first statement |
+| `set_protocol_fee` | restricted | `admin` | ✅ first statement |
+| `get_protocol_fee` | read-only | — | N/A (no auth, correct) |
+| `compute_subscription_key` | read-only | — | N/A (no auth, correct) |
+| `get_merchant_subscription_keys` | read-only | — | N/A (no auth, correct) |
+| `get_merchant_subscriptions` | read-only | — | N/A (no auth, correct) |
+| `subscribe` | restricted | `subscriber` | ✅ first statement |
+| `update_subscription` | restricted | `subscriber` | ✅ first statement |
+| `pause_subscription` | restricted | `subscriber` | ✅ first statement |
+| `resume_subscription` | restricted | `subscriber` | ✅ first statement |
+| `execute_payment` | restricted | `merchant` | ✅ first statement |
+| `batch_execute_payment` | restricted | `merchant` | ✅ first statement |
+| `cancel` | restricted | `subscriber` | ✅ first statement |
+| `transfer_subscription` | restricted | `subscriber` + `old_merchant` (dual) | ✅ first statements |
+| `get_subscription` | read-only | — | N/A (no auth, correct) |
+| `get_subscription_count` | read-only | — | N/A (no auth, correct) |
+
+**Finding — `initialize` (constructor, no `require_auth`):** `initialize` is the one-time bootstrap that stores the admin address. It does **not** call `require_auth()` and performs a storage read (the `DataKey::Admin` already-initialized check) as its first statement. This is an **intentional, accepted exception**, not a violation:
+
+- It is the standard Soroban constructor pattern; the once-only guard (`panic!("already initialized")`) prevents re-initialization and hijacking.
+- Adding `admin.require_auth()` as the first statement would conform to the letter of the placement rule but would change the deployment signing flow (the configured `admin` would have to co-sign `initialize`, breaking `deploy/deploy.sh` when the deployer identity differs from the admin) and would **not** prevent the classic initialize front-running (an attacker front-running `initialize(attacker)` auths as themselves).
+- The robust mitigation for initialize front-running is deploying and initializing atomically in a single transaction, which is the deployment practice.
+
+This finding is recorded for review; no code change was made to `initialize` in this audit. If the team later requires `admin.require_auth()` in `initialize`, the deploy flow must be updated so the admin co-signs.
+
+**Enforcement:** There is no built-in Clippy lint for "`require_auth` first." The convention is therefore enforced (a) by a header comment on the `#[contractimpl] impl SubscriptionProtocol` block in `lib.rs` (see the "Authorization convention" comment), and (b) by review against this section. New restricted entry points must satisfy this rule before merge.
+
 ---
 
 ## 4. Backend Secrets Management

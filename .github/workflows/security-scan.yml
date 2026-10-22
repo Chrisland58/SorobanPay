@@ -31,7 +31,8 @@ jobs:
 
       - name: Run cargo audit
         id: cargo_audit
-        run: cargo audit --manifest-path contracts/subscription/Cargo.toml
+        run: cargo audit
+        working-directory: contracts/subscription
         continue-on-error: true
 
       - name: Create GitHub issue on failure

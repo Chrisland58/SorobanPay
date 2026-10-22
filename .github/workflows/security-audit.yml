@@ -61,7 +61,7 @@ jobs:
 
       - name: Upload audit report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: npm-audit-frontend
           path: /tmp/npm-audit-frontend.json
@@ -124,7 +124,7 @@ jobs:
 
       - name: Upload audit report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: npm-audit-backend
           path: /tmp/npm-audit-backend.json
@@ -175,11 +175,11 @@ jobs:
 
       - name: Run cargo audit
         id: cargo_audit
+        working-directory: contracts/subscription
         run: |
           set +e
           # --json produces machine-readable output; tee keeps human output visible
           cargo audit \
-            --manifest-path contracts/subscription/Cargo.toml \
             --json 2>&1 | tee /tmp/cargo-audit.json
           EXIT_CODE=${PIPESTATUS[0]}
           echo "exit_code=$EXIT_CODE" >> "$GITHUB_OUTPUT"
@@ -187,7 +187,7 @@ jobs:
 
       - name: Upload audit report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: cargo-audit-report
           path: /tmp/cargo-audit.json
@@ -201,7 +201,7 @@ jobs:
             body += `**Workflow run:** ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\n\n`;
             body += 'Security advisories were found in `contracts/subscription/` Cargo dependencies.\n\n';
             body += '### Next steps\n';
-            body += '1. Run `cargo audit --manifest-path contracts/subscription/Cargo.toml` locally.\n';
+            body += '1. Run `cd contracts/subscription && cargo audit` locally.\n';
             body += '2. Update the affected crates in `Cargo.toml` / `Cargo.lock` to patched versions.\n';
             body += '3. If no fix is available, add an `[advisories]` ignore entry in `audit.toml` with a justification.\n';
             body += '4. Close this issue once all advisories are resolved or acknowledged.\n\n';

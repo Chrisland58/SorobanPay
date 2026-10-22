@@ -31,6 +31,9 @@ resources:
   # ── Namespace ──────────────────────────────────────────────────────────────
   - namespace.yaml
 
+  # ── RBAC (ServiceAccounts, Role, RoleBindings) ────────────────────────────
+  - rbac.yaml
+
   # ── Configuration & Secrets ───────────────────────────────────────────────
   - configmap.yaml
   - secrets.yaml

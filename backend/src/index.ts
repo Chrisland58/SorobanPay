@@ -18,8 +18,9 @@ import { PaymentScheduler } from './services/paymentScheduler';
 import { createRetryScheduler } from './services/retryScheduler';
 import { retryQueue } from './services/retryQueue';
 import { startWebhookWorker, shutdownWebhookWorker } from './services/webhookQueue'; // BE-53
-import { apiLimiter } from './middleware/rateLimiter';
+import { apiLimiter, selectiveRateLimiter } from './middleware/rateLimiter';
 import { versionMiddleware } from './middleware/versioning';
+import { correlationIdMiddleware } from './middleware/correlationId'; // #1386
 import summariesRouter from './routes/summaries';
 import reconcileRouter from './routes/reconcile';
 import subscriptionsRouter from './routes/subscriptions';
@@ -28,6 +29,7 @@ import notificationsRouter from './routes/notifications';
 import kycRouter from './routes/kyc';
 import versionRouter from './routes/version';
 import analyticsRouter from './routes/analytics';   // FE-50 / BE-52
+import mrrRouter from './routes/mrr';               // #1378: MRR analytics
 import reportsRouter from './routes/reports';        // BE-58: revenue reporting export
 import adminRouter from './routes/admin';
 import authRouter from './routes/auth';                        // BE-55: merchant auth
@@ -38,6 +40,10 @@ import { PrismaSubscriptionDB, fetchChainEventsFromDB } from './services/reconci
 import { getPrometheusMetrics } from './services/metricsService';
 import retriesRouter from './routes/retries';
 import { startRetryWorker, shutdownRetryWorker } from './services/retryQueue';
+import { disconnectPrisma } from './lib/prisma';     // #1387: graceful shutdown
+import { closePool } from './db/pool';               // #1387: drain pg pool
+import { disconnectPrisma } from './lib/prisma';     // #1387: graceful shutdown
+import { closePool } from './db/pool';               // #1387: drain pg pool
 
 // ─── Migration startup guard (#1078) ─────────────────────────────────────────
 
@@ -148,6 +154,20 @@ const app = express();
 
 app.use(cors());
 app.use(express.json());
+app.use(correlationIdMiddleware); // #1386: attach correlationId + req.log to every request
+
+// ─── Graceful-shutdown gate (#1387) ──────────────────────────────────────────
+// Set to true when SIGTERM/SIGINT is received. Returns 503 for new requests
+// so Kubernetes stops routing traffic while in-flight requests drain.
+export let isShuttingDown = false;
+
+app.use((_req, res, next) => {
+  if (isShuttingDown) {
+    res.status(503).json({ status: 'shutting_down' });
+    return;
+  }
+  next();
+});
 
 // Dynamic tenant middleware
 try {
@@ -155,7 +175,7 @@ try {
   if (tenantAuthMiddleware) app.use(tenantAuthMiddleware);
 } catch (e) {}
 
-app.use(apiLimiter);
+app.use(selectiveRateLimiter); // #1380: 100 req/min GET, 20 req/min POST
 app.use(versionMiddleware);   // BE-69: attach version info + deprecation headers
 
 // Dynamic extended health check routes (GET /health, /health/ready, /health/live)
@@ -187,7 +207,7 @@ try {
 app.use('/', versionRouter);
 
 // ─── Health (unversioned) ────────────────────────────────────────────────────
-app.use('/health', buildHealthRouter(rpcUrl, contractId));
+app.use('/health', buildHealthRouter(rpcUrl, contractId, () => isShuttingDown));
 
 // ─── Versioned routes — /api/v1/ ─────────────────────────────────────────────
 app.use('/api/v1/auth',          authRouter);                             // BE-55: unauthenticated
@@ -198,13 +218,23 @@ app.use('/api/v1/summaries',     summariesRouter);
 app.use('/api/v1/reconcile',     reconcileRouter);
 app.use('/api/v1/notifications', notificationsRouter);  // BE-68
 app.use('/api/v1/admin',         adminRouter);          // BE-75: admin dashboard
+app.use('/api/v1/analytics/mrr', mrrRouter);            // #1378: MRR analytics
 app.use('/api/v1/analytics',     requireMerchant, analyticsRouter);  // FE-50: revenue analytics
 app.use('/api/v1/reports',       requireMerchant, reportsRouter);    // BE-58 / #798: payment reports export
 
 // ─── Prometheus metrics (unauthenticated — restrict to internal network) ─────
-app.get('/metrics', (_req, res) => {
-  res.set('Content-Type', 'text/plain; version=0.0.4');
-  res.send(getPrometheusMetrics());
+// #1383: Uses prom-client for full Prometheus text format with default Node.js metrics.
+// Falls back to the legacy metrics service if prom-client is unavailable.
+app.get('/metrics', async (_req, res) => {
+  try {
+    const { getMetricsContentType, collectMetrics } = await import('./services/promMetricsService');
+    res.set('Content-Type', getMetricsContentType());
+    res.send(await collectMetrics());
+  } catch {
+    // Fallback to lightweight legacy service if prom-client fails to load
+    res.set('Content-Type', 'text/plain; version=0.0.4');
+    res.send(getPrometheusMetrics());
+  }
 });
 
 // ─── Backward-compatible aliases — /api/ (no version prefix) ─────────────────
@@ -214,6 +244,7 @@ app.use('/api/webhooks',      webhooksRouter);
 app.use('/api/summaries',     summariesRouter);
 app.use('/api/reconcile',     reconcileRouter);
 app.use('/api/notifications', notificationsRouter);
+app.use('/api/analytics/mrr', mrrRouter);              // #1378: backward-compat alias
 app.use('/api/analytics',     analyticsRouter);        // FE-50: backward-compat alias
 app.use('/api/reports',       reportsRouter);          // BE-58 / #798: backward-compat alias
 
@@ -295,7 +326,7 @@ runMigrationGuard()
     console.error('[migrations] Fatal startup error:', err.message);
   })
   .finally(() => {
-    app.listen(PORT, () => {
+    const server = app.listen(PORT, () => {
       console.log(`[server] SorobanPay backend running on port ${PORT}`);
       if (!operatorSecret) {
         console.warn('[scheduler] OPERATOR_SECRET not set — payment scheduler disabled.');
@@ -307,21 +338,43 @@ runMigrationGuard()
       }
       eventIndexer.fetchAndStoreEvents();
     });
+
+    // ─── Graceful shutdown (#1387) ──────────────────────────────────────────
+    async function shutdown(signal: string): Promise<void> {
+      console.log(`[server] ${signal} received — shutting down gracefully...`);
+
+      // 1. Stop accepting new requests (health probe will return 503 via the gate above)
+      isShuttingDown = true;
+
+      // 2. Force-exit after 30 s if drain takes too long (unref so it doesn't
+      //    prevent a clean exit when shutdown completes before the timer fires)
+      const forceExitTimer = setTimeout(() => {
+        console.error('[server] Graceful shutdown timed out after 30 s — forcing exit');
+        process.exit(1);
+      }, 30_000);
+      forceExitTimer.unref();
+
+      // 3. Stop event indexer polling
+      eventIndexer.stopPolling();
+
+      // 4. Shut down the BullMQ retry worker
+      await shutdownRetryWorker();
+
+      // 5. Stop accepting new HTTP connections and wait for in-flight requests to finish
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+
+      // 6. Disconnect Prisma (drains its internal connection pool)
+      await disconnectPrisma();
+
+      // 7. Close the raw pg pool
+      await closePool();
+
+      console.log('[server] Graceful shutdown complete.');
+      process.exit(0);
+    }
+
+    process.on('SIGTERM', () => shutdown('SIGTERM'));
+    process.on('SIGINT',  () => shutdown('SIGINT'));
   });
-
-// ─── Graceful shutdown ────────────────────────────────────────────────────────
-process.on('SIGTERM', async () => {
-  console.log('[server] SIGTERM received — shutting down gracefully...');
-  eventIndexer.stopPolling();   // BE-51: stop cursor-based polling
-  await shutdownRetryWorker();
-  process.exit(0);
-});
-
-process.on('SIGINT', async () => {
-  console.log('[server] SIGINT received — shutting down gracefully...');
-  eventIndexer.stopPolling();
-  await shutdownRetryWorker();
-  process.exit(0);
-});
 
 export default app;
