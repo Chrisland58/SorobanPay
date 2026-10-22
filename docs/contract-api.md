@@ -718,13 +718,13 @@ Upgrade the on-chain schema version to `CURRENT_SCHEMA_VERSION`. Returns `Alread
 
 ### `get_version`
 
-Return the contract semantic version string (e.g. `"1.0.0"`). This is a compile-time constant — no storage read occurs.
+Return the contract semantic version as a Soroban `String`. The current value is `"1.0.0"`; this is a compile-time constant and requires no storage read.
 
 **Authorization:** None required.
 
 #### Return value
 
-`&'static str`
+`String` — `"1.0.0"`
 
 #### CLI example
 
@@ -741,7 +741,7 @@ stellar contract invoke \
 
 ### `get_schema_version`
 
-Return the on-chain schema version stored during the last `migrate` call (or `initialize`). Returns `0` if `initialize` has not been called.
+Return the on-chain schema version stored during the last `migrate` call (or `initialize`). The current contract schema version is `1`. Returns `0` if `initialize` has not been called.
 
 **Authorization:** None required.
 
