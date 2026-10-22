@@ -528,6 +528,36 @@ impl SubscriptionProtocol {
         Ok(())
     }
 
+    /// Remove a subscription after its configured grace period has elapsed.
+    /// Anyone may call this entry point.
+    pub fn expire_subscription(
+        env: Env,
+        subscriber: Address,
+        merchant: Address,
+    ) -> Result<(), ContractError> {
+        let hash = subscription_key(&env, &subscriber, &merchant);
+        let key = DataKey::Subscription(hash.clone());
+        let data: SubscriptionData = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .ok_or(ContractError::NoActiveSubscription)?;
+        let overdue_since = data
+            .overdue_since
+            .ok_or(ContractError::GracePeriodNotElapsed)?;
+        let expires_at = overdue_since
+            .checked_add(data.grace_period_secs())
+            .ok_or(ContractError::InvalidTimestamp)?;
+        if ledger_timestamp(&env)? < expires_at {
+            return Err(ContractError::GracePeriodNotElapsed);
+        }
+
+        env.storage().persistent().remove(&key);
+        index_remove(&env, &merchant, &hash);
+        events::emit_expired(&env, &subscriber, &merchant, &data.token);
+        Ok(())
+    }
+
     /// Query active subscription details for a subscriber-merchant pair.
     ///
     /// Read-only; no authorization required.

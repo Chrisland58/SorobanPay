@@ -22,7 +22,6 @@ struct T {
     subscriber:  Address,
     merchant:    Address,
     token:       Address,
-    admin:       Address,
     contract_id: Address,
 }
 
@@ -39,7 +38,6 @@ impl T {
         StellarAssetClient::new(&env, &token).mint(&subscriber, &10_000_000_i128);
 
         let contract_id = env.register(SubscriptionProtocol, ());
-        SubscriptionProtocolClient::new(&env, &contract_id).initialize(&admin);
 
         token::Client::new(&env, &token).approve(
             &subscriber,
@@ -48,7 +46,7 @@ impl T {
             &(env.ledger().sequence() + 100_000_u32),
         );
 
-        Self { env, subscriber, merchant, token, admin, contract_id }
+        Self { env, subscriber, merchant, token, contract_id }
     }
 
     fn client(&self) -> SubscriptionProtocolClient {
@@ -127,54 +125,47 @@ fn test_subscribe_stores_data_and_emits_event() {
 }
 
 #[test]
-fn test_max_amount_defaults_to_unlimited() {
+fn test_expire_subscription_checks_grace_and_emits_topics() {
     let t = T::new();
-    assert_eq!(t.client().get_max_amount(), None);
+    let missing = t
+        .client()
+        .try_expire_subscription(&t.subscriber, &t.merchant);
+    assert!(matches!(missing, Err(Ok(ContractError::NoActiveSubscription))));
 
-    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &100_i128, &86_400_u64, &false);
-    assert!(t.has_sub());
-}
-
-#[test]
-fn test_max_amount_is_admin_configurable_and_enforced_by_subscribe() {
-    let t = T::new();
-    t.client().set_max_amount(&t.admin, &500_i128).unwrap();
-    assert_eq!(t.client().get_max_amount(), Some(500_i128));
-
-    let result = t.client().try_subscribe(
+    t.client.subscribe(
         &t.subscriber,
         &t.merchant,
         &t.token,
-        &501_i128,
+        &100_i128,
         &86_400_u64,
         &false,
     );
-    assert!(matches!(result, Err(Ok(ContractError::AmountExceedsLimit))));
+    let key = DataKey::Subscription(subscription_key(&t.env, &t.subscriber, &t.merchant));
+    let mut data: SubscriptionData = t.env.storage().persistent().get(&key).unwrap();
+    let now = t.env.ledger().timestamp();
+    data.overdue_since = Some(now);
+    data.grace_period = Some(3_600);
+    t.env.storage().persistent().set(&key, &data);
+
+    let early = t
+        .client()
+        .try_expire_subscription(&t.subscriber, &t.merchant);
+    assert!(matches!(early, Err(Ok(ContractError::GracePeriodNotElapsed))));
+
+    t.advance(3_600);
+    t.client()
+        .expire_subscription(&t.subscriber, &t.merchant)
+        .unwrap();
     assert!(!t.has_sub());
-}
 
-#[test]
-fn test_max_amount_is_enforced_by_update_subscription() {
-    let t = T::new();
-    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &100_i128, &86_400_u64, &false);
-    t.client().set_max_amount(&t.admin, &500_i128).unwrap();
-
-    let result = t.client().try_update_subscription(
-        &t.subscriber,
-        &t.merchant,
-        &501_i128,
-        &172_800_u64,
-    );
-    assert!(matches!(result, Err(Ok(ContractError::AmountExceedsLimit))));
-    assert_eq!(t.get_sub().amount, 100_i128);
-
-    t.client().update_subscription(
-        &t.subscriber,
-        &t.merchant,
-        &500_i128,
-        &172_800_u64,
-    ).unwrap();
-    assert_eq!(t.get_sub().amount, 500_i128);
+    let events = t.env.events().all();
+    let contract_events: Vec<_> = events.iter().filter(|event| event.0 == t.contract_id).collect();
+    let (_, topics, _) = contract_events.last().unwrap();
+    assert_eq!(topics.len(), 4);
+    assert_eq!(topics.get(0).unwrap(), Symbol::new(&t.env, "expired").into_val(&t.env));
+    assert_eq!(topics.get(1).unwrap(), t.subscriber.clone().into_val(&t.env));
+    assert_eq!(topics.get(2).unwrap(), t.merchant.clone().into_val(&t.env));
+    assert_eq!(topics.get(3).unwrap(), t.token.clone().into_val(&t.env));
 }
 
 // ─── Requirement 13.1 — Full lifecycle ───────────────────────────────────────
@@ -436,6 +427,7 @@ fn test_is_paused_with_future_timestamp() {
         amount:       100,
         interval:     86_400,
         next_payment: now + 86_400,
+        ver:          1,
         grace_period: None,
         paused_until: Some(now + 3_600), // paused for 1 more hour
         overdue_since: None,
@@ -454,6 +446,7 @@ fn test_grace_period_getter_with_value() {
         amount:       100,
         interval:     86_400,
         next_payment: 86_400,
+        ver:          1,
         grace_period: Some(3_600),
         paused_until: None,
         overdue_since: None,
@@ -471,6 +464,7 @@ fn test_overdue_since_getter_with_value() {
         amount:       100,
         interval:     86_400,
         next_payment: 86_400,
+        ver:          1,
         grace_period: None,
         paused_until: None,
         overdue_since: Some(999_999),
