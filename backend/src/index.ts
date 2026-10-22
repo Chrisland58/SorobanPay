@@ -20,6 +20,7 @@ import { retryQueue } from './services/retryQueue';
 import { startWebhookWorker, shutdownWebhookWorker } from './services/webhookQueue'; // BE-53
 import { apiLimiter } from './middleware/rateLimiter';
 import { versionMiddleware } from './middleware/versioning';
+import { correlationIdMiddleware } from './middleware/correlationId'; // #1386
 import summariesRouter from './routes/summaries';
 import reconcileRouter from './routes/reconcile';
 import subscriptionsRouter from './routes/subscriptions';
@@ -152,6 +153,7 @@ const app = express();
 
 app.use(cors());
 app.use(express.json());
+app.use(correlationIdMiddleware); // #1386: attach correlationId + req.log to every request
 
 // ─── Graceful-shutdown gate (#1387) ──────────────────────────────────────────
 // Set to true when SIGTERM/SIGINT is received. Returns 503 for new requests
