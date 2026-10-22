@@ -5,7 +5,7 @@ use soroban_sdk::contracterror;
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 #[repr(u32)]
 pub enum ContractError {
-    // ── Core subscription errors (1–7) ──────────────────────────────────────
+    // ── Core subscription errors (1–11) ─────────────────────────────────────
     /// `subscribe` called with amount <= 0
     AmountMustBePositive  = 1,
     /// `subscribe` called with interval < 86400 seconds (1 day)
@@ -31,16 +31,15 @@ pub enum ContractError {
     Unauthorized          = 6,
     /// `execute_payment` or `batch_execute_payment` token transfer failed.
     ///
-    /// This error is returned when the balance pre-check fails:
-    /// **Insufficient balance**: `token.balance(subscriber) < amount` — the subscriber
-    /// does not have enough tokens to cover the payment amount.
+    /// This error is returned when either of the two pre-transfer checks fails:
+    /// 1. **Insufficient balance**: `token.balance(subscriber) < amount` — the subscriber
+    ///    does not have enough tokens to cover the payment amount.
+    /// 2. **Insufficient allowance**: `token.allowance(subscriber, contract) < amount` —
+    ///    the subscriber has revoked or never set the SEP-41 allowance for this contract.
     ///
-    /// A `payment_transfer_failure` event is emitted before returning this error,
-    /// and the subscription state (`next_payment`) is NOT advanced, keeping the
+    /// In both cases a `payment_transfer_failure` event is emitted before returning this
+    /// error, and the subscription state (`next_payment`) is NOT advanced, keeping the
     /// subscription eligible for retry on the next payment cycle.
-    ///
-    /// Note: insufficient allowance is caught earlier and returns `InsufficientAllowance`
-    /// (code 25) before this check is reached.
     ///
     /// Note: if `transfer` itself panics for a reason not caught by the pre-checks
     /// (e.g. a token contract bug), the host aborts the transaction entirely and this
@@ -54,48 +53,39 @@ pub enum ContractError {
     SelfSubscription      = 10,
     /// `subscribe` called with `token` equal to the contract's own address
     InvalidTokenAddress   = 11,
-    AmountExceedsLimit    = 18,
-    GracePeriodActive     = 19,
-    /// `batch_execute_payment` called with an empty subscribers vector
-    EmptyBatch            = 13,
-    /// `batch_execute_payment` called with more than BATCH_MAX_SIZE (50) subscribers
-    BatchTooLarge         = 14,
-    /// `subscribe` (strict mode) or `execute_payment` called with allowance < amount.
-    ///
-    /// In `subscribe`: returned when `strict = true` and
-    /// `token.allowance(subscriber, contract) < amount`.  When `strict = false` the
-    /// contract emits a `low_allowance` warning event instead and proceeds normally.
-    ///
-    /// In `execute_payment`: returned when the pre-transfer allowance check fails
-    /// (the subscriber has revoked or never set the SEP-41 allowance for this contract).
-    InsufficientAllowance = 25,
+    /// Admin address not initialised; call `initialize` first
+    NotInitialized        = 12,
+    // ── Allowance / migration errors (15–17) ─────────────────────────────────
+    /// `subscribe` called with allowance < amount in strict mode
+    InsufficientAllowance = 15,
     /// `migrate` called when contract is already at the current schema version
     AlreadyMigrated       = 16,
     /// `migrate` called by an address that is not the stored admin
     NotAdmin              = 17,
-    /// Admin address not initialised; call `initialize` first
-    NotInitialized        = 17,
-    /// `transfer_subscription` called with old_merchant == new_merchant (no-op transfer)
-    SameMerchant          = 18,
-    /// `transfer_subscription` called but a subscription already exists for (subscriber, new_merchant)
-    SubscriptionAlreadyExists = 19,
+    // ── Extended subscription errors (18–20) ─────────────────────────────────
+    /// `subscribe` called with amount exceeding the configured max_amount limit
+    AmountExceedsLimit    = 18,
+    /// Subscription is within an active grace period
+    GracePeriodActive     = 19,
     /// `execute_payment` called while paused and not yet due to auto-resume, or
     /// `pause_subscription` called on a subscription that is already paused
-    SubscriptionPaused        = 20,
+    SubscriptionPaused    = 20,
+    // ── Transfer / batch errors (21–23) ──────────────────────────────────────
+    /// `transfer_subscription` called but a subscription already exists for (subscriber, new_merchant)
+    SubscriptionAlreadyExists = 21,
+    /// `batch_execute_payment` called with an empty subscribers vector
+    EmptyBatch            = 22,
+    /// `batch_execute_payment` called with more than BATCH_MAX_SIZE (50) subscribers
+    BatchTooLarge         = 23,
+    // ── Remaining errors (24–26) ─────────────────────────────────────────────
+    /// `transfer_subscription` called with old_merchant == new_merchant (no-op transfer)
+    SameMerchant          = 24,
     /// `resume_subscription` called on a subscription that is not currently paused
-    SubscriptionNotPaused     = 21,
+    SubscriptionNotPaused = 25,
     /// `execute_payment` detected that the same payment nonce was already executed (#1083).
     ///
     /// This error is returned when `execute_payment` is retried with a nonce that was
     /// previously committed to an execution marker in temporary storage.  The transfer
     /// is NOT repeated — the subscription state is left unchanged.
-    DuplicateExecution        = 22,
-    /// `set_protocol_fee` called with `fee_bps` exceeding the hard cap
-    /// [`crate::storage::MAX_FEE_BPS`] (500 bps == 5 %).
-    ///
-    /// The protocol fee rate is bounded so an admin can never configure a fee higher
-    /// than 5 % of a payment.  `fee_bps == 500` is accepted (on the boundary); any
-    /// value `> 500` (e.g. 501) is rejected with this error before the fee config is
-    /// written.  See [`crate::SubscriptionProtocol::set_protocol_fee`].
-    FeeTooHigh                = 24,
+    DuplicateExecution    = 26,
 }

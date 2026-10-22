@@ -19,8 +19,6 @@ Full reference for all `SubscriptionProtocol` entry points, types, and error cod
    - [get_subscription](#get_subscription)
    - [initialize](#initialize)
    - [migrate](#migrate)
-   - [set_protocol_fee](#set_protocol_fee)
-   - [get_protocol_fee](#get_protocol_fee)
    - [get_version](#get_version)
    - [get_schema_version](#get_schema_version)
    - [compute_subscription_key](#compute_subscription_key)
@@ -619,84 +617,6 @@ Upgrade the on-chain schema version to `CURRENT_SCHEMA_VERSION`. Returns `Alread
 
 ---
 
-### `set_protocol_fee`
-
-Configure the protocol fee: a basis-points rate skimmed from every `execute_payment` / `batch_execute_payment` transfer and routed to a designated `fee_collector`. `fee_bps == 0` disables the fee (single transfer, no split).
-
-**Authorization:** `admin` (the address stored by `initialize`) must sign.
-
-**Hard cap:** 500 bps (5 %). The admin **cannot** configure a fee above 5 % — this enforces the cap documented in the README. `fee_bps == 500` is accepted (on the boundary); `fee_bps >= 501` is rejected with `FeeTooHigh` (code 24).
-
-#### Parameters
-
-| Parameter | Type | Constraints | Description |
-|-----------|------|-------------|-------------|
-| `admin` | `Address` | must match stored admin | Caller — must be the initialized admin |
-| `fee_bps` | `u32` | `[0, 500]` | Fee rate in basis points (1 bps = 0.01 %). `0` disables the fee; `500` is the maximum (5 %). |
-| `fee_collector` | `Address` | SEP-41 capable | Address that receives the protocol fee portion of each payment |
-
-#### Return value
-
-`Result<(), ContractError>` — returns `()` on success.
-
-#### Error codes
-
-| Error | Code | Trigger |
-|-------|------|---------|
-| `NotInitialized` | 17 | `initialize` has not been called |
-| `NotAdmin` | 16 | `admin` does not match the stored admin address |
-| `FeeTooHigh` | 24 | `fee_bps > 500` (exceeds the 5 % hard cap) |
-
-#### Boundary behaviour
-
-| `fee_bps` | Result |
-|-----------|--------|
-| `0` | `Ok` — fee disabled |
-| `500` | `Ok` — maximum allowed rate (5 %), accepted on the boundary |
-| `501` | `Err(FeeTooHigh)` — rejected, just over the cap |
-| `1000` | `Err(FeeTooHigh)` — rejected |
-
-#### CLI example
-
-```bash
-stellar contract invoke \
-  --id $CONTRACT_ID \
-  --source admin \
-  --network testnet \
-  -- set_protocol_fee \
-  --admin         GADMIN...ADDRESS \
-  --fee_bps       500 \
-  --fee_collector GFEEC...COLLECTOR
-```
-
----
-
-### `get_protocol_fee`
-
-Return the current protocol fee configuration, or `None` if no fee has been configured (the default — equivalent to `fee_bps == 0`, no split). Read-only; no authorization required.
-
-**Authorization:** None required.
-
-#### Return value
-
-`Option<ProtocolFeeConfig>` where:
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `fee_bps` | `u32` | Current fee rate in basis points, bounded to `[0, 500]` |
-| `fee_collector` | `Address` | Address receiving the protocol fee portion of each payment |
-
-#### CLI example
-
-```bash
-stellar contract invoke \
-  --id $CONTRACT_ID --source any-account --network testnet \
-  -- get_protocol_fee
-# Returns: { fee_bps: "500", fee_collector: "GFEEC...COLLECTOR" } or null
-```
-
----
-
 ### `get_version`
 
 Return the contract semantic version string (e.g. `"1.0.0"`). This is a compile-time constant — no storage read occurs.
@@ -773,7 +693,7 @@ Return all subscription key hashes indexed for a given merchant. Off-chain tools
 
 ## Error code reference
 
-Complete table of all 17 error codes with trigger conditions, affected entry points, and resolution guidance.
+Complete table of all error codes with trigger conditions, affected entry points, and resolution guidance.
 
 | Code | Name | Entry points | Trigger condition | Resolution |
 |------|------|-------------|-------------------|------------|
@@ -788,25 +708,33 @@ Complete table of all 17 error codes with trigger conditions, affected entry poi
 | 9 | `AmountTooLarge` | `subscribe` | `amount > 10¹⁸` | Use an amount within the safe range |
 | 10 | `SelfSubscription` | `subscribe` | `subscriber == merchant` | Use distinct addresses for subscriber and merchant |
 | 11 | `InvalidTokenAddress` | `subscribe` | `token == contract address` | Use a valid SEP-41 token contract address |
-| 12 | `EmptyBatch` | `batch_execute_payment` | `subscribers` vector is empty | Pass at least one subscriber |
-| 13 | `BatchTooLarge` | `batch_execute_payment` | `subscribers.len() > 50` | Split into batches of ≤ 50 |
-| 14 | `InsufficientAllowance` | `subscribe` | `strict == true` and allowance < `amount` | Approve a higher SEP-41 allowance first, or use `strict = false` |
-| 15 | `AlreadyMigrated` | `migrate` | Schema already at `CURRENT_SCHEMA_VERSION` | No action needed |
-| 16 | `NotAdmin` | `migrate` | Caller ≠ stored admin address | Use the admin identity set during `initialize` |
-| 17 | `NotInitialized` | `migrate` | `initialize` not yet called | Call `initialize(admin)` first |
-| 24 | `FeeTooHigh` | `set_protocol_fee` | `fee_bps > 500` (exceeds the 5 % hard cap) | Use `fee_bps ≤ 500`; `500` is the maximum allowed |
+| 12 | `NotInitialized` | `migrate`, admin ops | `initialize` not yet called | Call `initialize(admin)` first |
+| 15 | `InsufficientAllowance` | `subscribe` | `strict == true` and allowance < `amount` | Approve a higher SEP-41 allowance first, or use `strict = false` |
+| 16 | `AlreadyMigrated` | `migrate` | Schema already at `CURRENT_SCHEMA_VERSION` | No action needed |
+| 17 | `NotAdmin` | `migrate` | Caller ≠ stored admin address | Use the admin identity set during `initialize` |
+| 18 | `AmountExceedsLimit` | `subscribe` | `amount > configured max_amount` | Use an amount within the operator-configured limit |
+| 19 | `GracePeriodActive` | `execute_payment` | Subscription is within an active grace period | Wait for the grace period to elapse |
+| 20 | `SubscriptionPaused` | `execute_payment`, `pause_subscription` | Subscription is paused or already paused | Resume subscription before collecting payment |
+| 21 | `SubscriptionAlreadyExists` | `transfer_subscription` | A subscription for `(subscriber, new_merchant)` already exists | Cancel the conflicting subscription before transferring |
+| 22 | `EmptyBatch` | `batch_execute_payment` | `subscribers` vector is empty | Pass at least one subscriber |
+| 23 | `BatchTooLarge` | `batch_execute_payment` | `subscribers.len() > 50` | Split into batches of ≤ 50 |
+| 24 | `SameMerchant` | `transfer_subscription` | `old_merchant == new_merchant` | Use a different destination merchant address |
+| 25 | `SubscriptionNotPaused` | `resume_subscription` | Subscription is not currently paused | Only call `resume_subscription` on a paused subscription |
+| 26 | `DuplicateExecution` | `execute_payment` | Same payment nonce was already executed | No action needed — payment was already processed |
 
 ### Errors returned per entry point
 
 | Entry point | Possible errors |
 |-------------|----------------|
-| `subscribe` | 1, 2, 3, 8, 9, 10, 11, 14 |
-| `execute_payment` | 4, 5, 6, 7, 8 |
-| `batch_execute_payment` | 8, 12, 13 |
+| `subscribe` | 1, 2, 3, 8, 9, 10, 11, 15, 18 |
+| `execute_payment` | 4, 5, 6, 7, 8, 19, 20, 26 |
+| `batch_execute_payment` | 6, 8, 22, 23 |
 | `cancel` | 4 |
+| `transfer_subscription` | 4, 21, 24 |
+| `pause_subscription` | 4, 20 |
+| `resume_subscription` | 4, 25 |
 | `get_subscription` | _(none — returns `Option`)_ |
-| `migrate` | 15, 16, 17 |
-| `set_protocol_fee` | 16, 17, 24 |
+| `migrate` | 12, 16, 17 |
 
 ---
 
@@ -943,9 +871,8 @@ Returns `Vec<BytesN<32>>`. Returns an empty vector if the merchant has no subscr
 | 15 | `AlreadyMigrated` | Schema already at current version in `migrate` |
 | 16 | `NotAdmin` | Caller is not the stored admin in `migrate` |
 | 17 | `NotInitialized` | `initialize` was never called |
-| 24 | `FeeTooHigh` | `set_protocol_fee` called with `fee_bps > 500` (exceeds the 5 % cap) |
 
-Error codes 1–17 are **stable** — they will never be reassigned. New codes will use numbers ≥ 18. `FeeTooHigh` (24) is the first code allocated to the protocol-fee subsystem.
+Error codes 1–17 are **stable** — they will never be reassigned. New codes will use numbers ≥ 18.
 
 ---
 

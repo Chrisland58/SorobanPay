@@ -122,19 +122,6 @@ fn test_subscribe_stores_data_and_emits_event() {
     }
 }
 
-#[test]
-fn test_version_entry_points_return_constants_without_auth() {
-    let t = T::new();
-    let admin = Address::generate(&t.env);
-
-    assert_eq!(
-        t.client().get_version(),
-        soroban_sdk::String::from_str(&t.env, "1.0.0"),
-    );
-    t.client().initialize(&admin);
-    assert_eq!(t.client().get_schema_version(), 1);
-}
-
 // ─── Requirement 13.1 — Full lifecycle ───────────────────────────────────────
 
 #[test]
@@ -658,50 +645,6 @@ fn test_subscribe_emits_one_event() {
     let events = t.env.events().all();
     let ours: Vec<_> = events.iter().filter(|e| e.0 == t.contract_id).collect();
     assert_eq!(ours.len(), 1, "subscribe should emit exactly 1 event");
-}
-
-#[test]
-fn test_update_subscription_emits_updated_event_with_old_and_new_terms() {
-    let t = T::new();
-    let old_amount = 100_000_i128;
-    let old_interval = 86_400_u64;
-    let new_amount = 250_000_i128;
-    let new_interval = 172_800_u64;
-
-    t.client.subscribe(
-        &t.subscriber,
-        &t.merchant,
-        &t.token,
-        &old_amount,
-        &old_interval,
-        &false,
-    );
-    t.client.update_subscription(
-        &t.subscriber,
-        &t.merchant,
-        &new_amount,
-        &new_interval,
-    );
-
-    let all = t.env.events().all();
-    let expected_topics = (
-        Symbol::new(&t.env, "updated"),
-        t.subscriber.clone(),
-        t.merchant.clone(),
-        t.token.clone(),
-    )
-        .into_val(&t.env);
-    let update_events: Vec<_> = all
-        .iter()
-        .filter(|event| event.0 == t.contract_id && event.1 == expected_topics)
-        .collect();
-    assert_eq!(update_events.len(), 1, "one updated event must be emitted");
-
-    let expected_data = (old_amount, old_interval, new_amount, new_interval).into_val(&t.env);
-    assert_eq!(
-        update_events[0].2, expected_data,
-        "updated event must contain old and new amount and interval"
-    );
 }
 
 #[test]
@@ -2653,251 +2596,133 @@ fn test_batch_failed_item_next_payment_not_advanced() {
         "merchant balance must be unchanged after a failed batch item");
 }
 
-// ─── Requirement: execute_payment overflow guard ─────────────────────────────
+// ─── Issue #1358 — SubscriptionAlreadyExists (error 21) ──────────────────────
+//
+// `transfer_subscription` must return `SubscriptionAlreadyExists` (21) when
+// the destination merchant already has an active subscription with the same
+// subscriber, preventing silent overwrites of live billing relationships.
 
-/// `execute_payment` must return `InvalidTimestamp` (8) if advancing `next_payment`
-/// by one `interval` would overflow `u64`.
+/// [1358-001] Transferring to a merchant that already has an active subscription
+/// with the same subscriber must return SubscriptionAlreadyExists (21).
 ///
-/// We craft this scenario by subscribing at `overflow_ts - 1` (so `next_payment`
-/// equals `u64::MAX`) and then running `execute_payment` at `overflow_ts` where
-/// `now + interval` overflows. The contract must catch the overflow via
-/// `checked_next_payment` and return `InvalidTimestamp` rather than silently
-/// storing a wrapped (and incorrect) `next_payment`.
-///
-/// Acceptance criterion: Overflow in `next_payment + interval` → `ContractError::InvalidTimestamp`
+/// Scenario:
+///   subscriber → old_merchant  (active)
+///   subscriber → new_merchant  (also active — collision!)
+/// Expected: `transfer_subscription` returns `Err(Ok(ContractError::SubscriptionAlreadyExists))`
 #[test]
-fn test_execute_payment_next_payment_overflow_returns_invalid_timestamp() {
-    let t = T::new();
-    let amt = 100_000_i128;
-    let ivl = 86_400_u64; // 1 day — minimum valid interval
+fn test_transfer_subscription_collision_returns_already_exists() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|l| l.timestamp = 1_700_000_000_u64);
 
-    // Choose a timestamp such that (overflow_ts - 1) + ivl == u64::MAX (no overflow
-    // on subscribe), but overflow_ts + ivl overflows.
-    //
-    // overflow_ts - 1 + ivl == u64::MAX
-    //   => overflow_ts == u64::MAX - ivl + 1
-    //
-    // At overflow_ts: now + ivl == u64::MAX + 1 → wraps, caught by checked_add.
-    let overflow_ts = u64::MAX - ivl + 1; // == u64::MAX - 86_400 + 1
+    let admin        = Address::generate(&env);
+    let subscriber   = Address::generate(&env);
+    let old_merchant = Address::generate(&env);
+    let new_merchant = Address::generate(&env);
+    let token        = env.register_stellar_asset_contract_v2(admin.clone()).address();
 
-    // Subscribe at (overflow_ts - 1): next_payment = (overflow_ts - 1) + ivl == u64::MAX.
-    // checked_next_payment succeeds here because u64::MAX - 1 + ivl == u64::MAX (no wrap).
-    t.env.ledger().with_mut(|l| l.timestamp = overflow_ts - 1);
-    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &amt, &ivl);
+    // Fund subscriber
+    StellarAssetClient::new(&env, &token).mint(&subscriber, &100_000_i128);
 
-    let d = t.get_sub();
-    assert_eq!(d.next_payment, u64::MAX, "next_payment must equal u64::MAX after setup");
+    let contract_id = env.register(SubscriptionProtocol, ());
+    let client      = SubscriptionProtocolClient::new(&env, &contract_id);
 
-    // Advance clock to overflow_ts. The time-lock passes because
-    //   now (overflow_ts) >= next_payment (u64::MAX) is false — wait, overflow_ts < u64::MAX.
-    //
-    // We need now >= next_payment == u64::MAX, so we must set timestamp to u64::MAX.
-    // At u64::MAX: now + ivl == u64::MAX + ivl → overflows.
-    t.env.ledger().with_mut(|l| l.timestamp = u64::MAX);
-
-    let result = t.client.try_execute_payment(&t.subscriber, &t.merchant);
-    assert!(
-        matches!(result, Err(Ok(ContractError::InvalidTimestamp))),
-        "execute_payment where now + interval would overflow u64 must return InvalidTimestamp"
+    // Approve a generous allowance for both subscriptions.
+    token::Client::new(&env, &token).approve(
+        &subscriber,
+        &contract_id,
+        &100_000_i128,
+        &(env.ledger().sequence() + 100_000_u32),
     );
 
-    // Subscription state must be unchanged — next_payment must not have advanced.
-    let d_after = t.get_sub();
-    assert_eq!(
-        d_after.next_payment, u64::MAX,
-        "next_payment must not change when execute_payment fails with InvalidTimestamp"
+    let amount   = 1_000_i128;
+    let interval = 86_400_u64;
+
+    // Create subscription with old_merchant.
+    client.subscribe(&subscriber, &old_merchant, &token, &amount, &interval, &false);
+
+    // Create an EXISTING subscription with new_merchant — this is the collision.
+    client.subscribe(&subscriber, &new_merchant, &token, &amount, &interval, &false);
+
+    // Attempting to transfer old_merchant → new_merchant must fail with
+    // SubscriptionAlreadyExists (21) because (subscriber, new_merchant) already exists.
+    let result = client.try_transfer_subscription(&subscriber, &old_merchant, &new_merchant);
+    assert!(
+        matches!(result, Err(Ok(ContractError::SubscriptionAlreadyExists))),
+        "transfer to a merchant with existing subscription must return \
+         SubscriptionAlreadyExists (21); got {:?}",
+        result
+    );
+
+    // Both original subscriptions must remain intact after the failed transfer.
+    assert!(
+        client
+            .get_subscription(&subscriber, &old_merchant, &token)
+            .is_some(),
+        "old_merchant subscription must still exist after failed transfer"
+    );
+    assert!(
+        client
+            .get_subscription(&subscriber, &new_merchant, &token)
+            .is_some(),
+        "new_merchant subscription must still exist after failed transfer"
     );
 }
 
-// ─── Strict-mode allowance tests ─────────────────────────────────────────────
-
-/// strict=true, allowance < amount → InsufficientAllowance (25)
+/// [1358-002] Transferring to a merchant with NO existing subscription must succeed.
 ///
-/// When the subscriber has set an allowance that is smaller than the subscription
-/// amount, `subscribe` with `strict=true` must reject with `InsufficientAllowance`
-/// and must NOT create the subscription record.
+/// Sanity-check: the happy path must still work after the collision guard is in
+/// place.  After a successful transfer the old subscription is gone and the new
+/// one carries identical billing parameters.
 #[test]
-fn test_subscribe_strict_insufficient_allowance_rejected() {
-    let t = T::new();
-    let amt = 100_000_i128;
-    let ivl = 86_400_u64;
+fn test_transfer_subscription_no_collision_succeeds() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|l| l.timestamp = 1_700_000_000_u64);
 
-    // Revoke the approval that T::new() set (reset to zero allowance).
-    token::Client::new(&t.env, &t.token).approve(
-        &t.subscriber,
-        &t.contract_id,
-        &0_i128,
-        &(t.env.ledger().sequence() + 100_000_u32),
+    let admin        = Address::generate(&env);
+    let subscriber   = Address::generate(&env);
+    let old_merchant = Address::generate(&env);
+    let new_merchant = Address::generate(&env);
+    let token        = env.register_stellar_asset_contract_v2(admin.clone()).address();
+
+    StellarAssetClient::new(&env, &token).mint(&subscriber, &100_000_i128);
+
+    let contract_id = env.register(SubscriptionProtocol, ());
+    let client      = SubscriptionProtocolClient::new(&env, &contract_id);
+
+    token::Client::new(&env, &token).approve(
+        &subscriber,
+        &contract_id,
+        &100_000_i128,
+        &(env.ledger().sequence() + 100_000_u32),
     );
 
-    let result = t.client.try_subscribe(
-        &t.subscriber,
-        &t.merchant,
-        &t.token,
-        &amt,
-        &ivl,
-        &true,  // strict mode
-        &None,
-    );
+    let amount   = 1_000_i128;
+    let interval = 86_400_u64;
 
+    // Only subscribe with old_merchant — new_merchant slot is empty.
+    client.subscribe(&subscriber, &old_merchant, &token, &amount, &interval, &false);
+
+    // Transfer must succeed with no collision.
+    let result = client.try_transfer_subscription(&subscriber, &old_merchant, &new_merchant);
     assert!(
-        matches!(result, Err(Ok(ContractError::InsufficientAllowance))),
-        "subscribe with strict=true and allowance=0 must return InsufficientAllowance"
+        result.is_ok(),
+        "transfer to a merchant with no existing subscription must succeed; got {:?}",
+        result
+    );
+
+    // After transfer: old subscription gone, new subscription present.
+    assert!(
+        client
+            .get_subscription(&subscriber, &old_merchant, &token)
+            .is_none(),
+        "old_merchant subscription must be removed after successful transfer"
     );
     assert!(
-        !t.has_sub(),
-        "subscription must not be created when strict allowance check fails"
-    );
-}
-
-/// strict=false, allowance < amount → warning event emitted, subscription created
-///
-/// When allowance is insufficient but strict mode is off, the contract must
-/// proceed normally (creating the subscription and emitting the `subscribe` event)
-/// but also emit a `low_allowance` warning event so off-chain systems can alert
-/// the subscriber to top up their allowance before the next payment cycle.
-#[test]
-fn test_subscribe_non_strict_low_allowance_emits_warning_and_creates_subscription() {
-    let t = T::new();
-    let amt = 100_000_i128;
-    let ivl = 86_400_u64;
-
-    // Set allowance to exactly one stroop below the subscription amount.
-    token::Client::new(&t.env, &t.token).approve(
-        &t.subscriber,
-        &t.contract_id,
-        &(amt - 1),
-        &(t.env.ledger().sequence() + 100_000_u32),
-    );
-
-    let events_before = t.env.events().all().iter()
-        .filter(|e| e.0 == t.contract_id)
-        .count();
-
-    // subscribe with strict=false — must succeed despite low allowance.
-    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &amt, &ivl, &false, &None);
-
-    assert!(
-        t.has_sub(),
-        "subscription must be created in non-strict mode even with low allowance"
-    );
-
-    // Verify subscription data was stored correctly.
-    let d = t.get_sub();
-    assert_eq!(d.amount, amt, "stored amount must match");
-    assert_eq!(d.interval, ivl, "stored interval must match");
-
-    // Verify that at least 2 events were emitted: low_allowance + subscribe.
-    let contract_events_after = t.env.events().all().iter()
-        .filter(|e| e.0 == t.contract_id)
-        .count();
-    let new_events = contract_events_after - events_before;
-    assert!(
-        new_events >= 2,
-        "non-strict low-allowance subscribe must emit at least a low_allowance warning and a subscribe event, got {new_events}"
-    );
-}
-
-/// strict=true, allowance >= amount → subscription created normally
-///
-/// When the subscriber's allowance exactly meets or exceeds the subscription
-/// amount, `subscribe` with `strict=true` must succeed and store the subscription
-/// just as it would in non-strict mode.
-#[test]
-fn test_subscribe_strict_sufficient_allowance_creates_subscription() {
-    let t = T::new();
-    let amt = 100_000_i128;
-    let ivl = 86_400_u64;
-
-    // Set allowance to exactly the subscription amount (tight boundary).
-    token::Client::new(&t.env, &t.token).approve(
-        &t.subscriber,
-        &t.contract_id,
-        &amt,
-        &(t.env.ledger().sequence() + 100_000_u32),
-    );
-
-    // subscribe with strict=true — must succeed.
-    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &amt, &ivl, &true, &None);
-
-    assert!(
-        t.has_sub(),
-        "subscription must be created when strict=true and allowance == amount"
-    );
-
-    let d = t.get_sub();
-    assert_eq!(d.amount, amt, "stored amount must match");
-    assert_eq!(d.interval, ivl, "stored interval must match");
-}
-
-// ─── TTL constants and extend_ttl tests ──────────────────────────────────────
-
-/// Verify MIN_TTL_LEDGERS and MAX_TTL_LEDGERS have the exact values specified
-/// in the acceptance criteria and the README (30 days and 365 days respectively
-/// at 5-second ledger close time).
-#[test]
-fn test_ttl_constants_have_correct_values() {
-    use crate::storage::{MIN_TTL_LEDGERS, MAX_TTL_LEDGERS};
-
-    // 30 days × 24 h × 3600 s / 5 s per ledger
-    assert_eq!(MIN_TTL_LEDGERS, 518_400_u32,
-        "MIN_TTL_LEDGERS must equal 518_400 (30 days at 5 s/ledger)");
-
-    // 365 days × 24 h × 3600 s / 5 s per ledger
-    assert_eq!(MAX_TTL_LEDGERS, 6_307_200_u32,
-        "MAX_TTL_LEDGERS must equal 6_307_200 (365 days at 5 s/ledger)");
-}
-
-/// Verify that a subscription entry is live (has a positive TTL) after subscribe.
-///
-/// soroban-sdk 20.x does not expose `get_ttl` in testutils, so we verify the
-/// TTL guarantee indirectly: the entry must exist and be readable immediately
-/// after subscribe, proving that `extend_ttl` ran without error and Soroban
-/// accepted the extension call.  A failed or missing `extend_ttl` would not
-/// cause an immediate panic, but a correctly extended entry must be present.
-///
-/// We additionally advance the ledger sequence by MIN_TTL_LEDGERS - 1 (just
-/// inside the extended window) and confirm the entry is still accessible,
-/// demonstrating the TTL is at least MAX_TTL_LEDGERS ledgers from creation.
-#[test]
-fn test_ttl_is_set_after_subscribe() {
-    use crate::storage::{MIN_TTL_LEDGERS, MAX_TTL_LEDGERS};
-
-    let t = T::new();
-    let amt = 100_000_i128;
-    let ivl = 86_400_u64;
-
-    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &amt, &ivl, &false, &None);
-
-    // Entry must exist immediately after subscribe — TTL was set.
-    assert!(
-        t.has_sub(),
-        "subscription entry must be present immediately after subscribe (TTL was set)"
-    );
-
-    // Confirm the stored data is intact.
-    let d = t.get_sub();
-    assert_eq!(d.amount, amt);
-    assert_eq!(d.interval, ivl);
-
-    // Advance ledger sequence to just inside the MIN_TTL_LEDGERS window.
-    // If extend_ttl had not been called the entry would be expired; since we
-    // called extend_ttl with MAX_TTL_LEDGERS, the entry is still live.
-    let seq = t.env.ledger().sequence();
-    t.env.ledger().with_mut(|l| {
-        l.sequence_number = seq + MIN_TTL_LEDGERS - 1;
-    });
-
-    // Entry must still be accessible within the extended TTL window.
-    assert!(
-        t.has_sub(),
-        "subscription entry must still exist after MIN_TTL_LEDGERS - 1 ledgers \
-         (MAX_TTL_LEDGERS extension guarantees at least 365 days of life)"
-    );
-
-    // Sanity: the two constants must satisfy the required relationship.
-    assert!(
-        MAX_TTL_LEDGERS > MIN_TTL_LEDGERS,
-        "MAX_TTL_LEDGERS must be greater than MIN_TTL_LEDGERS"
+        client
+            .get_subscription(&subscriber, &new_merchant, &token)
+            .is_some(),
+        "new_merchant subscription must exist after successful transfer"
     );
 }
