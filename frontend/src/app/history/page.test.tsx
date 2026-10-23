@@ -11,8 +11,6 @@ const mockHistory = {
   events: [] as PaymentEvent[],
   isLoading: false,
   error: null as string | null,
-  hasMore: false,
-  loadMore: jest.fn(),
   refresh: jest.fn(),
 };
 
@@ -25,8 +23,8 @@ jest.mock('next/link', () => {
 });
 
 jest.mock('@/hooks/useWallet', () => ({ useWallet: () => mockWallet }));
-jest.mock('@/hooks/usePaymentHistory', () => ({
-  usePaymentHistory: () => mockHistory,
+jest.mock('@/hooks/useSubscriptionEvents', () => ({
+  useSubscriptionEvents: () => mockHistory,
 }));
 jest.mock('@/constants/network', () => ({ NETWORK_NAME: 'Testnet' }));
 
@@ -41,6 +39,7 @@ function makeEvents(count: number): PaymentEvent[] {
     amount: String(index + 1),
     amountStroops: String(index + 1),
     txHash: `tx-${index + 1}`,
+    eventType: 'executed',
   }));
 }
 
@@ -50,8 +49,6 @@ describe('HistoryPage URL pagination', () => {
     mockHistory.events = makeEvents(40);
     mockHistory.isLoading = false;
     mockHistory.error = null;
-    mockHistory.hasMore = false;
-    mockHistory.loadMore.mockClear();
     mockHistory.refresh.mockClear();
   });
 
@@ -61,7 +58,7 @@ describe('HistoryPage URL pagination', () => {
     fireEvent.click(screen.getByRole('button', { name: /next payment history page/i }));
     expect(new URL(window.location.href).searchParams.get('page')).toBe('2');
     expect(await screen.findByText('Page 2')).toBeInTheDocument();
-    expect(screen.getByRole('row', { name: /amount: 21 tokens/i })).toBeInTheDocument();
+    expect(screen.getByRole('row', { name: /amount: 11 tokens/i })).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: /previous payment history page/i }));
     expect(new URL(window.location.href).searchParams.has('page')).toBe(false);
@@ -70,7 +67,7 @@ describe('HistoryPage URL pagination', () => {
 
   it('falls back to the last non-empty page for an invalid final-page URL', async () => {
     window.history.replaceState({}, '', '/history?page=3');
-    mockHistory.events = makeEvents(21);
+    mockHistory.events = makeEvents(11);
 
     render(<HistoryPage />);
 
@@ -78,6 +75,6 @@ describe('HistoryPage URL pagination', () => {
       expect(new URL(window.location.href).searchParams.get('page')).toBe('2');
     });
     expect(screen.getByText('Page 2')).toBeInTheDocument();
-    expect(screen.getByRole('row', { name: /amount: 21 tokens/i })).toBeInTheDocument();
+    expect(screen.getByRole('row', { name: /amount: 11 tokens/i })).toBeInTheDocument();
   });
 });

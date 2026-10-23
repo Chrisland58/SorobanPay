@@ -3,31 +3,29 @@
 /**
  * /history page
  *
- * Displays the full payment history for the connected wallet by polling
- * the Soroban RPC `getEvents()` endpoint for `executed` events emitted
- * by the SorobanPay contract.
+ * Displays recent subscription activity for the connected wallet by polling
+ * the Soroban RPC `getEvents()` endpoint for SorobanPay contract events.
  *
  * Features:
- *  - Cursor-based pagination via the usePaymentHistory hook
- *  - 60-second localStorage cache to reduce RPC calls
+ *  - 30-second polling via the useSubscriptionEvents hook
+ *  - Client-side pagination in ten-event pages
  *  - Accessible table (WCAG 2.1 AA) via PaymentHistoryTable component
  *  - Loading, empty, error, and disconnected states
  *  - Back-link to the home page
  *  - Network indicator (Testnet / Mainnet)
  *
- * Keyboard shortcut H on the home page scrolls to the placeholder section
- * which contains a link to this page.
+ * Keyboard shortcut H on the home page scrolls to the live activity preview.
  */
 
 import Link from 'next/link';
 import { useCallback, useEffect, useState } from 'react';
 import { useWallet } from '@/hooks/useWallet';
-import { usePaymentHistory } from '@/hooks/usePaymentHistory';
+import { useSubscriptionEvents } from '@/hooks/useSubscriptionEvents';
 import PaymentHistoryTable from '@/components/PaymentHistoryTable';
 import { ErrorBoundary } from '@/components/ErrorBoundary';
 import { NETWORK_NAME } from '@/constants/network';
 
-const PAGE_SIZE = 20;
+const PAGE_SIZE = 10;
 
 function getPageFromUrl(): number {
   const page = Number(new URLSearchParams(window.location.search).get('page'));
@@ -40,8 +38,8 @@ export default function HistoryPage() {
   const { publicKey } = useWallet();
   const [currentPage, setCurrentPage] = useState(1);
 
-  const { events, isLoading, error, hasMore, loadMore, refresh } =
-    usePaymentHistory({ publicKey });
+  const { events, isLoading, error, refresh } =
+    useSubscriptionEvents({ publicKey });
 
   const syncPageFromUrl = useCallback(() => {
     setCurrentPage(getPageFromUrl());
@@ -62,10 +60,10 @@ export default function HistoryPage() {
   }, []);
 
   const goToNextPage = useCallback(() => {
-    const nextPage = currentPage + 1;
-    updatePageUrl(nextPage);
-    if (events.length < nextPage * PAGE_SIZE) loadMore();
-  }, [currentPage, events.length, loadMore, updatePageUrl]);
+    if (events.length > currentPage * PAGE_SIZE) {
+      updatePageUrl(currentPage + 1);
+    }
+  }, [currentPage, events.length, updatePageUrl]);
 
   const refreshHistory = useCallback(() => {
     updatePageUrl(1, true);
@@ -73,19 +71,13 @@ export default function HistoryPage() {
   }, [refresh, updatePageUrl]);
 
   useEffect(() => {
-    if (isLoading || currentPage === 1) return;
-    if (events.length < currentPage * PAGE_SIZE && hasMore) {
-      loadMore();
-      return;
-    }
-    if (!hasMore && events.length < currentPage * PAGE_SIZE) {
-      const lastPage = Math.max(1, Math.ceil(events.length / PAGE_SIZE));
-      updatePageUrl(lastPage, true);
-    }
-  }, [currentPage, events.length, hasMore, isLoading, loadMore, updatePageUrl]);
+    if (isLoading) return;
+    const lastPage = Math.max(1, Math.ceil(events.length / PAGE_SIZE));
+    if (currentPage > lastPage) updatePageUrl(lastPage, true);
+  }, [currentPage, events.length, isLoading, updatePageUrl]);
 
   const pageEvents = events.slice((currentPage - 1) * PAGE_SIZE, currentPage * PAGE_SIZE);
-  const canGoNext = hasMore || events.length > currentPage * PAGE_SIZE;
+  const canGoNext = events.length > currentPage * PAGE_SIZE;
 
   return (
     <main
@@ -109,7 +101,7 @@ export default function HistoryPage() {
               Payment History
             </h1>
             <p className="text-gray-400 text-sm mt-1">
-              Executed payments from your SorobanPay subscriptions
+              Live subscription events from your SorobanPay account
             </p>
           </div>
 
@@ -163,8 +155,8 @@ export default function HistoryPage() {
             events={pageEvents}
             isLoading={isLoading}
             error={error}
-            hasMore={hasMore}
-            onLoadMore={loadMore}
+            hasMore={canGoNext}
+            onLoadMore={refresh}
             onRefresh={refreshHistory}
             currentPage={currentPage}
             canGoPrevious={currentPage > 1}
@@ -180,12 +172,11 @@ export default function HistoryPage() {
       {/* ── Footer note ─────────────────────────────────────────────────── */}
       <div className="w-full max-w-4xl mt-8">
         <p className="text-gray-600 text-xs text-center leading-relaxed">
-          Showing{' '}
-          <code className="rounded bg-gray-800 px-1 text-gray-400">executed</code>{' '}
-          events for your account from the SorobanPay contract on{' '}
+          Showing subscribe, executed, cancellation, and payment failure events
+          for your account from the SorobanPay contract on{' '}
           <span className="text-gray-500">{NETWORK_NAME}</span>.{' '}
-          Results are cached for 60 seconds. Use the refresh button to fetch the
-          latest data.
+          Activity refreshes every 30 seconds. Use the refresh button to fetch
+          the latest data now.
         </p>
       </div>
     </main>
