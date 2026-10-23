@@ -90,7 +90,7 @@ type PauseState = 'active' | 'pausing' | 'paused' | 'resuming';
 
 // ─── Shared input className (larger py for ≥48px touch target on mobile) ─────
 const inputCls =
-  "w-full rounded-lg bg-gray-800 border border-gray-700 px-4 py-3 text-base " +
+  "w-full min-w-0 max-w-full rounded-lg bg-gray-800 border border-gray-700 px-4 py-3 text-base " +
   "text-white placeholder-gray-500 " +
   "focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400 focus-visible:ring-offset-2 focus-visible:ring-offset-gray-900 " +
   "disabled:opacity-50 min-h-[48px] transition-all duration-150";
@@ -521,10 +521,11 @@ function SuccessCard({
         <p className="text-gray-400 text-xs mb-1.5 font-medium">
           Transaction hash
         </p>
-        <div className="flex items-center gap-2 flex-wrap">
-          <p className="text-gray-200 break-all font-mono text-xs leading-relaxed flex-1">
+        <div className="flex min-w-0 items-center gap-2">
+          <p className="min-w-0 flex-1 truncate text-gray-200 font-mono text-xs leading-relaxed" title={data.txHash}>
             {data.txHash}
           </p>
+          <CopyButton text={data.txHash} label="Copy tx hash" />
           <a
             href={`${explorerBase}/${data.txHash}`}
             target="_blank"
@@ -1924,7 +1925,7 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
 
   return (
     <ErrorBoundary name="SubscriptionForm">
-    <div className="w-full max-w-lg mx-auto bg-gray-900 rounded-2xl shadow-xl p-5 sm:p-8 text-white">
+    <div className="w-full min-w-0 max-w-lg mx-auto bg-gray-900 rounded-2xl shadow-xl p-4 sm:p-8 text-white">
       {showConfirm && (
         <ConfirmModal
           merchantAddress={merchantAddress}
@@ -2431,8 +2432,8 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
             </div>
             <div className="bg-gray-800/50 rounded-lg p-3 border border-gray-700/50">
               <p className="text-gray-400 text-xs mb-1 font-medium">Transaction hash</p>
-              <div className="flex items-start gap-2">
-                <p className="flex-1 text-gray-200 break-all font-mono text-xs leading-relaxed">
+              <div className="flex min-w-0 items-center gap-2">
+                <p className="min-w-0 flex-1 truncate text-gray-200 font-mono text-xs leading-relaxed" title={cancelSuccess.txHash}>
                   {cancelSuccess.txHash}
                 </p>
                 <CopyButton text={cancelSuccess.txHash} label="Copy" />

@@ -74,6 +74,7 @@
      */
     background-color: var(--color-bg, #030712);
     color: var(--color-text, #f9fafb);
+    overflow-x: hidden;
   }
 
   /*
