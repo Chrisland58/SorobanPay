@@ -8,6 +8,9 @@ import {
   useState,
   type ReactNode,
 } from "react";
+import { ThemeProvider as MuiThemeProvider } from "@mui/material/styles";
+import CssBaseline from "@mui/material/CssBaseline";
+import { darkTheme, lightTheme } from "@/styles/theme";
 
 type Theme = "light" | "dark";
 
@@ -64,6 +67,7 @@ export function ThemeScript() {
 export function ThemeProvider({ children }: { children: ReactNode }) {
   const [theme, setTheme] = useState<Theme>("dark");
   const [isInitialized, setIsInitialized] = useState(false);
+  const muiTheme = theme === "dark" ? darkTheme : lightTheme;
 
   useEffect(() => {
     const initialTheme = getSavedTheme() ?? getSystemTheme();
@@ -89,7 +93,10 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
 
   return (
     <ThemeContext.Provider value={{ theme, setTheme, toggleTheme }}>
-      {children}
+      <MuiThemeProvider theme={muiTheme}>
+        <CssBaseline enableColorScheme />
+        {children}
+      </MuiThemeProvider>
     </ThemeContext.Provider>
   );
 }
