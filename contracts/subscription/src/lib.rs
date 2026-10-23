@@ -196,7 +196,14 @@ impl SubscriptionProtocol {
 
     /// Initialise the contract by storing the admin address and initial schema version.
     ///
-    /// Must be called once after deployment; subsequent calls panic.
+    /// Must be called once after deployment; subsequent calls panic. No address
+    /// authorization is required because the contract has no administrator yet.
+    ///
+    /// # Parameters
+    /// - `admin`: Address that will administer schema migration and configuration.
+    ///
+    /// # Returns
+    /// Nothing. Panics if the contract has already been initialized.
     pub fn initialize(env: Env, admin: Address) {
         if env.storage().instance().has(&DataKey::Admin) {
             panic!("already initialized");
@@ -208,12 +215,44 @@ impl SubscriptionProtocol {
         env.storage().instance().set(&DataKey::AdminConfig, &AdminConfig { admin, max_amount: MAX_AMOUNT });
     }
 
+    /// Compatibility alias for [`initialize`].
+    ///
+    /// # Parameters
+    /// - `admin`: Address to store as the contract administrator.
+    ///
+    /// # Authorization
+    /// No authorization is required before initialization.
+    ///
+    /// # Returns
+    /// Nothing. Panics if the contract has already been initialized.
     pub fn init(env: Env, admin: Address) { Self::initialize(env, admin) }
 
+    /// Read the administrator and amount limit configuration.
+    ///
+    /// # Returns
+    /// The stored [`AdminConfig`].
+    ///
+    /// # Errors
+    /// - `ContractError::NotInitialized` — configuration has not been stored.
+    ///
+    /// No authorization is required.
     pub fn get_config(env: Env) -> Result<AdminConfig, ContractError> {
         env.storage().instance().get(&DataKey::AdminConfig).ok_or(ContractError::NotInitialized)
     }
 
+    /// Change the maximum amount accepted by `subscribe`.
+    ///
+    /// # Parameters
+    /// - `admin`: Stored administrator; must authorize this invocation.
+    /// - `new_max`: New limit in token base units; must be in `1..=MAX_AMOUNT`.
+    ///
+    /// # Returns
+    /// `Ok(())` after the limit is stored.
+    ///
+    /// # Errors
+    /// - `ContractError::AmountTooLarge` — `new_max` is outside the valid range.
+    /// - `ContractError::NotInitialized` — configuration has not been stored.
+    /// - `ContractError::NotAdmin` — `admin` is not the stored administrator.
     pub fn set_max_amount(env: Env, admin: Address, new_max: i128) -> Result<(), ContractError> {
         admin.require_auth();
         if new_max <= 0 || new_max > MAX_AMOUNT { return Err(ContractError::AmountTooLarge); }
@@ -224,12 +263,21 @@ impl SubscriptionProtocol {
         Ok(())
     }
 
-    /// Return the contract semantic version string (e.g. `"1.0.0"`).
+    /// Return the contract semantic version string (for example, `"1.0.0"`).
+    ///
+    /// # Returns
+    /// The deployed contract version string.
+    ///
+    /// No authorization is required.
     pub fn get_version(env: Env) -> soroban_sdk::String {
         soroban_sdk::String::from_str(&env, CONTRACT_VERSION)
     }
 
-    /// Return the on-chain schema version set during the last `migrate` call.
+    /// Return the on-chain schema version.
+    ///
+    /// # Returns
+    /// The stored schema version, or zero if the version has not been stored.
+    /// No authorization is required.
     pub fn get_schema_version(env: Env) -> u32 {
         env.storage()
             .instance()
@@ -237,9 +285,18 @@ impl SubscriptionProtocol {
             .unwrap_or(0_u32)
     }
 
-    /// Migrate the contract schema to `CURRENT_SCHEMA_VERSION`.
+    /// Set the on-chain schema version to `CURRENT_SCHEMA_VERSION`.
     ///
-    /// Requires admin auth.  Returns `AlreadyMigrated` if already current.
+    /// # Parameters
+    /// - `admin`: Stored administrator; must authorize this invocation.
+    ///
+    /// # Returns
+    /// `Ok(())` after updating the version and emitting the migration event.
+    ///
+    /// # Errors
+    /// - `ContractError::NotInitialized` — no administrator has been stored.
+    /// - `ContractError::NotAdmin` — `admin` is not the stored administrator.
+    /// - `ContractError::AlreadyMigrated` — the schema is already current.
     pub fn migrate(env: Env, admin: Address) -> Result<(), ContractError> {
         admin.require_auth();
 
@@ -287,6 +344,9 @@ impl SubscriptionProtocol {
     ///                    Must be ≤ [`MAX_FEE_BPS`] (500 = 5 %).
     /// - `fee_collector`: Address that receives the protocol fee.
     ///
+    /// # Returns
+    /// `Ok(())` after the fee configuration is stored.
+    ///
     /// # Errors
     /// - `ContractError::NotInitialized` — `initialize` has not been called.
     /// - `ContractError::NotAdmin`       — caller is not the stored admin.
@@ -332,6 +392,13 @@ impl SubscriptionProtocol {
     /// Compute and return the compact 32-byte storage key for a subscription pair.
     ///
     /// Useful for off-chain tooling that wants to inspect raw storage entries.
+    ///
+    /// # Parameters
+    /// - `subscriber`: Account whose subscription is being identified.
+    /// - `merchant`: Payment recipient in the subscription pair.
+    ///
+    /// # Returns
+    /// The deterministic 32-byte SHA-256 storage key. No authorization is required.
     pub fn compute_subscription_key(
         env: Env,
         subscriber: Address,
@@ -344,6 +411,13 @@ impl SubscriptionProtocol {
     ///
     /// Off-chain tools can iterate these hashes to enumerate all active
     /// subscriptions the merchant participates in.
+    ///
+    /// # Parameters
+    /// - `merchant`: Merchant whose index is queried.
+    ///
+    /// # Returns
+    /// The indexed subscription hashes, or an empty vector if no index exists.
+    /// No authorization is required.
     pub fn get_merchant_subscription_keys(env: Env, merchant: Address) -> Vec<BytesN<32>> {
         let idx_key = DataKey::MerchantIndex(merchant);
         env.storage()
@@ -368,6 +442,9 @@ impl SubscriptionProtocol {
     /// A `Vec<SubscriptionEntry>` where each element pairs a subscriber address
     /// with its `SubscriptionData`.  Returns an empty vec if the merchant has no
     /// active subscriptions or no roster entry exists.
+    ///
+    /// # Parameters
+    /// - `merchant`: Merchant whose active subscriptions are queried.
     pub fn get_merchant_subscriptions(
         env: Env,
         merchant: Address,
@@ -401,8 +478,26 @@ impl SubscriptionProtocol {
 
     /// Create or update a recurring payment subscription.
     ///
-    /// Amount must be > 0 and <= 10^18. Interval must be in [86400, 31536000].
-    /// Set `strict=true` to reject if allowance < amount.
+    /// # Parameters
+    /// - `subscriber`: Account authorizing recurring payments.
+    /// - `merchant`: Account that receives payments; must differ from `subscriber`.
+    /// - `token`: SEP-41 token contract used for the payments.
+    /// - `amount`: Positive payment amount in token base units, at most `MAX_AMOUNT`.
+    /// - `interval`: Seconds between payments, from 86,400 through 31,536,000.
+    /// - `strict`: If true, reject when token allowance is less than `amount`;
+    ///   otherwise emit a low-allowance event and still create the subscription.
+    /// - `grace_period`: Optional grace-period duration in seconds.
+    ///
+    /// # Authorization
+    /// Requires authorization from `subscriber`.
+    ///
+    /// # Returns
+    /// `Ok(())` after storing the subscription and emitting its event.
+    ///
+    /// # Errors
+    /// Returns the corresponding `ContractError` for invalid amount or interval,
+    /// self-subscription, invalid timestamp, or insufficient allowance in strict
+    /// mode.
     pub fn subscribe(
         env: Env,
         subscriber: Address,
@@ -495,6 +590,9 @@ impl SubscriptionProtocol {
     /// - `new_amount`:   Replacement payment amount. Must be > 0 and <= 10^18.
     /// - `new_interval`: Replacement interval in seconds. Must be in [86400, 31536000].
     ///
+    /// # Returns
+    /// `Ok(())` after storing the new terms and emitting an update event.
+    ///
     /// # Errors
     /// - `ContractError::NoActiveSubscription` — no subscription exists for the pair.
     /// - `ContractError::AmountMustBePositive` — if `new_amount <= 0`.
@@ -577,6 +675,8 @@ impl SubscriptionProtocol {
     ///   `execute_payment` at or after this time automatically clears the pause.
     ///   When `None`, the subscription stays paused until an explicit
     ///   `resume_subscription` call.
+    /// - `token`: Token contract address associated with the subscription. The
+    ///   subscription record remains authoritative for payment execution.
     ///
     /// # Authorization
     /// Requires a valid signature from `subscriber`.
@@ -585,6 +685,9 @@ impl SubscriptionProtocol {
     /// - `ContractError::NoActiveSubscription` — no subscription exists for the pair.
     /// - `ContractError::SubscriptionPaused`    — the subscription is already paused.
     /// - `ContractError::InvalidTimestamp`      — `resume_at` is not strictly in the future.
+    ///
+    /// # Returns
+    /// `Ok(())` after the pause has been stored and its event emitted.
     pub fn pause_subscription(
         env: Env,
         subscriber: Address,
@@ -637,6 +740,15 @@ impl SubscriptionProtocol {
     /// # Errors
     /// - `ContractError::NoActiveSubscription` — no subscription exists for the pair.
     /// - `ContractError::SubscriptionNotPaused` — the subscription is not currently paused.
+    ///
+    /// # Parameters
+    /// - `subscriber`: Subscriber authorizing the resume.
+    /// - `merchant`: Merchant paired with the subscription.
+    /// - `token`: Token contract address associated with the subscription.
+    ///
+    /// # Returns
+    /// `Ok(())` after clearing the pause and scheduling the next payment from
+    /// the current ledger timestamp.
     pub fn resume_subscription(
         env: Env,
         subscriber: Address,
@@ -692,6 +804,20 @@ impl SubscriptionProtocol {
     ///
     /// When `fee_bps = 0` (the default) only one transfer is made and behaviour
     /// is identical to the pre-fee implementation.
+    ///
+    /// # Parameters
+    /// - `subscriber`: Account whose subscription is charged.
+    /// - `merchant`: Merchant authorizing collection.
+    /// - `token`: Token argument retained for the public interface; the stored
+    ///   subscription token is used for transfer.
+    ///
+    /// # Returns
+    /// `Ok(())` after transfer, storage update, and event emission.
+    ///
+    /// # Errors
+    /// Returns the corresponding `ContractError` when the subscription is
+    /// missing, payment is not due, it is paused, allowance or balance is
+    /// insufficient, or timestamp/nonce arithmetic fails.
     pub fn execute_payment(
         env: Env,
         subscriber: Address,
@@ -796,6 +922,27 @@ impl SubscriptionProtocol {
         write_execution_marker(&env, &hash, data.payment_nonce);
 
         events::emit_executed(&env, &subscriber, &merchant, &data.token, data.amount, data.payment_nonce);
+    /// Attempt payment collection for each subscriber in one merchant-authorized call.
+    ///
+    /// Subscribers without an active, due, sufficiently funded subscription are
+    /// reported as unsuccessful without aborting attempts for the other entries.
+    ///
+    /// # Parameters
+    /// - `merchant`: Merchant authorizing collection for the batch.
+    /// - `token`: Token argument retained for the public interface; each stored
+    ///   subscription token is used for its transfer.
+    /// - `subscribers`: Non-empty list of at most [`BATCH_MAX_SIZE`] subscriber
+    ///   addresses. Each result corresponds to an input address.
+    ///
+    /// # Returns
+    /// A vector of `(subscriber, succeeded)` results in input order.
+    ///
+    /// # Errors
+    /// - `ContractError::EmptyBatch` — the subscriber list is empty.
+    /// - `ContractError::BatchTooLarge` — the list exceeds [`BATCH_MAX_SIZE`].
+    /// - `ContractError::InvalidTimestamp` — the ledger timestamp is invalid.
+    ///
+    /// Requires authorization from `merchant`.
     pub fn batch_execute_payment(
         env: Env,
         merchant: Address,
@@ -913,6 +1060,17 @@ impl SubscriptionProtocol {
     ///
     /// # Authorization
     /// Requires a valid signature from `subscriber`.
+    ///
+    /// # Parameters
+    /// - `subscriber`: Subscriber authorizing cancellation.
+    /// - `merchant`: Merchant paired with the subscription.
+    /// - `token`: Token argument retained for the public interface.
+    ///
+    /// # Returns
+    /// `Ok(())` after removing the subscription and updating the merchant indexes.
+    ///
+    /// # Errors
+    /// - `ContractError::NoActiveSubscription` — no subscription exists for the pair.
     pub fn cancel(
         env: Env,
         subscriber: Address,
@@ -966,6 +1124,9 @@ impl SubscriptionProtocol {
     /// - `ContractError::SelfSubscription`          — `subscriber == new_merchant`.
     /// - `ContractError::SubscriptionAlreadyExists` — a subscription already exists for
     ///                                                `(subscriber, new_merchant)`.
+    ///
+    /// # Returns
+    /// `Ok(())` after the subscription and merchant indexes have been transferred.
     pub fn transfer_subscription(
         env: Env,
         subscriber: Address,
@@ -1032,6 +1193,14 @@ impl SubscriptionProtocol {
     /// `None` if the pair has no subscription (never subscribed, or cancelled).
     ///
     /// Read-only; no authorization required.
+    ///
+    /// # Parameters
+    /// - `subscriber`: Subscriber whose record is queried.
+    /// - `merchant`: Merchant paired with the subscriber.
+    /// - `token`: Token argument retained for the public interface.
+    ///
+    /// # Returns
+    /// `Some(SubscriptionData)` when the pair has an active record, otherwise `None`.
     pub fn get_subscription(
         env: Env,
         subscriber: Address,
@@ -1055,6 +1224,12 @@ impl SubscriptionProtocol {
     /// persistent storage.
     ///
     /// Read-only; no authorization required.
+    ///
+    /// # Parameters
+    /// - `merchant`: Merchant whose indexed subscriptions are counted.
+    ///
+    /// # Returns
+    /// Number of indexed subscription hashes, or zero when no index is stored.
     pub fn get_subscription_count(env: Env, merchant: Address) -> u32 {
         let idx_key = DataKey::MerchantIndex(merchant);
         // `index_add`/`index_remove` write this key under `.persistent()`, so the
