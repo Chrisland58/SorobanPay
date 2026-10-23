@@ -1,59 +1,103 @@
-import React, { createContext, useContext, useState, useEffect, ReactNode } from 'react';
-import { ThemeProvider as MuiThemeProvider } from '@mui/material/styles';
-import { lightTheme, darkTheme } from '../styles/theme';
-import CssBaseline from '@mui/material/CssBaseline';
+"use client";
 
-interface ThemeContextType {
-    mode: 'light' | 'dark';
-    toggleTheme: () => void;
-    setMode: (mode: 'light' | 'dark') => void;
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useState,
+  type ReactNode,
+} from "react";
+
+type Theme = "light" | "dark";
+
+interface ThemeContextValue {
+  theme: Theme;
+  setTheme: (theme: Theme) => void;
+  toggleTheme: () => void;
 }
 
-const ThemeContext = createContext<ThemeContextType | undefined>(undefined);
+const STORAGE_KEY = "theme-mode";
+const ThemeContext = createContext<ThemeContextValue | undefined>(undefined);
 
-export const useTheme = (): ThemeContextType => {
-    const context = useContext(ThemeContext);
-    if (!context) {
-        throw new Error('useTheme must be used within a ThemeProvider');
+function getSystemTheme(): Theme {
+  return window.matchMedia("(prefers-color-scheme: dark)").matches
+    ? "dark"
+    : "light";
+}
+
+function getSavedTheme(): Theme | null {
+  try {
+    const saved = window.localStorage.getItem(STORAGE_KEY);
+    return saved === "light" || saved === "dark" ? saved : null;
+  } catch (error) {
+    console.error("Unable to read the saved theme preference.", error);
+    return null;
+  }
+}
+
+function applyTheme(theme: Theme): void {
+  const root = document.documentElement;
+  root.classList.toggle("dark", theme === "dark");
+  root.dataset.theme = theme;
+}
+
+export function ThemeScript() {
+  const script = `(() => {
+    const root = document.documentElement;
+    let saved = null;
+    try {
+      saved = localStorage.getItem("${STORAGE_KEY}");
+    } catch (error) {
+      console.error("Unable to read the saved theme preference.", error);
     }
-    return context;
-};
+    const theme = saved === "light" || saved === "dark"
+      ? saved
+      : (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+    root.classList.toggle("dark", theme === "dark");
+    root.dataset.theme = theme;
+  })();`;
 
-interface ThemeProviderProps {
-    children: ReactNode;
+  return <script dangerouslySetInnerHTML={{ __html: script }} />;
 }
 
-export const ThemeProvider: React.FC<ThemeProviderProps> = ({ children }) => {
-    const [mode, setMode] = useState<'light' | 'dark'>(() => {
-        // Check localStorage for saved preference
-        const saved = localStorage.getItem('theme-mode');
-        if (saved === 'light' || saved === 'dark') {
-            return saved;
-        }
-        // Check system preference
-        if (window.matchMedia('(prefers-color-scheme: dark)').matches) {
-            return 'dark';
-        }
-        return 'light';
-    });
+export function ThemeProvider({ children }: { children: ReactNode }) {
+  const [theme, setTheme] = useState<Theme>("dark");
+  const [isInitialized, setIsInitialized] = useState(false);
 
-    useEffect(() => {
-        localStorage.setItem('theme-mode', mode);
-        document.documentElement.setAttribute('data-theme', mode);
-    }, [mode]);
+  useEffect(() => {
+    const initialTheme = getSavedTheme() ?? getSystemTheme();
+    setTheme(initialTheme);
+    applyTheme(initialTheme);
+    setIsInitialized(true);
+  }, []);
 
-    const toggleTheme = (): void => {
-        setMode((prev) => (prev === 'light' ? 'dark' : 'light'));
-    };
+  useEffect(() => {
+    if (!isInitialized) return;
 
-    const theme = mode === 'light' ? lightTheme : darkTheme;
+    applyTheme(theme);
+    try {
+      window.localStorage.setItem(STORAGE_KEY, theme);
+    } catch (error) {
+      console.error("Unable to save the theme preference.", error);
+    }
+  }, [isInitialized, theme]);
 
-    return (
-        <ThemeContext.Provider value={{ mode, toggleTheme, setMode }}>
-            <MuiThemeProvider theme={theme}>
-                <CssBaseline enableColorScheme />
-                {children}
-            </MuiThemeProvider>
-        </ThemeContext.Provider>
-    );
-};
+  const toggleTheme = useCallback(() => {
+    setTheme((current) => (current === "dark" ? "light" : "dark"));
+  }, []);
+
+  return (
+    <ThemeContext.Provider value={{ theme, setTheme, toggleTheme }}>
+      {children}
+    </ThemeContext.Provider>
+  );
+}
+
+export function useTheme(): ThemeContextValue {
+  const context = useContext(ThemeContext);
+  if (!context) {
+    throw new Error("useTheme must be used within a ThemeProvider");
+  }
+  return context;
+}
