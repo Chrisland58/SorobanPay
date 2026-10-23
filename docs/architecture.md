@@ -71,6 +71,19 @@ graph TD
 
 The contract is the **sole source of truth** for subscription state. The backend is **read-only with respect to the chain** — it observes events and serves derived data, but never alters chain state (except the optional `PaymentScheduler`, which can be disabled by omitting `OPERATOR_SECRET`).
 
+### Text description of the system diagram
+
+The diagram shows subscribers using Freighter with the Next.js frontend and
+merchants using the merchant portal. Both web clients call the
+`SubscriptionProtocol` contract on Soroban. The contract stores subscription
+state in the ledger and uses SEP-41 token transfers for payments. Contract
+events flow from Soroban RPC to the optional backend/indexer; that backend
+observes chain state and builds off-chain read models. The README's companion
+[`architecture.svg`](assets/architecture.svg) depicts these actors and
+connections, showing the default event-only indexer flow. The optional
+`PaymentScheduler` shown in the Mermaid system overview is a separate,
+opt-in exception that submits collection transactions.
+
 ---
 
 ## 2. Component Responsibility Matrix
@@ -617,13 +630,22 @@ For the full event reference and RPC query examples, see [docs/events.md](events
 
 ### Prisma schema summary
 
-| Table | Purpose |
-|-------|---------|
-| `Event` | Raw decoded contract events (`subscribe`, `executed`) |
-| `AuditLog` | Enriched payment records with tx hash and status |
-| `PayoutSummary` | Aggregated daily/weekly revenue per merchant |
-| `WebhookEndpoint` | Registered merchant webhook URLs |
-| `WebhookDelivery` | Per-attempt delivery log (status code, error, retry count) |
+PostgreSQL is a derived read model; the Soroban contract remains authoritative.
+The canonical definitions are in
+[`backend/prisma/schema.prisma`](../backend/prisma/schema.prisma).
+
+| Table | Stored information and relationships |
+|-------|---------------------------------------|
+| `Event` | Decoded event type, subscriber, merchant, token, amount, and ledger timestamp. |
+| `Subscription` | Current subscription mirror, uniquely keyed by subscriber, merchant, and token; includes interval, next payment, status, and overdue time. |
+| `Payment` | Normalized executed/failed payment with transaction hash, payment nonce, parties, token, amount, and timestamp. |
+| `IndexerState` | Singleton RPC cursor and last indexed ledger, allowing indexing to resume after restart. |
+| `WebhookEndpoint` | Merchant URL, activation flag, optional HMAC secret, and subscribed event types. Has many delivery attempts. |
+| `WebhookDelivery` | Event and payload, stable event ID, per-attempt delivery ID, HTTP result, status, retry count, and error details. Optionally references an endpoint. |
+| `AuditLog` | Enriched event record with unique transaction hash, ledger, status, and payment parties. |
+| `PayoutSummary` | Merchant's daily or weekly total, payment count, token, and period boundaries. |
+| `PaymentRetry` | Scheduled retry attempts, status, execution time, and failure details for a payment. |
+| `RetryConfig`, `NotificationPreference`, `OutboxEvent` | Supporting retry policy, merchant notification settings, and durable event-delivery work. |
 
 ---
 

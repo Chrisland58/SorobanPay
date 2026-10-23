@@ -216,6 +216,9 @@ pub fn emit_executed(env: &Env, subscriber: &Address, merchant: &Address, token:
     );
 }
 
+/// Emit the `expired` event after a subscription expires.
+///
+/// Topics: `(expired, subscriber, merchant)`. The event has no data payload.
 pub fn emit_expired(env: &Env, subscriber: &Address, merchant: &Address) {
     env.events().publish((Symbol::new(env, "expired"), subscriber.clone(), merchant.clone()), ());
 }
