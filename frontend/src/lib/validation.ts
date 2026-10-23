@@ -8,6 +8,7 @@
  */
 
 import { StrKey } from '@stellar/stellar-sdk';
+import { z } from 'zod';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -34,6 +35,7 @@ export interface SubscriptionFormValues {
 export const MIN_INTERVAL_SECONDS = 86_400;      // 1 day
 export const MAX_INTERVAL_SECONDS = 31_536_000;  // 365 days
 export const DEFAULT_INTERVAL_SECONDS = 2_592_000; // 30 days
+export const MAX_AMOUNT = 1_000_000_000_000_000_000n;
 
 // ─── Address validators ───────────────────────────────────────────────────────
 
@@ -115,6 +117,66 @@ export function isValidCAddressChecksum(addr: string): boolean {
   return StrKey.isValidContract(normalizeAddress(addr));
 }
 
+// ─── Form schema ──────────────────────────────────────────────────────────────
+
+const integerString = z.string().trim();
+
+export const subscriptionFormSchema = z
+  .object({
+    merchantAddress: z
+      .string()
+      .trim()
+      .min(1, 'Merchant address is required.')
+      .refine(isValidGAddressChecksum, {
+        message: 'Enter a valid Stellar address (starts with G)',
+      }),
+    tokenAddress: z
+      .string()
+      .trim()
+      .min(1, 'Token contract address is required.')
+      .refine(isValidCAddressChecksum, {
+        message: 'Enter a valid Stellar contract address (starts with C)',
+      }),
+    amount: integerString
+      .min(1, 'Amount is required.')
+      .regex(/^-?\d+$/, 'Amount must be a whole number.')
+      .refine(
+        (value) => !/^-?\d+$/.test(value) || BigInt(value) > 0n,
+        'Amount must be greater than 0',
+      )
+      .refine(
+        (value) => !/^-?\d+$/.test(value) || BigInt(value) <= MAX_AMOUNT,
+        'Amount exceeds maximum allowed value',
+      ),
+    interval: integerString
+      .min(1, 'Interval is required.')
+      .regex(/^-?\d+$/, 'Interval must be a whole number of seconds.')
+      .refine(
+        (value) =>
+          !/^-?\d+$/.test(value) || Number(value) >= MIN_INTERVAL_SECONDS,
+        'Interval must be at least 1 day (86400 seconds)',
+      )
+      .refine(
+        (value) =>
+          !/^-?\d+$/.test(value) || Number(value) <= MAX_INTERVAL_SECONDS,
+        `Interval must not exceed ${MAX_INTERVAL_SECONDS} seconds`,
+      ),
+    subscriberAddress: z.string().optional(),
+  })
+  .superRefine((values, context) => {
+    if (
+      values.subscriberAddress &&
+      values.merchantAddress === values.subscriberAddress.trim()
+    ) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['merchantAddress'],
+        message:
+          'Merchant address cannot be the same as your subscriber address. A subscription to yourself is not allowed.',
+      });
+    }
+  });
+
 // ─── Form validator ───────────────────────────────────────────────────────────
 
 /**
@@ -126,52 +188,20 @@ export function isValidCAddressChecksum(addr: string): boolean {
 export function validateSubscriptionForm(
   values: SubscriptionFormValues,
 ): FieldErrors {
+  const result = subscriptionFormSchema.safeParse(values);
+  if (result.success) return {};
+
   const errors: FieldErrors = {};
-
-  // merchantAddress — valid Stellar G-address, and must not equal the subscriber
-  if (!values.merchantAddress.trim()) {
-    errors.merchantAddress = 'Merchant address is required.';
-  } else if (!isValidGAddress(values.merchantAddress)) {
-    errors.merchantAddress =
-      'Must be a valid Stellar G-address (56 characters, starts with G).';
-  } else if (
-    values.subscriberAddress &&
-    values.merchantAddress.trim() === values.subscriberAddress.trim()
-  ) {
-    errors.merchantAddress =
-      'Merchant address cannot be the same as your subscriber address. A subscription to yourself is not allowed.';
+  const fieldErrors = result.error.flatten().fieldErrors;
+  for (const field of [
+    'merchantAddress',
+    'tokenAddress',
+    'amount',
+    'interval',
+  ] as const) {
+    const message = fieldErrors[field]?.[0];
+    if (message) errors[field] = message;
   }
-
-  // tokenAddress — valid Stellar C-address (contract)
-  if (!values.tokenAddress.trim()) {
-    errors.tokenAddress = 'Token contract address is required.';
-  } else if (!isValidCAddress(values.tokenAddress)) {
-    errors.tokenAddress =
-      'Must be a valid Stellar C-address (56 characters, starts with C).';
-  }
-
-  // amount — positive integer
-  const amountNum = Number(values.amount);
-  if (!values.amount.trim()) {
-    errors.amount = 'Amount is required.';
-  } else if (!Number.isInteger(amountNum) || isNaN(amountNum)) {
-    errors.amount = 'Amount must be a whole number.';
-  } else if (amountNum <= 0) {
-    errors.amount = 'Amount must be greater than 0.';
-  }
-
-  // interval — seconds in [86400, 31536000]
-  const intervalNum = Number(values.interval);
-  if (!values.interval.trim()) {
-    errors.interval = 'Interval is required.';
-  } else if (!Number.isInteger(intervalNum) || isNaN(intervalNum)) {
-    errors.interval = 'Interval must be a whole number of seconds.';
-  } else if (intervalNum < MIN_INTERVAL_SECONDS) {
-    errors.interval = `Minimum interval is ${MIN_INTERVAL_SECONDS.toLocaleString()} seconds (1 day).`;
-  } else if (intervalNum > MAX_INTERVAL_SECONDS) {
-    errors.interval = `Maximum interval is ${MAX_INTERVAL_SECONDS.toLocaleString()} seconds (365 days).`;
-  }
-
   return errors;
 }
 
