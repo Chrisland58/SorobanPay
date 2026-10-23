@@ -3,7 +3,7 @@
 /**
  * PaymentHistoryTable.tsx
  *
- * Accessible table component for displaying executed SorobanPay payment events.
+ * Accessible table component for displaying SorobanPay subscription events.
  *
  * Features:
  *  - WCAG 2.1 AA compliant: proper <table> semantics, th scope, aria-labels
@@ -11,7 +11,7 @@
  *  - Empty state: friendly message for zero events
  *  - Error state: accessible error alert
  *  - Disconnected state: prompt to connect wallet
- *  - "Load more" button for cursor-based pagination
+ *  - "Load more" button or page navigation for paginated event lists
  *  - Each tx hash links to Stellar Expert
  *
  * Usage:
@@ -91,7 +91,7 @@ function formatTimestamp(iso: string): string {
 function SkeletonRow() {
   return (
     <tr aria-hidden="true" className="border-b border-gray-800">
-      {[60, 44, 36, 28, 28, 20].map((w, i) => (
+      {[60, 44, 36, 28, 28].map((w, i) => (
         <td key={i} className="px-4 py-3">
           <div
             className={`h-3.5 w-${w} motion-safe:animate-pulse rounded bg-gray-700`}
@@ -115,7 +115,7 @@ function DisconnectedState() {
       <p className="text-3xl" aria-hidden="true">🔌</p>
       <p className="text-gray-300 font-semibold">Connect your wallet to view payment history</p>
       <p className="text-gray-500 text-sm leading-relaxed max-w-xs mx-auto">
-        Your executed payments will appear here once you connect a Freighter wallet.
+        Your subscription activity will appear here once you connect a Freighter wallet.
       </p>
     </div>
   );
@@ -131,10 +131,9 @@ function EmptyState({ onRefresh }: { onRefresh: () => void }) {
       className="rounded-2xl border border-dashed border-gray-700 bg-gray-900/30 p-10 text-center space-y-3"
     >
       <p className="text-3xl" aria-hidden="true">📭</p>
-      <p className="text-gray-300 font-semibold">No payments found</p>
+      <p className="text-gray-300 font-semibold">No subscription activity found</p>
       <p className="text-gray-500 text-sm leading-relaxed max-w-xs mx-auto">
-        Executed payments will appear here after a merchant collects a payment
-        from your subscription.
+        Created, executed, failed, and cancelled subscription events will appear here.
       </p>
       <button
         type="button"
@@ -269,7 +268,7 @@ export default function PaymentHistoryTable({
       {/* Refresh / status row */}
       <div className="flex items-center justify-between gap-2">
         <p className="text-gray-500 text-xs">
-          {events.length} payment{events.length !== 1 ? 's' : ''} loaded
+          {events.length} event{events.length !== 1 ? 's' : ''} loaded
           {error && (
             <span className="ml-2 text-yellow-400">(partial load — some pages may have failed)</span>
           )}
@@ -354,13 +353,13 @@ export default function PaymentHistoryTable({
 
       {isLoading && events.length > 0 && (
         <p role="status" aria-live="polite" className="text-center text-xs text-gray-500">
-          Loading more payments…
+          Loading subscription activity…
         </p>
       )}
 
       {!nextPageAvailable && events.length > 0 && !isLoading && (
-        <p className="text-center text-xs text-gray-600" aria-label="All payments loaded">
-          All payments loaded
+        <p className="text-center text-xs text-gray-600" aria-label="All subscription activity loaded">
+          All subscription activity loaded
         </p>
       )}
     </div>
@@ -382,13 +381,13 @@ function TableHead() {
         scope="col"
         className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-gray-400"
       >
-        Merchant
+        Type
       </th>
       <th
         scope="col"
         className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-gray-400"
       >
-        Token
+        Merchant
       </th>
       <th
         scope="col"
@@ -400,13 +399,7 @@ function TableHead() {
         scope="col"
         className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-gray-400"
       >
-        Ledger
-      </th>
-      <th
-        scope="col"
-        className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-gray-400"
-      >
-        Transaction
+        Tx Hash
       </th>
     </tr>
   );
@@ -447,6 +440,11 @@ function EventRow({
         <time dateTime={event.timestamp}>{formatTimestamp(event.timestamp)}</time>
       </td>
 
+      {/* Event type */}
+      <td className="px-4 py-3 text-xs text-gray-300">
+        {(event.eventType ?? "executed").replace(/_/g, " ")}
+      </td>
+
       {/* Merchant */}
       <td className="px-4 py-3 text-xs text-gray-300">
         <AddressDisplay
@@ -456,26 +454,11 @@ function EventRow({
         />
       </td>
 
-      {/* Token */}
-      <td className="px-4 py-3 font-mono text-xs text-gray-400">
-        <span
-          title={event.token}
-          aria-label={`Token contract: ${event.token}`}
-        >
-          {truncateAddress(event.token, 6)}
-        </span>
-      </td>
-
       {/* Amount */}
       <td className="px-4 py-3 text-right font-mono text-xs text-green-400 whitespace-nowrap">
-        <span aria-label={`Amount: ${event.amount} tokens`}>
+        <span aria-label={event.amount === "—" ? "Amount unavailable" : `Amount: ${event.amount} tokens`}>
           {event.amount}
         </span>
-      </td>
-
-      {/* Ledger */}
-      <td className="px-4 py-3 text-gray-500 text-xs tabular-nums">
-        {event.ledger.toLocaleString()}
       </td>
 
       {/* Transaction hash */}
