@@ -1553,15 +1553,16 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
   // Pre-validate the form to decide whether to run simulation.
   // We compute a lightweight boolean here (without updating state) so the
   // hook's dependency array stays stable and doesn't fire extra simulations.
+  const subscriptionFormIsValid = isFormValid(
+    validateSubscriptionForm({ merchantAddress, tokenAddress, amount, interval }),
+  );
   const feeFormValid =
     !!publicKey &&
     !!merchantAddress.trim() &&
     !!tokenAddress.trim() &&
     !!amount.trim() &&
     !!interval.trim() &&
-    isFormValid(
-      validateSubscriptionForm({ merchantAddress, tokenAddress, amount, interval }),
-    );
+    subscriptionFormIsValid;
 
   const {
     status: feeStatus,
@@ -2160,7 +2161,6 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
               placeholder="e.g. GXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
               autoComplete="off"
               value={merchantAddress}
-              onChange={(e) => setMerchantAddress(e.target.value)}
               onChange={(e) => { setMerchantAddress(e.target.value); if (touchedFields.merchantAddress) handleFieldBlur('merchantAddress'); }}
               onBlur={() => handleFieldBlur('merchantAddress')}
               disabled={isSubmitting || isConfirming}
@@ -2204,7 +2204,6 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
             <TokenCombobox
               id="tokenAddress"
               value={tokenAddress}
-              onChange={setTokenAddress}
               onChange={(v) => { setTokenAddress(v); if (touchedFields.tokenAddress) handleFieldBlur('tokenAddress'); }}
               onBlur={() => handleFieldBlur('tokenAddress')}
               disabled={isSubmitting || isConfirming}
@@ -2251,7 +2250,11 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
               placeholder="100"
               autoComplete="off"
               value={amount}
-              onChange={(e) => setAmount(e.target.value)}
+              onChange={(e) => {
+                setAmount(e.target.value);
+                if (touchedFields.amount) handleFieldBlur('amount');
+              }}
+              onBlur={() => handleFieldBlur('amount')}
               disabled={isSubmitting || isConfirming}
               required
               aria-required="true"
@@ -2305,7 +2308,11 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
               step="1"
               autoComplete="off"
               value={interval}
-              onChange={(e) => setInterval(e.target.value)}
+              onChange={(e) => {
+                setInterval(e.target.value);
+                if (touchedFields.interval) handleFieldBlur('interval');
+              }}
+              onBlur={() => handleFieldBlur('interval')}
               disabled={isSubmitting || isConfirming}
               required
               aria-required="true"
@@ -2366,7 +2373,13 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
             )}
             <button
               type="submit"
-              disabled={isSubmitting || isConfirming || !publicKey || isNetworkMismatch}
+              disabled={
+                isSubmitting ||
+                isConfirming ||
+                !publicKey ||
+                isNetworkMismatch ||
+                !subscriptionFormIsValid
+              }
               aria-describedby={!publicKey ? "hint-wallet" : isNetworkMismatch ? "hint-network-mismatch" : undefined}
               aria-busy={isSubmitting || isConfirming}
               className="w-full flex items-center justify-center gap-2 rounded-lg bg-blue-600
