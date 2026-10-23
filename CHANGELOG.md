@@ -72,6 +72,7 @@ rules, and step-by-step checklist — see [docs/release-process.md](docs/release
 ### Removed
 
 ### Fixed
+- **[Docs]** Resolve batched issue updates. (Closes #1405, Closes #1406, Closes #1407, Closes #1408)
 
 ### Security
 
