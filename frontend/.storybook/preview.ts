@@ -9,6 +9,29 @@ import "../src/app/globals.css";
  *   - desktop: 1280 px (standard laptop)
  */
 const preview: Preview = {
+  globalTypes: {
+    theme: {
+      name: "Theme",
+      description: "Switch between light and dark themes",
+      defaultValue: "dark",
+      toolbar: {
+        icon: "circlehollow",
+        items: [
+          { value: "light", title: "Light" },
+          { value: "dark", title: "Dark" },
+        ],
+        dynamicTitle: true,
+      },
+    },
+  },
+  decorators: [
+    (Story, context) => {
+      const theme = context.globals.theme === "light" ? "light" : "dark";
+      document.documentElement.classList.toggle("dark", theme === "dark");
+      document.documentElement.dataset.theme = theme;
+      return Story();
+    },
+  ],
   parameters: {
     // Default viewport shown in Storybook UI
     viewport: {
