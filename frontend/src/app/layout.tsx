@@ -112,7 +112,7 @@ export default async function RootLayout({
          */}
         <ThemeScript />
       </head>
-      <body className="min-h-screen bg-surface-base text-content-primary antialiased transition-colors duration-200">
+      <body className="min-h-screen bg-gray-950 text-gray-100 antialiased transition-colors duration-200">
         {/*
          * Top-level ErrorBoundary (FE-38)
          * Prevents a full blank-screen crash on any unhandled render error.
