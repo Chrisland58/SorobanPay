@@ -39,7 +39,8 @@
     "qrcode.react": "^3.1.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
-    "react-hotkeys-hook": "4.5.1"
+    "react-hotkeys-hook": "4.5.1",
+    "zod": "^3.25.76"
   },
   "devDependencies": {
     "@pact-foundation/pact": "^17.1.3",
