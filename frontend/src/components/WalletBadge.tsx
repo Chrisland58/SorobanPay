@@ -38,7 +38,7 @@ export interface WalletBadgeProps {
 
 function Wrapper({ children }: { children: ReactNode }) {
   return (
-    <div className="w-full max-w-lg bg-gray-900 rounded-2xl p-4 sm:p-6 shadow-lg">
+    <div className="w-full min-w-0 max-w-lg rounded-2xl bg-gray-900 p-4 shadow-lg sm:p-6">
       {children}
     </div>
   );
@@ -128,16 +128,16 @@ export function WalletBadge({
     const short = `${publicKey.slice(0, 6)}…${publicKey.slice(-4)}`;
     return (
       <Wrapper>
-        <div className="flex items-center justify-between">
-          <span className="text-sm text-gray-300">
+        <div className="flex min-w-0 flex-wrap items-center justify-between gap-2">
+          <span className="min-w-0 flex-1 text-sm text-gray-300">
             Connected:{' '}
-            <span className="font-mono text-white" title={publicKey}>
+            <span className="inline-block max-w-full truncate align-bottom font-mono text-white" title={publicKey}>
               {short}
             </span>
           </span>
           <button
             onClick={onDisconnect}
-            className="text-xs text-gray-400 hover:text-red-400 transition-colors
+            className="shrink-0 text-xs text-gray-400 hover:text-red-400 transition-colors
                        focus:outline-none focus:ring-1 focus:ring-red-400 rounded px-2 py-1"
           >
             Disconnect

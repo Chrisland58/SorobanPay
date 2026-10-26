@@ -57,7 +57,10 @@ export function SuccessCard({ data, onReset }: SuccessCardProps) {
           <p className="text-gray-400 text-xs font-medium">Transaction hash</p>
           <CopyButton text={data.txHash} label="Copy tx hash" />
         </div>
-        <p className="text-gray-200 break-all font-mono text-xs leading-relaxed">
+        <p
+          className="min-w-0 truncate font-mono text-xs leading-relaxed text-gray-200"
+          title={data.txHash}
+        >
           {data.txHash}
         </p>
       </div>

@@ -118,7 +118,7 @@ export default function ShortcutsHelpModal({ isOpen, onClose }: ShortcutsHelpMod
   return (
     /* Backdrop */
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center p-4"
+      className="fixed inset-0 z-50 flex items-center justify-center p-0 sm:p-4"
       aria-hidden="false"
       onClick={onClose}
     >
@@ -133,9 +133,9 @@ export default function ShortcutsHelpModal({ isOpen, onClose }: ShortcutsHelpMod
         aria-labelledby="shortcuts-modal-title"
         aria-describedby="shortcuts-modal-desc"
         className="
-          relative z-10 w-full max-w-md
-          rounded-2xl border border-gray-700 bg-gray-900
-          shadow-2xl p-6
+          relative z-10 flex h-dvh w-full max-w-none flex-col overflow-y-auto
+          border border-gray-700 bg-gray-900 p-5 shadow-2xl
+          sm:h-auto sm:max-w-md sm:rounded-2xl sm:p-6
           animate-in fade-in zoom-in-95 duration-150
         "
         onClick={(e) => e.stopPropagation()}
@@ -187,7 +187,7 @@ export default function ShortcutsHelpModal({ isOpen, onClose }: ShortcutsHelpMod
         </div>
 
         {/* Shortcut groups */}
-        <div className="space-y-5">
+        <div className="min-h-0 space-y-5 sm:min-h-fit">
           {Array.from(grouped.entries()).map(([category, shortcuts]) => (
             <section key={category} aria-labelledby={`shortcut-cat-${category}`}>
               <h3
