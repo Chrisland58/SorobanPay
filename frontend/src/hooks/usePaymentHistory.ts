@@ -45,6 +45,8 @@ export interface PaymentEvent {
   txHash: string;
   /** Unique event ID from the RPC (used as React key) */
   id: string;
+  /** Event type; older cached and standalone executed events omit this field. */
+  eventType?: string;
 }
 
 export interface UsePaymentHistoryOptions {

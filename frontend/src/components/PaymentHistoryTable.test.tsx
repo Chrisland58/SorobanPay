@@ -99,9 +99,9 @@ describe('PaymentHistoryTable', () => {
   // ── Empty state ──────────────────────────────────────────────────────────
 
   describe('empty state', () => {
-    it('renders "No payments found" when events are empty and not loading', () => {
+    it('renders the empty state when events are empty and not loading', () => {
       render(<PaymentHistoryTable {...defaultProps()} />);
-      expect(screen.getByText(/no payments found/i)).toBeInTheDocument();
+      expect(screen.getByText(/no subscription activity found/i)).toBeInTheDocument();
     });
 
     it('has an accessible status role for the empty state', () => {
@@ -183,20 +183,19 @@ describe('PaymentHistoryTable', () => {
     it('renders all column headers with scope="col"', () => {
       render(<PaymentHistoryTable {...defaultProps({ events })} />);
       const headers = screen.getAllByRole('columnheader');
-      expect(headers.length).toBe(6);
+      expect(headers.length).toBe(5);
       headers.forEach((th) => {
         expect(th).toHaveAttribute('scope', 'col');
       });
     });
 
-    it('displays column header labels: Date, Merchant, Token, Amount, Ledger, Transaction', () => {
+    it('displays the subscription activity column headers', () => {
       render(<PaymentHistoryTable {...defaultProps({ events })} />);
       expect(screen.getByRole('columnheader', { name: /date/i })).toBeInTheDocument();
+      expect(screen.getByRole('columnheader', { name: /type/i })).toBeInTheDocument();
       expect(screen.getByRole('columnheader', { name: /merchant/i })).toBeInTheDocument();
-      expect(screen.getByRole('columnheader', { name: /token/i })).toBeInTheDocument();
       expect(screen.getByRole('columnheader', { name: /amount/i })).toBeInTheDocument();
-      expect(screen.getByRole('columnheader', { name: /ledger/i })).toBeInTheDocument();
-      expect(screen.getByRole('columnheader', { name: /transaction/i })).toBeInTheDocument();
+      expect(screen.getByRole('columnheader', { name: /tx hash/i })).toBeInTheDocument();
     });
 
     it('renders the event amount in each row', () => {

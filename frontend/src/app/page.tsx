@@ -41,6 +41,7 @@ import { NETWORK_NAME } from '@/constants/network';
 import { useAddressBook } from '@/hooks/useAddressBook';
 import { useClipboard } from '@/hooks/useClipboard';
 import { AddressBookModal } from '@/components/AddressBookModal';
+import { PaymentHistory } from '@/components/PaymentHistory';
 
 // ─── Live-region for screen-reader announcements ──────────────────────────────
 
@@ -652,11 +653,7 @@ export default function Home() {
                 </Link>
               )}
             </div>
-            {!publicKey && (
-              <p className="text-gray-500 text-xs">
-                Connect your wallet to view payment history.
-              </p>
-            )}
+            <PaymentHistory />
           </div>
         </div>
       </div>
