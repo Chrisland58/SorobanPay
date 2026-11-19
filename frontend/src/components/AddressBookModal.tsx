@@ -1,5 +1,7 @@
 'use client';
 
+import { useDialogFocus } from '@/hooks/useDialogFocus';
+
 /**
  * AddressBookModal.tsx
  *
@@ -405,63 +407,13 @@ export function AddressBookModal({
   const [importSuccess, setImportSuccess] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
 
-  // Move focus into the dialog and return it to the opener when it closes.
-  useEffect(() => {
-    if (!isOpen) return;
-
-    const activeElement = document.activeElement;
-    previouslyFocusedRef.current =
-      activeElement instanceof HTMLElement ? activeElement : null;
-    closeButtonRef.current?.focus();
-
-    return () => {
-      const previouslyFocused = previouslyFocusedRef.current;
-      previouslyFocusedRef.current = null;
-      if (previouslyFocused?.isConnected) previouslyFocused.focus();
-    };
-  }, [isOpen]);
-
-  // Trap focus inside the modal
-  useEffect(() => {
-    if (!isOpen) return;
-
-    function handleKeyDown(e: KeyboardEvent) {
-      if (e.key === 'Escape') {
-        onClose();
-        return;
-      }
-      if (e.key !== 'Tab') return;
-
-      const dialog = dialogRef.current;
-      if (!dialog) return;
-
-      const focusable = Array.from(
-        dialog.querySelectorAll<HTMLElement>(
-          'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
-        ),
-      ).filter((el) => !el.closest('[aria-hidden="true"]'));
-
-      if (focusable.length === 0) return;
-
-      const first = focusable[0];
-      const last = focusable[focusable.length - 1];
-
-      if (e.shiftKey) {
-        if (document.activeElement === first) {
-          e.preventDefault();
-          last.focus();
-        }
-      } else {
-        if (document.activeElement === last) {
-          e.preventDefault();
-          first.focus();
-        }
-      }
-    }
-
-    document.addEventListener('keydown', handleKeyDown);
-    return () => document.removeEventListener('keydown', handleKeyDown);
-  }, [isOpen, onClose]);
+  // Move focus into the dialog, trap Tab/Escape, and restore focus on close.
+  const { handleKeyDown } = useDialogFocus({
+    isOpen,
+    containerRef: dialogRef,
+    initialFocusRef: closeButtonRef,
+    onClose,
+  });
 
   // Import handler
   const handleImportFile = useCallback(
@@ -563,6 +515,7 @@ export function AddressBookModal({
     >
       <div
         ref={dialogRef}
+        onKeyDown={handleKeyDown}
         role="dialog"
         aria-modal="true"
         aria-labelledby="ab-modal-title"
