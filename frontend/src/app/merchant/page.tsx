@@ -23,9 +23,11 @@
  *   ✓ Warning shown when no subscriptions found for the connected merchant
  */
 
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import Link from 'next/link';
 import { useWallet } from '@/hooks/useWallet';
+import { useMerchantContext } from '@/context/MerchantContext';
+import { MerchantContextSwitcher } from '@/components/MerchantContextSwitcher';
 import { useMerchantSubscriptions } from '@/hooks/useMerchantSubscriptions';
 import MerchantSubscriptionsTable, {
   type RowResult,
@@ -65,14 +67,26 @@ export default function MerchantPage() {
     disconnect,
   } = useWallet();
 
+  const { activeMerchant, registerCacheInvalidator } = useMerchantContext();
+  const effectiveMerchantKey = activeMerchant?.address ?? publicKey;
+
   const { subscriptions, isLoading, error, hasMore, loadMore, refresh } = useMerchantSubscriptions({
-    publicKey,
+    publicKey: effectiveMerchantKey,
   });
 
   // Per-row collection state
   const [collectingRows, setCollectingRows] = useState<Set<string>>(new Set());
   const [rowResults, setRowResults] = useState<Map<string, RowResult>>(new Map());
   const [batchSummary, setBatchSummary] = useState<BatchSummaryState | null>(null);
+
+  useEffect(() => {
+    return registerCacheInvalidator(() => {
+      setCollectingRows(new Set());
+      setRowResults(new Map());
+      setBatchSummary(null);
+      refresh();
+    });
+  }, [registerCacheInvalidator, refresh]);
 
   // ── Single collect ──────────────────────────────────────────────────────────
   const handleCollect = useCallback(
@@ -282,6 +296,10 @@ export default function MerchantPage() {
             />
             {NETWORK_NAME}
           </span>
+        </div>
+
+        <div className="mt-4">
+          <MerchantContextSwitcher />
         </div>
       </div>
 

@@ -3,6 +3,7 @@ import type { ReactNode } from 'react';
 import { NextIntlClientProvider } from 'next-intl';
 import { getMessages } from 'next-intl/server';
 import { WalletProvider } from '@/context/WalletContext';
+import { MerchantProvider } from '@/context/MerchantContext';
 import { NotificationProvider } from '@/context/NotificationContext';
 import { ThemeProvider, ThemeScript } from '@/context/ThemeContext';
 import { ErrorBoundary } from '@/components/ErrorBoundary';
@@ -121,7 +122,8 @@ export default async function RootLayout({
           <ThemeProvider>
             <NextIntlClientProvider messages={messages}>
               <WalletProvider>
-                <ToastProvider>
+                <MerchantProvider>
+                  <ToastProvider>
                   {/* Network warning banner - persistent on mainnet */}
                   <NetworkWarningBanner />
                   
@@ -135,6 +137,7 @@ export default async function RootLayout({
                   </div>
                   {children}
                 </ToastProvider>
+                </MerchantProvider>
               </WalletProvider>
             </NextIntlClientProvider>
           </ThemeProvider>
