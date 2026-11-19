@@ -913,3 +913,26 @@ This is why testnet validation and thorough testing are mandatory before every m
 | `NoActiveSubscription` on known pair | Entry TTL expired | Subscriber must re-subscribe; see [README Storage TTL](../README.md#storage-ttl) |
 | Pods stuck in `Pending` | Insufficient cluster resources | Increase node count or resource limits |
 | Pod `OOMKilled` | Memory limit too low | Increase `resources.limits.memory` in deployment manifest |
+
+---
+
+## 10. Pre-Deploy Database Migration Compatibility Gate
+
+Rolling deployments require database migrations to remain backward-compatible with currently running application instances. The CI workflow [`.github/workflows/migration-compatibility-gate.yml`](../.github/workflows/migration-compatibility-gate.yml) runs [`backend/src/lib/migrationCompatibilityCli.ts`](../backend/src/lib/migrationCompatibilityCli.ts) on all changed SQL migration files (`backend/migrations/*.sql`, `backend/src/db/schema.sql`, `backend/audit-trail/schema.sql`).
+
+### Classification Rules
+
+- **Compatible (Expand)**: `CREATE TABLE`, `ADD COLUMN` (nullable or with `DEFAULT`), and `CREATE INDEX CONCURRENTLY`.
+- **Warning (Lock Risk)**: `CREATE INDEX` without `CONCURRENTLY` (logged as a warning; use `CONCURRENTLY` to avoid write locks).
+- **Incompatible (Blocked)**: `DROP TABLE`, `DROP COLUMN`, `RENAME COLUMN`, `RENAME TO`, `ALTER COLUMN ... TYPE`, `SET NOT NULL`, `ADD COLUMN ... NOT NULL` without `DEFAULT`, and `TRUNCATE`.
+
+When an incompatible operation is detected, the gate fails and reports the exact file, line number, rule ID, operation, and expand-and-contract remediation guidance.
+
+### Documented Override Process
+
+If a destructive or contract-phase migration is intentional (for example, dropping a column after all readers have been removed in an earlier release), an override requires **both** an explicit approver and a rationale of at least 10 characters:
+
+- `MIGRATION_OVERRIDE_APPROVER`: Explicit approver handle or email (e.g., `@platform-lead`).
+- `MIGRATION_OVERRIDE_RATIONALE`: Clear justification explaining why the operation is safe for active instances.
+
+Overrides missing either field are rejected by the gate.

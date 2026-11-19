@@ -1,0 +1,46 @@
+name: Migration Compatibility Gate
+
+on:
+  pull_request:
+    paths:
+      - "backend/migrations/**"
+      - "backend/src/db/schema.sql"
+      - "backend/audit-trail/schema.sql"
+      - "backend/src/lib/migrationCompatibility.ts"
+      - "backend/src/lib/migrationCompatibilityCli.ts"
+      - ".github/workflows/migration-compatibility-gate.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "backend/migrations/**"
+      - "backend/src/db/schema.sql"
+      - "backend/audit-trail/schema.sql"
+
+jobs:
+  migration-compatibility-gate:
+    name: Pre-deploy backward-compatible migration gate
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+
+      - name: Install backend dependencies
+        working-directory: backend
+        run: npm ci
+
+      - name: Run migration compatibility gate
+        env:
+          MIGRATION_OVERRIDE_APPROVER: ${{ vars.MIGRATION_OVERRIDE_APPROVER }}
+          MIGRATION_OVERRIDE_RATIONALE: ${{ vars.MIGRATION_OVERRIDE_RATIONALE }}
+        run: npx --prefix backend ts-node backend/src/lib/migrationCompatibilityCli.ts

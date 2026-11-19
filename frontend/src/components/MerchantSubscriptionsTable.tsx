@@ -1,5 +1,7 @@
 'use client';
 
+import { ScheduleTime } from './ScheduleTime';
+
 /**
  * MerchantSubscriptionsTable.tsx
  *
@@ -475,15 +477,9 @@ export default function MerchantSubscriptionsTable({
                     {sub.isExpired || sub.nextPaymentTimestamp === 0 ? (
                       <span className="text-gray-600">—</span>
                     ) : (
-                      <time dateTime={sub.nextPaymentDate}>
-                        {new Date(sub.nextPaymentDate).toLocaleString(undefined, {
-                          month: 'short',
-                          day: 'numeric',
-                          year: 'numeric',
-                          hour: '2-digit',
-                          minute: '2-digit',
-                        })}
-                      </time>
+                      <ScheduleTime
+                        timestamp={sub.nextPaymentTimestamp || sub.nextPaymentDate}
+                      />
                     )}
                   </td>
 

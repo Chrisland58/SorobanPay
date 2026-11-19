@@ -61,10 +61,15 @@ jobs:
   build-artifact:
     name: "Build & Package Artifact"
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
     outputs:
       artifact_id: ${{ steps.meta.outputs.artifact_id }}
       git_sha: ${{ steps.meta.outputs.git_sha }}
       build_time: ${{ steps.meta.outputs.build_time }}
+      build_workflow: ${{ steps.meta.outputs.build_workflow }}
 
     steps:
       - uses: actions/checkout@v4
@@ -78,10 +83,12 @@ jobs:
           echo "artifact_id=${ARTIFACT_ID}" >> "$GITHUB_OUTPUT"
           echo "git_sha=${GIT_SHA}" >> "$GITHUB_OUTPUT"
           echo "build_time=${BUILD_TIME}" >> "$GITHUB_OUTPUT"
+          echo "build_workflow=${{ github.workflow_ref }}" >> "$GITHUB_OUTPUT"
           echo "## Artifact Metadata" >> "$GITHUB_STEP_SUMMARY"
           echo "- **ID:** \`${ARTIFACT_ID}\`" >> "$GITHUB_STEP_SUMMARY"
           echo "- **Git SHA:** \`${GIT_SHA}\`" >> "$GITHUB_STEP_SUMMARY"
           echo "- **Build Time:** \`${BUILD_TIME}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Build Workflow:** \`${{ github.workflow_ref }}\`" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Install Rust stable + wasm32 target
         uses: dtolnay/rust-toolchain@stable
@@ -122,6 +129,27 @@ jobs:
           NEXT_PUBLIC_RPC_URL: "https://soroban-testnet.stellar.org"
           NEXT_PUBLIC_NETWORK_PASSPHRASE: "Test SDF Network ; September 2015"
 
+      - name: Generate dependency inventory (SBOM)
+        run: |
+          cat > sbom-inventory.json << EOF
+          {
+            "bomFormat": "CycloneDX",
+            "specVersion": "1.5",
+            "metadata": {
+              "timestamp": "${{ steps.meta.outputs.build_time }}",
+              "component": {
+                "name": "sorobanpay",
+                "version": "${{ steps.meta.outputs.git_sha }}"
+              }
+            },
+            "components": [
+              { "name": "soroban-subscription-contract", "type": "application", "purl": "pkg:cargo/soroban-subscription-contract@${{ steps.meta.outputs.git_sha }}" },
+              { "name": "sorobanpay-frontend", "type": "application", "purl": "pkg:npm/sorobanpay-frontend@${{ steps.meta.outputs.git_sha }}" },
+              { "name": "sorobanpay-backend", "type": "application", "purl": "pkg:npm/sorobanpay-backend@${{ steps.meta.outputs.git_sha }}" }
+            ]
+          }
+          EOF
+
       - name: Write artifact manifest
         run: |
           cat > artifact-manifest.json << EOF
@@ -130,11 +158,21 @@ jobs:
             "git_sha": "${{ github.sha }}",
             "build_time": "${{ steps.meta.outputs.build_time }}",
             "git_ref": "${{ github.ref }}",
+            "build_workflow": "${{ github.workflow_ref }}",
             "workflow_run_id": "${{ github.run_id }}",
+            "dependency_inventory": "sbom-inventory.json",
             "contract_wasm": "contracts/target/wasm32-unknown-unknown/release/soroban_subscription_contract.wasm",
             "frontend_build": "frontend/.next"
           }
           EOF
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            artifact-manifest.json
+            sbom-inventory.json
+            contracts/target/wasm32-unknown-unknown/release/soroban_subscription_contract.wasm
 
       - name: Upload artifact bundle
         uses: actions/upload-artifact@v7
@@ -142,6 +180,7 @@ jobs:
           name: "sorobanpay-artifact-${{ steps.meta.outputs.artifact_id }}"
           path: |
             artifact-manifest.json
+            sbom-inventory.json
             contracts/target/wasm32-unknown-unknown/release/soroban_subscription_contract.wasm
           retention-days: 90
           if-no-files-found: error
@@ -166,6 +205,19 @@ jobs:
         with:
           name: "sorobanpay-artifact-${{ needs.build-artifact.outputs.artifact_id }}"
           path: artifact/
+
+      - name: Verify provenance attestation before production promotion
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          chmod +x scripts/verify-image-attestation.sh
+          ./scripts/verify-image-attestation.sh \
+            --manifest artifact/artifact-manifest.json \
+            --sbom artifact/sbom-inventory.json \
+            --expected-sha "${{ needs.build-artifact.outputs.git_sha }}" \
+            --expected-workflow "${{ needs.build-artifact.outputs.build_workflow }}" \
+            --repo "${{ github.repository }}" \
+            --verify-gh-attestation
 
       - name: Inject dev environment config
         run: |
@@ -259,6 +311,19 @@ jobs:
         with:
           name: "sorobanpay-artifact-${{ needs.build-artifact.outputs.artifact_id }}"
           path: artifact/
+
+      - name: Verify provenance attestation before production promotion
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          chmod +x scripts/verify-image-attestation.sh
+          ./scripts/verify-image-attestation.sh \
+            --manifest artifact/artifact-manifest.json \
+            --sbom artifact/sbom-inventory.json \
+            --expected-sha "${{ needs.build-artifact.outputs.git_sha }}" \
+            --expected-workflow "${{ needs.build-artifact.outputs.build_workflow }}" \
+            --repo "${{ github.repository }}" \
+            --verify-gh-attestation
 
       - name: Inject staging environment config
         run: |
@@ -362,6 +427,19 @@ jobs:
         with:
           name: "sorobanpay-artifact-${{ needs.build-artifact.outputs.artifact_id }}"
           path: artifact/
+
+      - name: Verify provenance attestation before production promotion
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          chmod +x scripts/verify-image-attestation.sh
+          ./scripts/verify-image-attestation.sh \
+            --manifest artifact/artifact-manifest.json \
+            --sbom artifact/sbom-inventory.json \
+            --expected-sha "${{ needs.build-artifact.outputs.git_sha }}" \
+            --expected-workflow "${{ needs.build-artifact.outputs.build_workflow }}" \
+            --repo "${{ github.repository }}" \
+            --verify-gh-attestation
 
       - name: Inject prod environment config
         run: |

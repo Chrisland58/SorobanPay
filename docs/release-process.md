@@ -411,3 +411,21 @@ Changes to `deploy/deploy.sh` or CI workflows are released as `PATCH` or `MINOR`
 - [ ] Post a release announcement to Discord / social channels if applicable.
 - [ ] Mark any issues resolved by this release as closed with the release tag.
 - [ ] Review and triage any issues opened since the last release.
+
+## Provenance Attestations & Production Promotion Gate
+
+Release artifacts and container images built by `.github/workflows/promotion-pipeline.yml` generate:
+
+1. **Artifact Metadata (`artifact-manifest.json`)**: Records the source commit (`git_sha`), build workflow (`build_workflow`), workflow run ID (`workflow_run_id`), and dependency inventory reference (`dependency_inventory`).
+2. **Software Bill of Materials (`sbom-inventory.json`)**: CycloneDX 1.5 dependency inventory for the release components.
+3. **Build Provenance Attestation**: Signed SLSA provenance generated via `actions/attest-build-provenance@v2` during the `build-artifact` job.
+
+### Production Verification
+
+Before promoting to production (`deploy-prod`), the pipeline runs `scripts/verify-image-attestation.sh` with `--verify-gh-attestation` to enforce that:
+- The artifact manifest and SBOM exist and are valid JSON.
+- The source commit (`git_sha`) and build workflow (`build_workflow`) match the trusted pipeline run.
+- The dependency inventory (`components`) is non-empty.
+- The cryptographic provenance attestation verifies against the repository via `gh attestation verify`.
+
+Promotions without a valid, trusted attestation are rejected.
