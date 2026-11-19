@@ -498,6 +498,10 @@ function StepSchedule({
   );
 }
 
+import {
+  TransactionReviewSummary,
+} from '@/components/TransactionReviewSummary';
+
 // ─── Step 4: Review & Confirm ─────────────────────────────────────────────────
 
 function StepReview({
@@ -511,48 +515,27 @@ function StepReview({
   onConfirm: () => void;
   onBack: () => void;
 }) {
-  const days = Math.round(Number(form.intervalSeconds) / 86400);
   const nextPayment = new Date(Date.now() + Number(form.intervalSeconds) * 1000);
 
-  const rows: [string, string][] = [
-    ['Subscriber', `${subscriber.slice(0, 8)}…${subscriber.slice(-6)}`],
-    ['Merchant',   `${form.merchantAddress.slice(0, 8)}…${form.merchantAddress.slice(-6)}`],
-    ['Token',      `${form.tokenAddress.slice(0, 8)}…${form.tokenAddress.slice(-6)}`],
-    ['Amount',     `${form.amount} tokens`],
-    ['Interval',   `Every ${days} day${days !== 1 ? 's' : ''} (${Number(form.intervalSeconds).toLocaleString()} s)`],
-    ['Next payment eligible', nextPayment.toLocaleDateString(undefined, { dateStyle: 'medium' })],
-  ];
-
   return (
-    <div aria-labelledby="step4-heading">
-      <h3 id="step4-heading" className="text-lg font-bold text-white mb-1">Review &amp; confirm</h3>
-      <p className="text-sm text-gray-400 mb-5 leading-relaxed">
-        Check all the details before authorizing the on-chain transaction.
-      </p>
+    <div aria-labelledby="step4-heading" className="space-y-5">
+      <TransactionReviewSummary
+        subscriberAddress={subscriber}
+        merchantAddress={form.merchantAddress}
+        tokenAddress={form.tokenAddress}
+        amount={form.amount}
+        protocolFee="0"
+        intervalSeconds={form.intervalSeconds}
+        nextPaymentDate={nextPayment.toLocaleDateString(undefined, { dateStyle: 'medium' })}
+        onBack={onBack}
+        onConfirm={onConfirm}
+        backLabel="← Back"
+        confirmLabel="Confirm & Sign →"
+      />
 
-      <dl className="rounded-xl bg-gray-800/60 border border-gray-700 divide-y divide-gray-700/60 mb-6 overflow-hidden">
-        {rows.map(([label, val]) => (
-          <div key={label} className="flex flex-col sm:flex-row sm:items-center gap-0.5 sm:gap-4 px-4 py-3">
-            <dt className="text-xs text-gray-400 font-semibold shrink-0 sm:w-40">{label}</dt>
-            <dd className="font-mono text-sm text-gray-100 break-all">{val}</dd>
-          </div>
-        ))}
-      </dl>
-
-      <div className="rounded-lg bg-yellow-900/20 border border-yellow-700/40 px-4 py-3 mb-5 text-xs text-yellow-200 leading-relaxed">
+      <div className="rounded-lg bg-yellow-900/20 border border-yellow-700/40 px-4 py-3 text-xs text-yellow-200 leading-relaxed">
         <strong>⚠ Irreversible action:</strong> Once submitted, the subscription is created on-chain.
         To stop payments, you must call <code className="bg-yellow-900/40 px-1 rounded">cancel()</code> or revoke the token allowance.
-      </div>
-
-      <div className="flex gap-3">
-        <button type="button" onClick={onBack}
-          className="flex-1 rounded-lg border border-gray-600 bg-gray-800/60 text-gray-300 hover:bg-gray-700 py-3 text-sm font-semibold min-h-[48px] transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-500">
-          ← Back
-        </button>
-        <button type="button" onClick={onConfirm}
-          className="flex-1 rounded-lg bg-green-600 hover:bg-green-500 active:bg-green-700 py-3 text-sm font-semibold text-white min-h-[48px] transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-green-400">
-          Confirm &amp; Sign →
-        </button>
       </div>
     </div>
   );

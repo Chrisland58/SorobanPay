@@ -38,6 +38,9 @@ import { mapError } from '@/lib/errors';
 import { CONTRACT_ID, NETWORK_PASSPHRASE, NETWORK_NAME, RPC_URL } from '@/constants/network';
 import { truncateAddress, stroopsToTokens } from '@/lib/utils';
 import { ErrorBoundary } from '@/components/ErrorBoundary';
+import BatchPaymentReviewModal, {
+  type BatchReviewItem,
+} from '@/components/BatchPaymentReviewModal';
 
 export interface BatchSummaryState {
   currentBatch: number;
@@ -73,6 +76,8 @@ export default function MerchantPage() {
   const [collectingRows, setCollectingRows] = useState<Set<string>>(new Set());
   const [rowResults, setRowResults] = useState<Map<string, RowResult>>(new Map());
   const [batchSummary, setBatchSummary] = useState<BatchSummaryState | null>(null);
+  const [pendingBatchSubscribers, setPendingBatchSubscribers] = useState<string[] | null>(null);
+  const [showFailuresOnly, setShowFailuresOnly] = useState(false);
 
   // ── Single collect ──────────────────────────────────────────────────────────
   const handleCollect = useCallback(
@@ -121,9 +126,11 @@ export default function MerchantPage() {
   );
 
   // ── Batch collect ───────────────────────────────────────────────────────────
-  const handleBatchCollect = useCallback(
+  const executeBatchCollect = useCallback(
     async (subscribers: string[]) => {
       if (!publicKey || !CONTRACT_ID || subscribers.length === 0) return;
+
+      setShowFailuresOnly(false);
 
       const merchant = publicKey;
       const BATCH_SIZE = 50;
@@ -230,6 +237,25 @@ export default function MerchantPage() {
       }
     },
     [publicKey, refresh, subscriptions],
+  );
+
+  const handleBatchCollect = useCallback(
+    (subscribers: string[]) => {
+      if (!publicKey || !CONTRACT_ID || subscribers.length === 0) return;
+      setPendingBatchSubscribers(subscribers);
+    },
+    [publicKey],
+  );
+
+  const pendingReviewItems: BatchReviewItem[] = (pendingBatchSubscribers ?? []).map(
+    (subscriber) => {
+      const subObj = subscriptions.find((s) => s.subscriber === subscriber);
+      return {
+        subscriber,
+        amount: subObj?.amount ?? BigInt(0),
+        token: subObj?.token,
+      };
+    },
   );
 
   // ── Render ─────────────────────────────────────────────────────────────────
