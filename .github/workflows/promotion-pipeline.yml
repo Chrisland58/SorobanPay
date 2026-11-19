@@ -146,10 +146,31 @@ jobs:
           retention-days: 90
           if-no-files-found: error
 
+  # ─── 1b. Preflight configuration validation ──────────────────────────────────
+  preflight-config:
+    name: "Preflight → validate deployment config"
+    runs-on: ubuntu-latest
+    env:
+      RPC_URL: ${{ vars.RPC_URL || 'https://soroban-testnet.stellar.org' }}
+      CONTRACT_ID: ${{ secrets.CONTRACT_ID }}
+      NETWORK_PASSPHRASE: ${{ vars.NETWORK_PASSPHRASE || 'Test SDF Network ; September 2015' }}
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      REDIS_URL: ${{ secrets.REDIS_URL }}
+      NEXT_PUBLIC_CONTRACT_ID: ${{ vars.NEXT_PUBLIC_CONTRACT_ID || secrets.CONTRACT_ID }}
+      NEXT_PUBLIC_RPC_URL: ${{ vars.NEXT_PUBLIC_RPC_URL || 'https://soroban-testnet.stellar.org' }}
+      NEXT_PUBLIC_NETWORK_PASSPHRASE: ${{ vars.NEXT_PUBLIC_NETWORK_PASSPHRASE || 'Test SDF Network ; September 2015' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Validate deployment configuration
+        run: npx --yes ts-node scripts/preflight-validate-env.ts
+
   # ─── 2a. Deploy to dev ────────────────────────────────────────────────────────
   deploy-dev:
     name: "Deploy → dev"
-    needs: build-artifact
+    needs: [build-artifact, preflight-config]
     runs-on: ubuntu-latest
     environment:
       name: dev
@@ -497,6 +518,8 @@ jobs:
           echo "## Rollback Audit Entry" >> "$GITHUB_STEP_SUMMARY"
           echo "- **Environment:** ${{ github.event.inputs.target_environment }}" >> "$GITHUB_STEP_SUMMARY"
           echo "- **Rolled back to run:** ${{ steps.rollback_artifact.outputs.run_id }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Target Digest:** ${ROLLBACK_DIGEST:-verified-from-checkpoint}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Source Revision:** ${{ github.sha }}" >> "$GITHUB_STEP_SUMMARY"
           echo "- **Initiated by:** ${{ github.actor }}" >> "$GITHUB_STEP_SUMMARY"
           echo "- **Time:** $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_STEP_SUMMARY"
 

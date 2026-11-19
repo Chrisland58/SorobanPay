@@ -16,10 +16,36 @@ permissions:
   pull-requests: write
   deployments: write
 
+concurrency:
+  group: deploy-testnet-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
+  # ── 0. Preflight configuration validation ──────────────────────────────────
+  preflight-config:
+    name: Preflight configuration validation
+    runs-on: ubuntu-latest
+    env:
+      RPC_URL: ${{ vars.RPC_URL || 'https://soroban-testnet.stellar.org' }}
+      CONTRACT_ID: ${{ secrets.CONTRACT_ID }}
+      NETWORK_PASSPHRASE: ${{ vars.NETWORK_PASSPHRASE || 'Test SDF Network ; September 2015' }}
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      REDIS_URL: ${{ secrets.REDIS_URL }}
+      NEXT_PUBLIC_CONTRACT_ID: ${{ vars.NEXT_PUBLIC_CONTRACT_ID || secrets.CONTRACT_ID }}
+      NEXT_PUBLIC_RPC_URL: ${{ vars.NEXT_PUBLIC_RPC_URL || 'https://soroban-testnet.stellar.org' }}
+      NEXT_PUBLIC_NETWORK_PASSPHRASE: ${{ vars.NEXT_PUBLIC_NETWORK_PASSPHRASE || 'Test SDF Network ; September 2015' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Validate deployment configuration
+        run: npx --yes ts-node scripts/preflight-validate-env.ts
+
   # ── 1. Deploy Soroban contract to testnet ──────────────────────────────────
   deploy-contract:
     name: Deploy contract to testnet
+    needs: preflight-config
     runs-on: ubuntu-latest
     outputs:
       contract_id: ${{ steps.deploy.outputs.contract_id }}
@@ -143,3 +169,18 @@ jobs:
               repo: context.repo.repo,
               body,
             });
+
+  # ── 3. Verify complete rollout (prevent partial rollout on cancellation) ──
+  verify-rollout:
+    name: Verify complete testnet rollout
+    runs-on: ubuntu-latest
+    needs: [deploy-contract, deploy-frontend]
+    if: ${{ always() }}
+    steps:
+      - name: Ensure no job was canceled or failed
+        run: |
+          if [ "${{ needs.deploy-contract.result }}" != "success" ] || [ "${{ needs.deploy-frontend.result }}" != "success" ]; then
+            echo "::error::Partial rollout detected (deploy-contract=${{ needs.deploy-contract.result }}, deploy-frontend=${{ needs.deploy-frontend.result }}). Marking run as failed."
+            exit 1
+          fi
+          echo "✅ Both contract and frontend deployments succeeded."

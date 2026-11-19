@@ -411,3 +411,12 @@ Changes to `deploy/deploy.sh` or CI workflows are released as `PATCH` or `MINOR`
 - [ ] Post a release announcement to Discord / social channels if applicable.
 - [ ] Mark any issues resolved by this release as closed with the release tag.
 - [ ] Review and triage any issues opened since the last release.
+
+## Immutable Digest Retention & Rollback
+
+All promoted release artifacts are tracked by immutable `sha256:<64-hex-chars>` digest rather than mutable image tags:
+
+- **Checkpoint creation**: `bash deploy/rollback.sh --create-checkpoint <contract_id> <image_tag> <image_digest> [source_revision]` validates the `sha256:` digest and retains `previous_digest` from the prior validated checkpoint.
+- **Deployment recording**: `bash deploy/rollback.sh --record-deployment <environment> <image_digest> <source_revision> [release_notes_file]` updates `deploy/deployments.json` with `current_digest`, `previous_digest`, `source_revision`, and `updated_at`, and optionally appends the deployed digest and source revision to release notes.
+- **Status inspection**: `bash deploy/rollback.sh --status <environment>` prints the current digest, previous known-good digest, and source revision.
+- **Digest-verified rollback**: `bash deploy/rollback.sh --rollback [checkpoint_file]` validates the immutable digest before rolling back Kubernetes deployments (`<image>@<digest>`), failing if no validated digest is present.
