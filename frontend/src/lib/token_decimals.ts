@@ -170,15 +170,19 @@ export function formatTokenWithSymbol(
  * ```
  */
 export function parseTokenAmount(amountStr: string, decimals: number): bigint | null {
+  if (!Number.isInteger(decimals) || decimals < 0 || decimals > 19) {
+    return null;
+  }
+
   const trimmed = amountStr.trim();
 
-  if (!trimmed || !/^[0-9]*\.?[0-9]*$/.test(trimmed)) {
+  if (!trimmed || trimmed === "." || !/^[0-9]*\.?[0-9]*$/.test(trimmed)) {
     return null; // Invalid format
   }
 
   try {
     // Split into whole and fractional parts
-    const [wholeStr = "0", fracStr = "0"] = trimmed.split(".");
+    const [wholeStr = "0", fracStr = ""] = trimmed.split(".");
 
     // Validate fractional part doesn't exceed decimals
     if (fracStr.length > decimals) {

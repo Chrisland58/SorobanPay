@@ -2208,4 +2208,198 @@ mod security_tests {
         );
     }
 
+    // =========================================================================
+    // CATEGORY 10 — Atomic unauthorized configuration changes
+    //
+    // Verifies that every privileged configuration transition (`set_max_amount`,
+    // `set_protocol_fee`, `migrate`) is atomic on authorization failure:
+    // - No configuration storage value changes
+    // - No event is emitted
+    // - No ledger sequence value is consumed
+    // =========================================================================
+
+    fn assert_config_snapshot_unchanged(
+        s: &SecEnv,
+        expected_max_amount: i128,
+        expected_fee: Option<crate::storage::ProtocolFeeConfig>,
+        expected_schema_version: u32,
+        expected_seq: u32,
+        expected_events_len: u32,
+    ) {
+        let cfg = s.client.get_config();
+        assert_eq!(
+            cfg.max_amount, expected_max_amount,
+            "max_amount must remain unchanged after unauthorized call"
+        );
+        assert_eq!(
+            s.client.get_protocol_fee(),
+            expected_fee,
+            "protocol_fee must remain unchanged after unauthorized call"
+        );
+        assert_eq!(
+            s.client.get_schema_version(),
+            expected_schema_version,
+            "schema_version must remain unchanged after unauthorized call"
+        );
+        assert_eq!(
+            s.env.ledger().sequence(),
+            expected_seq,
+            "ledger sequence must not be consumed after unauthorized call"
+        );
+        assert_eq!(
+            s.env.events().all().len(),
+            expected_events_len,
+            "no events may be emitted after unauthorized call"
+        );
+    }
+
+    #[test]
+    fn sec_unauthorized_set_max_amount_is_atomic() {
+        let s = SecEnv::new_no_mock_auth();
+        let admin = Address::generate(&s.env);
+        s.env.mock_all_auths();
+        s.client.initialize(&admin);
+        s.client.set_max_amount(&admin, &500_000_i128);
+
+        let initial_seq = s.env.ledger().sequence();
+        let initial_events = s.env.events().all().len();
+
+        // 1. Missing authorization
+        s.env.set_auths(&[]);
+        let res_no_auth = s.client.try_set_max_amount(&admin, &999_999_i128);
+        assert!(res_no_auth.is_err(), "set_max_amount without auth must fail");
+        assert_config_snapshot_unchanged(&s, 500_000_i128, None, 0, initial_seq, initial_events);
+
+        // 2. Wrong address authorization (attacker signs for themselves)
+        s.env.mock_auths(&[MockAuth {
+            address: &s.attacker,
+            invoke: &MockAuthInvoke {
+                contract: &s.contract_id,
+                fn_name: "set_max_amount",
+                args: (s.attacker.clone(), 999_999_i128).into_val(&s.env),
+                sub_invokes: &[],
+            },
+        }]);
+        let res_wrong_caller = s.client.try_set_max_amount(&s.attacker, &999_999_i128);
+        assert_eq!(
+            res_wrong_caller,
+            Err(Ok(ContractError::NotAdmin)),
+            "set_max_amount by non-admin must return NotAdmin"
+        );
+        assert_config_snapshot_unchanged(&s, 500_000_i128, None, 0, initial_seq, initial_events);
+
+        // 3. Wrong signer for admin address
+        s.env.mock_auths(&[MockAuth {
+            address: &s.attacker,
+            invoke: &MockAuthInvoke {
+                contract: &s.contract_id,
+                fn_name: "set_max_amount",
+                args: (admin.clone(), 999_999_i128).into_val(&s.env),
+                sub_invokes: &[],
+            },
+        }]);
+        let res_wrong_signer = s.client.try_set_max_amount(&admin, &999_999_i128);
+        assert!(res_wrong_signer.is_err(), "set_max_amount with wrong signer must fail");
+        assert_config_snapshot_unchanged(&s, 500_000_i128, None, 0, initial_seq, initial_events);
+    }
+
+    #[test]
+    fn sec_unauthorized_set_protocol_fee_is_atomic() {
+        let s = SecEnv::new_no_mock_auth();
+        let admin = Address::generate(&s.env);
+        let collector = Address::generate(&s.env);
+        let attacker_collector = Address::generate(&s.env);
+
+        s.env.mock_all_auths();
+        s.client.initialize(&admin);
+        s.client.set_protocol_fee(&admin, &100_u32, &collector);
+
+        let expected_fee = Some(crate::storage::ProtocolFeeConfig {
+            fee_bps: 100_u32,
+            fee_collector: collector.clone(),
+        });
+        let initial_max = s.client.get_config().max_amount;
+        let initial_seq = s.env.ledger().sequence();
+        let initial_events = s.env.events().all().len();
+
+        // 1. Missing authorization
+        s.env.set_auths(&[]);
+        let res_no_auth = s
+            .client
+            .try_set_protocol_fee(&admin, &250_u32, &attacker_collector);
+        assert!(res_no_auth.is_err(), "set_protocol_fee without auth must fail");
+        assert_config_snapshot_unchanged(
+            &s,
+            initial_max,
+            expected_fee.clone(),
+            0,
+            initial_seq,
+            initial_events,
+        );
+
+        // 2. Wrong address authorization (attacker signs for themselves)
+        s.env.mock_auths(&[MockAuth {
+            address: &s.attacker,
+            invoke: &MockAuthInvoke {
+                contract: &s.contract_id,
+                fn_name: "set_protocol_fee",
+                args: (s.attacker.clone(), 250_u32, attacker_collector.clone()).into_val(&s.env),
+                sub_invokes: &[],
+            },
+        }]);
+        let res_wrong_caller = s
+            .client
+            .try_set_protocol_fee(&s.attacker, &250_u32, &attacker_collector);
+        assert_eq!(
+            res_wrong_caller,
+            Err(Ok(ContractError::NotAdmin)),
+            "set_protocol_fee by non-admin must return NotAdmin"
+        );
+        assert_config_snapshot_unchanged(
+            &s,
+            initial_max,
+            expected_fee,
+            0,
+            initial_seq,
+            initial_events,
+        );
+    }
+
+    #[test]
+    fn sec_unauthorized_migrate_is_atomic() {
+        let s = SecEnv::new_no_mock_auth();
+        let admin = Address::generate(&s.env);
+
+        s.env.mock_all_auths();
+        s.client.initialize(&admin);
+
+        let initial_max = s.client.get_config().max_amount;
+        let initial_seq = s.env.ledger().sequence();
+        let initial_events = s.env.events().all().len();
+
+        // 1. Missing authorization
+        s.env.set_auths(&[]);
+        let res_no_auth = s.client.try_migrate(&admin);
+        assert!(res_no_auth.is_err(), "migrate without auth must fail");
+        assert_config_snapshot_unchanged(&s, initial_max, None, 0, initial_seq, initial_events);
+
+        // 2. Wrong address authorization (attacker signs for themselves)
+        s.env.mock_auths(&[MockAuth {
+            address: &s.attacker,
+            invoke: &MockAuthInvoke {
+                contract: &s.contract_id,
+                fn_name: "migrate",
+                args: (s.attacker.clone(),).into_val(&s.env),
+                sub_invokes: &[],
+            },
+        }]);
+        let res_wrong_caller = s.client.try_migrate(&s.attacker);
+        assert_eq!(
+            res_wrong_caller,
+            Err(Ok(ContractError::NotAdmin)),
+            "migrate by non-admin must return NotAdmin"
+        );
+        assert_config_snapshot_unchanged(&s, initial_max, None, 0, initial_seq, initial_events);
+    }
+
 }

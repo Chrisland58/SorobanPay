@@ -460,3 +460,109 @@ fn batch_return_value_structure_verified() {
     assert_eq!(returned_addr_a, sub_a, "result[0] address must match sub_a");
     assert_eq!(returned_addr_b, sub_b, "result[1] address must match sub_b");
 }
+
+// ─── Test 9: Batch boundaries & duplicate-item behavior (Issue #1649) ────────
+
+/// A batch of BATCH_MAX_SIZE - 1 (49) subscribers (immediately below the limit)
+/// must succeed and return 49 per-item results.
+#[test]
+fn batch_immediately_below_max_size_succeeds() {
+    let bt = BT::new();
+    let mut subs: Vec<Address> = Vec::new(&bt.env);
+
+    for _ in 0..(BATCH_MAX_SIZE - 1) {
+        subs.push_back(Address::generate(&bt.env));
+    }
+
+    let result = bt.client.try_batch_execute_payment(&bt.merchant, &bt.token, &subs);
+    assert!(
+        result.is_ok(),
+        "batch of BATCH_MAX_SIZE - 1 must succeed; got {:?}",
+        result
+    );
+    let results = result.unwrap().unwrap();
+    assert_eq!(results.len(), BATCH_MAX_SIZE - 1);
+}
+
+/// Repeated subscription identifiers in the same batch must not cause duplicate
+/// collection: the first occurrence succeeds and advances next_payment, while
+/// subsequent occurrences in the same batch see PaymentNotDue and return false.
+#[test]
+fn batch_duplicate_subscriber_no_duplicate_collection() {
+    let bt       = BT::new();
+    let amount   = 1_000_i128;
+    let interval = 86_400_u64;
+
+    let sub_dup   = bt.make_subscriber(10_000, amount, interval);
+    let sub_other = bt.make_subscriber(10_000, amount, interval);
+
+    bt.advance(interval + 1);
+
+    let mut subs: Vec<Address> = Vec::new(&bt.env);
+    subs.push_back(sub_dup.clone());
+    subs.push_back(sub_other.clone());
+    subs.push_back(sub_dup.clone());
+
+    let results = bt.client.batch_execute_payment(&bt.merchant, &bt.token, &subs);
+
+    assert_eq!(results.len(), 3, "result length must match input length");
+    assert_eq!(results.get(0).unwrap(), (sub_dup.clone(), true), "first occurrence must succeed");
+    assert_eq!(results.get(1).unwrap(), (sub_other.clone(), true), "other subscriber must succeed");
+    assert_eq!(results.get(2).unwrap(), (sub_dup.clone(), false), "duplicate occurrence must be skipped");
+
+    // Verify no duplicate collection occurred
+    assert_eq!(bt.balance_of(&sub_dup), 10_000 - amount, "sub_dup charged exactly once");
+    assert_eq!(bt.balance_of(&sub_other), 10_000 - amount, "sub_other charged exactly once");
+    assert_eq!(bt.balance_of(&bt.merchant), 2 * amount, "merchant received exactly 2 payments");
+    assert_eq!(bt.get_sub(&sub_dup).payment_nonce, 1, "sub_dup nonce incremented once");
+}
+
+/// A failed item among valid items must not abort the batch (per-item semantics):
+/// valid items before and after the failed item still succeed, and events are
+/// emitted in input order (initiated -> sub1 success -> sub2 failure -> sub3 success).
+#[test]
+fn batch_failed_item_among_valid_items_per_item_and_event_order() {
+    use soroban_sdk::testutils::Events as _;
+
+    let bt       = BT::new();
+    let amount   = 1_000_i128;
+    let interval = 86_400_u64;
+
+    let sub_valid_1 = bt.make_subscriber(10_000, amount, interval);
+    // sub_fail has sufficient allowance (approved for 10_000) but insufficient balance (500 < 1_000)
+    let sub_fail    = bt.make_subscriber(500, amount, interval);
+    let sub_valid_2 = bt.make_subscriber(10_000, amount, interval);
+
+    bt.advance(interval + 1);
+
+    let mut subs: Vec<Address> = Vec::new(&bt.env);
+    subs.push_back(sub_valid_1.clone());
+    subs.push_back(sub_fail.clone());
+    subs.push_back(sub_valid_2.clone());
+
+    let results = bt.client.batch_execute_payment(&bt.merchant, &bt.token, &subs);
+
+    assert_eq!(results.len(), 3);
+    assert_eq!(results.get(0).unwrap(), (sub_valid_1.clone(), true));
+    assert_eq!(results.get(1).unwrap(), (sub_fail.clone(), false));
+    assert_eq!(results.get(2).unwrap(), (sub_valid_2.clone(), true));
+
+    assert_eq!(bt.balance_of(&bt.merchant), 2 * amount);
+    assert!(bt.get_sub(&sub_fail).overdue_since.is_some(), "failed item marked overdue");
+
+    // Verify events were emitted in input order:
+    // 1. batch_execute_initiated (1 event)
+    // 2. sub_valid_1: payment_transfer_success + executed (2 events)
+    // 3. sub_fail: payment_transfer_failure (1 event)
+    // 4. sub_valid_2: payment_transfer_success + executed (2 events)
+    let events = bt.env.events().all();
+    let contract_events: std::vec::Vec<_> = events
+        .iter()
+        .filter(|(addr, _, _)| *addr == bt.contract_id)
+        .collect();
+    assert_eq!(
+        contract_events.len(),
+        6,
+        "expected 6 contract events (1 initiated + 2*2 success + 1 failure)"
+    );
+}
