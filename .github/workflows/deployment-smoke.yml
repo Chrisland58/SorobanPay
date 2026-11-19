@@ -19,6 +19,11 @@ jobs:
         run: |
           bash -n deploy/deploy.sh
           bash -n deploy/smoke_test.sh
+          bash -n deploy/verify_parity.sh
+          bash -n deploy/test_verify_parity.sh
 
       - name: Run isolated deployment smoke scenarios
         run: bash deploy/smoke_test.sh
+
+      - name: Run deployment configuration parity tests
+        run: bash deploy/test_verify_parity.sh
