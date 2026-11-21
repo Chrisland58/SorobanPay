@@ -439,6 +439,70 @@ pub fn emit_fee_collected(
     );
 }
 
+/// Emit `fee_prop_created` when a protocol fee proposal is created (#1611).
+pub fn emit_fee_proposal_created(
+    env: &Env,
+    admin: &Address,
+    fee_bps: u32,
+    fee_collector: &Address,
+    activation_time: u64,
+) {
+    env.events().publish(
+        (
+            Symbol::new(env, "fee_prop_created"),
+            admin.clone(),
+            fee_collector.clone(),
+        ),
+        (fee_bps, activation_time),
+    );
+}
+
+/// Emit `fee_prop_replaced` when an existing fee proposal is replaced with new parameters (#1611).
+pub fn emit_fee_proposal_replaced(
+    env: &Env,
+    admin: &Address,
+    fee_bps: u32,
+    fee_collector: &Address,
+    activation_time: u64,
+) {
+    env.events().publish(
+        (
+            Symbol::new(env, "fee_prop_replaced"),
+            admin.clone(),
+            fee_collector.clone(),
+        ),
+        (fee_bps, activation_time),
+    );
+}
+
+/// Emit `fee_prop_cancelled` when a pending fee proposal is cancelled by admin (#1611).
+pub fn emit_fee_proposal_cancelled(env: &Env, admin: &Address) {
+    env.events().publish(
+        (
+            Symbol::new(env, "fee_prop_cancelled"),
+            admin.clone(),
+        ),
+        (),
+    );
+}
+
+/// Emit `fee_prop_activated` when a proposed protocol fee becomes active (#1611).
+pub fn emit_fee_proposal_activated(
+    env: &Env,
+    admin: &Address,
+    fee_bps: u32,
+    fee_collector: &Address,
+) {
+    env.events().publish(
+        (
+            Symbol::new(env, "fee_prop_activated"),
+            admin.clone(),
+            fee_collector.clone(),
+        ),
+        fee_bps,
+    );
+}
+
 /// Emit the `insufficient_allowance` event when a subscriber's SEP-41 allowance is
 /// below the subscription amount at the time of `execute_payment`.
 ///

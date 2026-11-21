@@ -24,6 +24,8 @@ rules, and step-by-step checklist — see [docs/release-process.md](docs/release
 
 ### Added
 
+- **[Contract]** Add a two-phase protocol fee update mechanism (`propose_protocol_fee`, `cancel_protocol_fee_proposal`, `activate_protocol_fee`) with explicit activation delays, boundary validation, and zero disruption to ongoing payments prior to activation. (Closes #1611)
+
 - **[Docs]** Complete the Keep a Changelog release history, architecture guide,
   and Rust contract API documentation. (Closes #1405, Closes #1406, Closes #1407)
 - **[Docs]** Document all `deploy/deploy.sh` environment variables (`STELLAR_NETWORK`, `STELLAR_IDENTITY`) and derived values (`RPC_URL`, `PASSPHRASE`) in the script header and `docs/deployment.md`. (Closes #77)
