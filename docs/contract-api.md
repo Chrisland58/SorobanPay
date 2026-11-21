@@ -182,3 +182,125 @@ stellar contract invoke --id $CONTRACT_ID --source alice --network testnet \
 ```
 
 See [events.md](events.md) for the full event schema and decoding examples.
+
+---
+
+## Payment Split Configuration (Issue #1609)
+
+Merchants can configure an opt-in split that distributes each subscription payment proportionally among up to 5 beneficiaries. When a split is active, `execute_payment` transfers directly from the subscriber to each beneficiary; it falls back to the standard single-transfer behavior when no split is configured.
+
+### Types
+
+**`SplitRecipient`**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `recipient` | `Address` | Destination address for this beneficiary's allocation |
+| `share_bps` | `u32` | Basis-point share (1–9999); 10000 basis points = 100% |
+
+**`SplitConfig`**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `recipients` | `Vec<SplitRecipient>` | Ordered list of beneficiaries |
+
+### Rules
+
+- Maximum **5** recipients per subscription.
+- All `share_bps` values must sum to exactly **10000**.
+- No duplicate recipient addresses.
+- No zero `share_bps` values.
+- Splits are stored independently of subscription data and survive subscription updates.
+- Splits only affect **future** payments; already-settled payments are unaffected.
+- Pass an empty vec to `set_split` to remove an existing split.
+
+---
+
+## `set_split`
+
+Configure (or remove) the beneficiary split for a subscription.
+
+**Auth:** merchant must sign.
+
+### Parameters
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `subscriber` | `Address` | Subscriber whose payments will be split |
+| `merchant` | `Address` | Merchant authorizing the split |
+| `recipients` | `Vec<SplitRecipient>` | Beneficiaries and their shares; pass an empty vec to clear |
+
+### CLI example
+
+```bash
+stellar contract invoke \
+  --id $CONTRACT_ID \
+  --source merchant-key \
+  --network testnet \
+  -- set_split \
+  --subscriber GABC1234...SUBSCRIBER \
+  --merchant   GXYZ5678...MERCHANT \
+  --recipients '[{"recipient":"GBBB...R1","share_bps":5000},{"recipient":"GCCC...R2","share_bps":5000}]'
+```
+
+### Expected outcome
+
+- Split configuration stored under key `SplitConfig(subscriber, merchant)`.
+- Subsequent `execute_payment` calls distribute proportionally among beneficiaries.
+- Each beneficiary transfer emits a `split_payment` event.
+
+### Error cases
+
+| Error | Code | Trigger |
+|-------|------|---------|
+| `NoActiveSubscription` | 4 | No subscription found for this pair |
+| `TooManyRecipients` | 10 | More than 5 recipients provided |
+| `InvalidShareSum` | 11 | Shares do not sum to exactly 10000 |
+| `DuplicateRecipient` | 12 | Two or more entries share the same address |
+| `ZeroShare` | 13 | Any `share_bps` value is 0 |
+
+---
+
+## `get_split`
+
+Return the current split configuration for a subscriber-merchant pair.
+
+**Auth:** none — public read-only view.
+
+### Parameters
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `subscriber` | `Address` | The subscriber |
+| `merchant` | `Address` | The merchant |
+
+### Returns
+
+`Some(SplitConfig)` if a split is configured, `None` otherwise.
+
+### CLI example
+
+```bash
+stellar contract invoke \
+  --id $CONTRACT_ID \
+  --network testnet \
+  -- get_split \
+  --subscriber GABC1234...SUBSCRIBER \
+  --merchant   GXYZ5678...MERCHANT
+```
+
+---
+
+## Settlement events with splits
+
+When a split is active, `execute_payment` emits one `split_payment` event per beneficiary **in addition to** the existing `executed` event for the full amount.
+
+### `split_payment` event
+
+| Field | Value |
+|-------|-------|
+| Topics | `(Symbol("split_payment"), subscriber, merchant, recipient)` |
+| Data | `allocation: i128` — exact base-unit amount sent to this recipient |
+
+The last recipient absorbs any integer-division remainder to guarantee the sum of all allocations equals `data.amount` exactly, with no dust lost.
+

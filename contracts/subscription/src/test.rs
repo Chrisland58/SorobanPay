@@ -8,7 +8,7 @@ use soroban_sdk::{
 
 use crate::{
     error::ContractError,
-    storage::{DataKey, SubscriptionData},
+    storage::{DataKey, SplitConfig, SplitRecipient, SubscriptionData},
     SubscriptionProtocol, SubscriptionProtocolClient,
 };
 
@@ -1730,4 +1730,318 @@ fn test_amount_zero_rejected() {
     let r = t.client.try_subscribe(&t.subscriber, &t.merchant, &t.token, &0_i128, &86_400_u64);
     assert!(matches!(r, Err(Ok(ContractError::AmountMustBePositive))));
     assert!(!t.has_sub());
+}
+
+// ─── Issue #1609 — Beneficiary Splits ────────────────────────────────────────
+
+/// Helper: build a Vec<SplitRecipient> for testing.
+fn make_recipients(env: &Env, entries: &[(Address, u32)]) -> soroban_sdk::Vec<SplitRecipient> {
+    let mut v = soroban_sdk::Vec::new(env);
+    for (addr, bps) in entries {
+        v.push_back(SplitRecipient {
+            recipient: addr.clone(),
+            share_bps: *bps,
+        });
+    }
+    v
+}
+
+/// Two recipients with equal 50/50 split; each receives half the payment amount.
+#[test]
+fn test_split_valid_two_recipients() {
+    let t = T::new();
+    let amt = 1_000_i128;
+    let ivl = 86_400_u64;
+
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &amt, &ivl);
+
+    let r1 = Address::generate(&t.env);
+    let r2 = Address::generate(&t.env);
+
+    let recipients = make_recipients(&t.env, &[(r1.clone(), 5000), (r2.clone(), 5000)]);
+    t.client.set_split(&t.subscriber, &t.merchant, &recipients);
+
+    t.advance(ivl + 1);
+    t.client.execute_payment(&t.subscriber, &t.merchant);
+
+    let tc = token::Client::new(&t.env, &t.token);
+    assert_eq!(tc.balance(&r1), 500_i128, "r1 should receive 50% of 1000");
+    assert_eq!(tc.balance(&r2), 500_i128, "r2 should receive 50% of 1000");
+    // Subscriber debited full amount.
+    assert_eq!(t.sub_bal(), 10_000_000_i128 - amt);
+}
+
+/// Three recipients: 50%, 30%, 20% — verify proportional distribution.
+#[test]
+fn test_split_valid_three_recipients() {
+    let t = T::new();
+    let amt = 1_000_i128;
+    let ivl = 86_400_u64;
+
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &amt, &ivl);
+
+    let r1 = Address::generate(&t.env);
+    let r2 = Address::generate(&t.env);
+    let r3 = Address::generate(&t.env);
+
+    let recipients = make_recipients(&t.env, &[
+        (r1.clone(), 5000),
+        (r2.clone(), 3000),
+        (r3.clone(), 2000),
+    ]);
+    t.client.set_split(&t.subscriber, &t.merchant, &recipients);
+
+    t.advance(ivl + 1);
+    t.client.execute_payment(&t.subscriber, &t.merchant);
+
+    let tc = token::Client::new(&t.env, &t.token);
+    assert_eq!(tc.balance(&r1), 500_i128, "r1 should receive 50%");
+    assert_eq!(tc.balance(&r2), 300_i128, "r2 should receive 30%");
+    assert_eq!(tc.balance(&r3), 200_i128, "r3 should receive 20%");
+    assert_eq!(t.sub_bal(), 10_000_000_i128 - amt);
+}
+
+/// More than 5 recipients must be rejected with TooManyRecipients.
+#[test]
+fn test_split_exceeds_max_recipients_rejected() {
+    let t = T::new();
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &1_000_i128, &86_400_u64);
+
+    let mut entries = soroban_sdk::Vec::new(&t.env);
+    // 6 recipients each with 1/6 of basis points (rounding doesn't matter — validation fires first)
+    for _ in 0..6 {
+        entries.push_back(SplitRecipient {
+            recipient: Address::generate(&t.env),
+            share_bps: 1666,
+        });
+    }
+    let r = t.client.try_set_split(&t.subscriber, &t.merchant, &entries);
+    assert!(
+        matches!(r, Err(Ok(ContractError::TooManyRecipients))),
+        "6 recipients must be rejected with TooManyRecipients"
+    );
+}
+
+/// Shares summing to less than 10000 must be rejected with InvalidShareSum.
+#[test]
+fn test_split_invalid_sum_rejected() {
+    let t = T::new();
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &1_000_i128, &86_400_u64);
+
+    let r1 = Address::generate(&t.env);
+    let r2 = Address::generate(&t.env);
+
+    let recipients = make_recipients(&t.env, &[(r1.clone(), 3000), (r2.clone(), 3000)]);
+    let r = t.client.try_set_split(&t.subscriber, &t.merchant, &recipients);
+    assert!(
+        matches!(r, Err(Ok(ContractError::InvalidShareSum))),
+        "shares summing to 6000 must return InvalidShareSum"
+    );
+}
+
+/// Duplicate recipient address must be rejected with DuplicateRecipient.
+#[test]
+fn test_split_duplicate_recipient_rejected() {
+    let t = T::new();
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &1_000_i128, &86_400_u64);
+
+    let r1 = Address::generate(&t.env);
+    // Both entries use the same address.
+    let recipients = make_recipients(&t.env, &[(r1.clone(), 5000), (r1.clone(), 5000)]);
+    let r = t.client.try_set_split(&t.subscriber, &t.merchant, &recipients);
+    assert!(
+        matches!(r, Err(Ok(ContractError::DuplicateRecipient))),
+        "duplicate address must return DuplicateRecipient"
+    );
+}
+
+/// A share_bps of 0 must be rejected with ZeroShare.
+#[test]
+fn test_split_zero_share_rejected() {
+    let t = T::new();
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &1_000_i128, &86_400_u64);
+
+    let r1 = Address::generate(&t.env);
+    let r2 = Address::generate(&t.env);
+
+    let recipients = make_recipients(&t.env, &[(r1.clone(), 10000), (r2.clone(), 0)]);
+    let r = t.client.try_set_split(&t.subscriber, &t.merchant, &recipients);
+    assert!(
+        matches!(r, Err(Ok(ContractError::ZeroShare))),
+        "zero share_bps must return ZeroShare"
+    );
+}
+
+/// Calling set_split with an empty vec removes the split configuration.
+#[test]
+fn test_split_clear_removes_config() {
+    let t = T::new();
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &1_000_i128, &86_400_u64);
+
+    let r1 = Address::generate(&t.env);
+    let r2 = Address::generate(&t.env);
+
+    // Set a valid split.
+    let recipients = make_recipients(&t.env, &[(r1.clone(), 5000), (r2.clone(), 5000)]);
+    t.client.set_split(&t.subscriber, &t.merchant, &recipients);
+
+    // Confirm it was stored.
+    assert!(
+        t.client.get_split(&t.subscriber, &t.merchant).is_some(),
+        "split config should exist after set_split"
+    );
+
+    // Clear it with an empty vec.
+    let empty: soroban_sdk::Vec<SplitRecipient> = soroban_sdk::Vec::new(&t.env);
+    t.client.set_split(&t.subscriber, &t.merchant, &empty);
+
+    assert!(
+        t.client.get_split(&t.subscriber, &t.merchant).is_none(),
+        "split config should be removed after set_split with empty vec"
+    );
+}
+
+/// set_split on a non-existent subscription must return NoActiveSubscription.
+#[test]
+fn test_split_on_nonexistent_subscription_rejected() {
+    let t = T::new();
+
+    let r1 = Address::generate(&t.env);
+    let r2 = Address::generate(&t.env);
+
+    let recipients = make_recipients(&t.env, &[(r1.clone(), 5000), (r2.clone(), 5000)]);
+    let r = t.client.try_set_split(&t.subscriber, &t.merchant, &recipients);
+    assert!(
+        matches!(r, Err(Ok(ContractError::NoActiveSubscription))),
+        "set_split without a subscription must return NoActiveSubscription"
+    );
+}
+
+/// execute_payment with a split emits one split_payment event per recipient.
+#[test]
+fn test_split_emits_per_recipient_events() {
+    let t = T::new();
+    let amt = 1_000_i128;
+    let ivl = 86_400_u64;
+
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &amt, &ivl);
+
+    let r1 = Address::generate(&t.env);
+    let r2 = Address::generate(&t.env);
+
+    let recipients = make_recipients(&t.env, &[(r1.clone(), 6000), (r2.clone(), 4000)]);
+    t.client.set_split(&t.subscriber, &t.merchant, &recipients);
+
+    // Clear accumulated events from subscribe + set_split calls.
+    let n_before = t.env.events().all().iter().filter(|e| e.0 == t.contract_id).count();
+
+    t.advance(ivl + 1);
+    t.client.execute_payment(&t.subscriber, &t.merchant);
+
+    let all = t.env.events().all();
+    let contract_events: Vec<_> = all.iter().filter(|e| e.0 == t.contract_id).collect();
+    let n_after = contract_events.len();
+
+    // Expect: 2 split_payment events + 1 executed event = 3 new events.
+    assert_eq!(
+        n_after - n_before,
+        3,
+        "execute_payment with 2-recipient split must emit 2 split_payment + 1 executed events"
+    );
+
+    // Verify split_payment topics: (symbol("split_payment"), subscriber, merchant, recipient)
+    let split_events: Vec<_> = contract_events
+        .iter()
+        .filter(|e| {
+            e.1 == (
+                Symbol::new(&t.env, "split_payment"),
+                t.subscriber.clone(),
+                t.merchant.clone(),
+                r1.clone(),
+            )
+            .into_val(&t.env)
+                || e.1
+                    == (
+                        Symbol::new(&t.env, "split_payment"),
+                        t.subscriber.clone(),
+                        t.merchant.clone(),
+                        r2.clone(),
+                    )
+                    .into_val(&t.env)
+        })
+        .collect();
+    assert_eq!(split_events.len(), 2, "must have one split_payment event per recipient");
+}
+
+/// Total allocation across all recipients equals the full payment amount (no dust lost).
+#[test]
+fn test_split_full_amount_allocated_sum() {
+    let t = T::new();
+    let amt = 1_000_i128;
+    let ivl = 86_400_u64;
+
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &amt, &ivl);
+
+    let r1 = Address::generate(&t.env);
+    let r2 = Address::generate(&t.env);
+    let r3 = Address::generate(&t.env);
+
+    // 3333 + 3333 + 3334 = 10000; last recipient absorbs rounding remainder.
+    let recipients = make_recipients(&t.env, &[
+        (r1.clone(), 3333),
+        (r2.clone(), 3333),
+        (r3.clone(), 3334),
+    ]);
+    t.client.set_split(&t.subscriber, &t.merchant, &recipients);
+
+    let sub_before = t.sub_bal();
+    t.advance(ivl + 1);
+    t.client.execute_payment(&t.subscriber, &t.merchant);
+
+    let tc = token::Client::new(&t.env, &t.token);
+    let total_received = tc.balance(&r1) + tc.balance(&r2) + tc.balance(&r3);
+    assert_eq!(
+        total_received,
+        amt,
+        "sum of all recipient allocations must equal the payment amount"
+    );
+    assert_eq!(
+        t.sub_bal(),
+        sub_before - amt,
+        "subscriber must be debited the full amount"
+    );
+}
+
+/// Payments made before a split is configured are unaffected; the split only
+/// applies from the next payment onward.
+#[test]
+fn test_split_already_settled_unaffected() {
+    let t = T::new();
+    let amt = 1_000_i128;
+    let ivl = 86_400_u64;
+
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &amt, &ivl);
+
+    // First payment — no split configured; full amount goes to merchant.
+    t.advance(ivl + 1);
+    t.client.execute_payment(&t.subscriber, &t.merchant);
+
+    let mer_after_first = t.mer_bal();
+    assert_eq!(mer_after_first, amt, "merchant should receive full amount on first payment");
+
+    // Now configure a split.
+    let r1 = Address::generate(&t.env);
+    let r2 = Address::generate(&t.env);
+    let recipients = make_recipients(&t.env, &[(r1.clone(), 7000), (r2.clone(), 3000)]);
+    t.client.set_split(&t.subscriber, &t.merchant, &recipients);
+
+    // Second payment — split applies; merchant receives nothing, r1 and r2 get amounts.
+    t.advance(ivl + 1);
+    t.client.execute_payment(&t.subscriber, &t.merchant);
+
+    let tc = token::Client::new(&t.env, &t.token);
+    assert_eq!(tc.balance(&r1), 700_i128, "r1 must receive 70% of second payment");
+    assert_eq!(tc.balance(&r2), 300_i128, "r2 must receive 30% of second payment");
+    // Merchant balance must not have changed from first payment amount.
+    assert_eq!(t.mer_bal(), mer_after_first, "merchant balance must not change on split payment");
 }

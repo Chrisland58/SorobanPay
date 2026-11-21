@@ -113,3 +113,26 @@ pub fn emit_batch_execute_initiated(env: &Env, merchant: &Address, batch_size: u
         batch_size as i128,
     );
 }
+
+/// Emitted when a beneficiary split payment is distributed to a single recipient.
+/// One event per recipient per payment execution.
+///
+/// Topics: (symbol("split_payment"), subscriber, merchant, recipient)
+/// Data:   allocation (i128) — exact base-unit amount sent to this recipient
+pub fn emit_split_payment(
+    env: &Env,
+    subscriber: &Address,
+    merchant: &Address,
+    recipient: &Address,
+    allocation: i128,
+) {
+    env.events().publish(
+        (
+            Symbol::new(env, "split_payment"),
+            subscriber.clone(),
+            merchant.clone(),
+            recipient.clone(),
+        ),
+        allocation,
+    );
+}

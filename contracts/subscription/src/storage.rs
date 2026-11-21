@@ -1,4 +1,4 @@
-use soroban_sdk::{contracttype, Address};
+use soroban_sdk::{contracttype, Address, Vec};
 
 // ==================== Version Metadata ====================
 /// Contract semantic version: MAJOR.MINOR.PATCH
@@ -15,11 +15,26 @@ pub const CONTRACT_NAME: &str = "SorobanPay-SubscriptionProtocol";
 
 // ==================== Storage & Data Structures ====================
 
-/// Composite storage key uniquely identifying a subscription.
-/// One entry per (subscriber, merchant) pair.
+/// Composite storage key uniquely identifying a subscription, split config, or contract-level metadata.
 #[contracttype]
 pub enum DataKey {
     Subscription(Address, Address),
+    Admin,
+    TokenStatus(Address),
+    SplitConfig(Address, Address),  // (subscriber, merchant)
+}
+
+/// Token lifecycle status for the allowlist.
+/// - `Active`:   token may be used in new subscriptions and payments.
+/// - `Disabled`: token may not be used in new subscriptions, but existing
+///               obligations (already-subscribed pairs) may still settle.
+/// - `Retired`:  token is fully blocked; no new subscriptions and no settlements.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum TokenStatus {
+    Active,
+    Disabled,
+    Retired,
 }
 
 /// Persistent on-chain record for a subscription.
@@ -32,6 +47,36 @@ pub struct SubscriptionData {
     pub next_payment: u64,       // Unix timestamp of next valid payment window
     pub is_paused:    bool,      // true if subscription payments are suspended
 }
+
+/// Schedule status for the read-only preview query.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ScheduleStatus {
+    /// Subscription is active and payment is not yet due.
+    Active,
+    /// Subscription is active and payment is overdue (now >= next_payment).
+    Overdue,
+    /// Subscription is paused; no payment will be collected until resumed.
+    Paused,
+}
+
+/// Output of the `preview_schedule` read-only query.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct SchedulePreview {
+    pub next_due:  u64,            // Unix timestamp of next payment (same as next_payment)
+    pub status:    ScheduleStatus, // Current schedule status
+    pub amount:    i128,           // Amount due per interval
+    pub interval:  u64,            // Interval in seconds
+}
+
+/// Maximum scheduling horizon: subscriptions may not project their first
+/// next_payment more than 10 years (315_360_000 seconds) beyond the current
+/// ledger time.  This prevents unbounded future timestamps and the arithmetic
+/// edge-cases they create.
+///
+/// Unit: seconds.  Governance: change requires a contract upgrade (MAJOR bump).
+pub const MAX_HORIZON_SECS: u64 = 315_360_000; // 10 years
 
 /// Safe upper bound for a single subscription payment amount (1 × 10¹⁸ stroops).
 ///
@@ -50,3 +95,26 @@ pub const MIN_TTL_LEDGERS: u32 = 30 * 24 * 60 * 60 / 5;
 
 /// ~365 days at 5-second ledger close time (6_307_200 ledgers)
 pub const MAX_TTL_LEDGERS: u32 = 365 * 24 * 60 * 60 / 5;
+
+// ==================== Beneficiary Split Configuration (Issue #1609) ====================
+
+/// Maximum number of beneficiaries in a payment split.
+pub const MAX_SPLIT_RECIPIENTS: u32 = 5;
+
+/// Basis-point denominator for split shares (10000 = 100%).
+pub const SPLIT_BASIS_POINTS: u32 = 10_000;
+
+/// A single beneficiary in a payment split.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct SplitRecipient {
+    pub recipient:  Address,
+    pub share_bps:  u32,   // basis points, 1-9999
+}
+
+/// Split configuration for a subscription.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct SplitConfig {
+    pub recipients: Vec<SplitRecipient>,
+}

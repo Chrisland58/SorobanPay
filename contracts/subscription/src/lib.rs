@@ -7,7 +7,7 @@ mod storage;
 use soroban_sdk::{contract, contractimpl, token, Address, Env, Symbol};
 
 use crate::error::ContractError;
-use crate::storage::{DataKey, SubscriptionData, MAX_AMOUNT, MAX_TTL_LEDGERS, MIN_TTL_LEDGERS};
+use crate::storage::{DataKey, SplitConfig, SplitRecipient, SubscriptionData, MAX_AMOUNT, MAX_SPLIT_RECIPIENTS, MAX_TTL_LEDGERS, MIN_TTL_LEDGERS, SPLIT_BASIS_POINTS};
 
 // ─── Internal helpers ─────────────────────────────────────────────────────────
 
@@ -517,11 +517,41 @@ impl SubscriptionProtocol {
         // Execute the transfer. Given Soroban's all-or-nothing semantics, if this succeeds,
         // we proceed with state updates. If it panics (e.g., allowance revoked mid-call),
         // the transaction reverts entirely.
-        token_client.transfer(
-            &subscriber,
-            &merchant,
-            &data.amount,
-        );
+        //
+        // If a split is configured, distribute proportionally from subscriber directly to
+        // each beneficiary. The last recipient absorbs any integer-division remainder to
+        // ensure the full amount is always transferred without dust loss.
+        // If no split is configured, transfer the full amount to the merchant as before.
+        let split_key = DataKey::SplitConfig(subscriber.clone(), merchant.clone());
+        let maybe_split: Option<SplitConfig> = env.storage().persistent().get(&split_key);
+
+        if let Some(split_config) = maybe_split {
+            let recipients_len = split_config.recipients.len();
+            let mut total_transferred: i128 = 0;
+            // Transfer to all recipients except the last (proportional allocation).
+            for i in 0..(recipients_len - 1) {
+                let r = split_config.recipients.get(i).unwrap();
+                let allocation = (data.amount * r.share_bps as i128) / SPLIT_BASIS_POINTS as i128;
+                if allocation > 0 {
+                    token_client.transfer(&subscriber, &r.recipient, &allocation);
+                    events::emit_split_payment(&env, &subscriber, &merchant, &r.recipient, allocation);
+                    total_transferred += allocation;
+                }
+            }
+            // Last recipient gets the remainder to avoid rounding dust.
+            let last = split_config.recipients.get(recipients_len - 1).unwrap();
+            let remainder = data.amount - total_transferred;
+            if remainder > 0 {
+                token_client.transfer(&subscriber, &last.recipient, &remainder);
+                events::emit_split_payment(&env, &subscriber, &merchant, &last.recipient, remainder);
+            }
+        } else {
+            token_client.transfer(
+                &subscriber,
+                &merchant,
+                &data.amount,
+            );
+        }
 
         // 5. Transfer succeeded — calculate next payment with late-payment-aware logic.
         //
@@ -766,6 +796,105 @@ impl SubscriptionProtocol {
     ) -> Option<SubscriptionData> {
         let key = DataKey::Subscription(subscriber, merchant);
         env.storage().persistent().get(&key)
+    }
+
+    /// Configure a payment split for a subscription.
+    ///
+    /// When a split is set, `execute_payment` distributes the payment directly from the
+    /// subscriber to each listed beneficiary in proportion to their share. Calling this
+    /// with an empty `recipients` vec removes any existing split configuration.
+    ///
+    /// # Authorization
+    /// Requires a valid signature from `merchant` in the transaction auth envelope.
+    ///
+    /// # Parameters
+    /// - `subscriber`:  The subscriber whose payments will be split.
+    /// - `merchant`:    The merchant authorizing the split.
+    /// - `recipients`:  Up to 5 `SplitRecipient` entries. Each entry has:
+    ///   - `recipient`: destination `Address`
+    ///   - `share_bps`: basis-point share (1–9999); all entries must sum to exactly 10000.
+    ///   Pass an empty vec to remove an existing split.
+    ///
+    /// # Errors
+    /// - `ContractError::NoActiveSubscription` — if no subscription exists for the pair.
+    /// - `ContractError::TooManyRecipients`    — if more than 5 recipients are provided.
+    /// - `ContractError::ZeroShare`            — if any recipient has `share_bps == 0`.
+    /// - `ContractError::InvalidShareSum`      — if shares do not sum to exactly 10000.
+    /// - `ContractError::DuplicateRecipient`   — if any two entries share the same address.
+    ///
+    /// # Notes
+    /// - Splits only affect future payments; already-settled payments are unaffected.
+    /// - The split config is stored separately from the subscription and survives subscription updates.
+    pub fn set_split(
+        env: Env,
+        subscriber: Address,
+        merchant: Address,
+        recipients: soroban_sdk::Vec<SplitRecipient>,
+    ) -> Result<(), ContractError> {
+        merchant.require_auth();
+
+        // Verify subscription exists.
+        let key = DataKey::Subscription(subscriber.clone(), merchant.clone());
+        if !env.storage().persistent().has(&key) {
+            return Err(ContractError::NoActiveSubscription);
+        }
+
+        // Empty vec clears the split configuration.
+        if recipients.is_empty() {
+            env.storage()
+                .persistent()
+                .remove(&DataKey::SplitConfig(subscriber, merchant));
+            return Ok(());
+        }
+
+        // Validate recipient count.
+        if recipients.len() > MAX_SPLIT_RECIPIENTS {
+            return Err(ContractError::TooManyRecipients);
+        }
+
+        // Validate no zero shares, sum, and no duplicate recipients.
+        let mut total_bps: u32 = 0;
+        for i in 0..recipients.len() {
+            let r = recipients.get(i).unwrap();
+            if r.share_bps == 0 {
+                return Err(ContractError::ZeroShare);
+            }
+            total_bps += r.share_bps;
+            // Check for duplicates against all subsequent entries.
+            for j in (i + 1)..recipients.len() {
+                let r2 = recipients.get(j).unwrap();
+                if r.recipient == r2.recipient {
+                    return Err(ContractError::DuplicateRecipient);
+                }
+            }
+        }
+
+        if total_bps != SPLIT_BASIS_POINTS {
+            return Err(ContractError::InvalidShareSum);
+        }
+
+        let config = SplitConfig { recipients };
+        env.storage()
+            .persistent()
+            .set(&DataKey::SplitConfig(subscriber, merchant), &config);
+        Ok(())
+    }
+
+    /// Return the current split configuration for a subscriber-merchant pair, if any.
+    ///
+    /// # Authorization
+    /// No authorization required — this is a public read-only view.
+    ///
+    /// # Returns
+    /// `Some(SplitConfig)` if a split is configured, `None` otherwise.
+    pub fn get_split(
+        env: Env,
+        subscriber: Address,
+        merchant: Address,
+    ) -> Option<SplitConfig> {
+        env.storage()
+            .persistent()
+            .get::<DataKey, SplitConfig>(&DataKey::SplitConfig(subscriber, merchant))
     }
 }
 

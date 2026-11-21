@@ -24,4 +24,12 @@ pub enum ContractError {
     InvalidTimestamp     = 8,
     /// `subscribe` called with amount exceeding the safe maximum threshold
     AmountTooLarge       = 9,
+    /// Too many split recipients (max 5)
+    TooManyRecipients    = 10,
+    /// Split shares do not sum to 10000 basis points
+    InvalidShareSum      = 11,
+    /// Duplicate recipient in split configuration
+    DuplicateRecipient   = 12,
+    /// Individual share is zero or would cause zero-value transfer
+    ZeroShare            = 13,
 }
