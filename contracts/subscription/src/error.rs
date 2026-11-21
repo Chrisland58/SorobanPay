@@ -41,4 +41,10 @@ pub enum ContractError {
     NotInitialized        = 17,
     /// Error code 19: subscription grace period has not elapsed.
     GracePeriodNotElapsed = 19,
+    /// Error code 24: payment execution identifier has already been executed within deduplication window (#1610).
+    DuplicateExecution = 24,
+    /// Error code 25: deduplication window is still active; cleanup rejected (#1610).
+    DeduplicationWindowActive = 25,
+    /// Error code 26: execution identifier is invalid or empty (#1610).
+    InvalidExecutionIdentifier = 26,
 }

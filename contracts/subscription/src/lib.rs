@@ -8,9 +8,12 @@ use soroban_sdk::{contract, contractimpl, symbol_short, token, Address, BytesN, 
 
 use crate::error::ContractError;
 use crate::storage::{
-    get_protocol_fee_config, has_execution_marker, set_protocol_fee_config, subscription_key,
-    write_execution_marker, DataKey, ProtocolFeeConfig, SubscriptionData, CONTRACT_VERSION,
-    CURRENT_SCHEMA_VERSION, MAX_AMOUNT, MAX_FEE_BPS, MAX_TTL_LEDGERS, MIN_TTL_LEDGERS,
+    execution_dedup_key, get_execution_record as get_stored_execution_record,
+    get_protocol_fee_config, has_execution_marker, remove_execution_record,
+    set_execution_record, set_protocol_fee_config, subscription_key, write_execution_marker,
+    DataKey, ExecutionRecord, ProtocolFeeConfig, SubscriptionData, CONTRACT_VERSION,
+    CURRENT_SCHEMA_VERSION, DEDUP_WINDOW_SECONDS, MAX_AMOUNT, MAX_FEE_BPS, MAX_TTL_LEDGERS,
+    MIN_TTL_LEDGERS,
 };
 
 /// Maximum number of subscribers allowed in a single `batch_execute_payment` call.
@@ -921,7 +924,150 @@ impl SubscriptionProtocol {
         // until its TTL expires, preventing late-arriving duplicate transactions.
         write_execution_marker(&env, &hash, data.payment_nonce);
 
-        events::emit_executed(&env, &subscriber, &merchant, &data.token, data.amount, data.payment_nonce);
+        events::emit_executed(&env, &subscriber, &merchant, &data.token, data.amount, data.payment_nonce as u32);
+
+        Ok(())
+    }
+
+    /// Execute payment with explicit deduplication identifier (#1610).
+    ///
+    /// Persists replay protection atomically with settlement within a bounded 7-day
+    /// deduplication window to prevent unbounded permanent storage growth.
+    pub fn execute_payment_with_id(
+        env: Env,
+        subscriber: Address,
+        merchant: Address,
+        token: Address,
+        execution_id: BytesN<32>,
+    ) -> Result<(), ContractError> {
+        merchant.require_auth();
+
+        let dedup_key = execution_dedup_key(&env, &subscriber, &merchant, &execution_id);
+        let now = ledger_timestamp(&env)?;
+
+        // Deduplication check: replayed identifiers within retention window cannot collect twice
+        if let Some(record) = get_stored_execution_record(&env, &dedup_key) {
+            if now <= record.executed_at.saturating_add(DEDUP_WINDOW_SECONDS) {
+                return Err(ContractError::DuplicateExecution);
+            }
+        }
+
+        let hash = subscription_key(&env, &subscriber, &merchant);
+        let key = DataKey::Subscription(hash.clone());
+        let mut data: SubscriptionData = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .ok_or(ContractError::NoActiveSubscription)?;
+
+        if data.is_paused {
+            if let Some(resume_at) = data.paused_until {
+                if now >= resume_at {
+                    data.is_paused = false;
+                    data.paused_until = None;
+                    data.next_payment = checked_next_payment(now, data.interval)?;
+                } else {
+                    return Err(ContractError::SubscriptionPaused);
+                }
+            } else {
+                return Err(ContractError::SubscriptionPaused);
+            }
+        }
+        if now < data.next_payment {
+            return Err(ContractError::PaymentNotDue);
+        }
+
+        let contract_address = env.current_contract_address();
+        let token_client = token::Client::new(&env, &data.token);
+
+        let allowance = token_client.allowance(&subscriber, &contract_address);
+        if allowance < data.amount {
+            events::emit_insufficient_allowance(&env, &subscriber, &merchant, allowance, data.amount);
+            return Err(ContractError::InsufficientAllowance);
+        }
+
+        let subscriber_balance = token_client.balance(&subscriber);
+        if subscriber_balance < data.amount {
+            let overdue_since = data.overdue_since.unwrap_or(now);
+            data.overdue_since = Some(overdue_since);
+            env.storage().persistent().set(&key, &data);
+            events::emit_payment_transfer_failure(&env, &subscriber, &merchant, data.amount, overdue_since);
+            return Err(ContractError::TransferFailed);
+        }
+
+        let fee_config = get_protocol_fee_config(&env);
+        let (merchant_amount, fee_amount, fee_collector_opt) = match &fee_config {
+            Some(cfg) if cfg.fee_bps > 0 => {
+                let fee = data.amount * (cfg.fee_bps as i128) / 10_000;
+                (data.amount - fee, fee, Some(cfg.fee_collector.clone()))
+            }
+            _ => (data.amount, 0, None),
+        };
+
+        token_client.transfer(&subscriber, &merchant, &merchant_amount);
+
+        if fee_amount > 0 {
+            if let Some(ref collector) = fee_collector_opt {
+                token_client.transfer(&subscriber, collector, &fee_amount);
+                events::emit_fee_collected(&env, &subscriber, &merchant, collector, fee_amount);
+            }
+        }
+
+        data.next_payment = now + data.interval;
+        data.overdue_since = None;
+        data.payment_nonce = data.payment_nonce.checked_add(1).ok_or(ContractError::InvalidTimestamp)?;
+        env.storage().persistent().set(&key, &data);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, MIN_TTL_LEDGERS, MAX_TTL_LEDGERS);
+
+        // Persist deduplication record atomically with settlement in temporary storage with TTL
+        let exec_record = ExecutionRecord {
+            execution_id: execution_id.clone(),
+            executed_at: now,
+            amount: data.amount,
+        };
+        set_execution_record(&env, &dedup_key, &exec_record);
+
+        events::emit_executed(&env, &subscriber, &merchant, &data.token, data.amount, data.payment_nonce as u32);
+        events::emit_payment_executed_with_id(&env, &subscriber, &merchant, &data.token, data.amount, &execution_id);
+
+        Ok(())
+    }
+
+    /// Deterministically clean up an expired deduplication record past its retention window.
+    pub fn cleanup_execution_record(
+        env: Env,
+        subscriber: Address,
+        merchant: Address,
+        execution_id: BytesN<32>,
+    ) -> Result<bool, ContractError> {
+        merchant.require_auth();
+
+        let dedup_key = execution_dedup_key(&env, &subscriber, &merchant, &execution_id);
+        let record = get_stored_execution_record(&env, &dedup_key)
+            .ok_or(ContractError::NoActiveSubscription)?;
+
+        let now = ledger_timestamp(&env)?;
+        if now <= record.executed_at.saturating_add(DEDUP_WINDOW_SECONDS) {
+            return Err(ContractError::DeduplicationWindowActive);
+        }
+
+        remove_execution_record(&env, &dedup_key);
+        events::emit_execution_record_cleaned(&env, &subscriber, &merchant, &execution_id);
+        Ok(true)
+    }
+
+    /// Read an execution deduplication record for an execution identifier, if present.
+    pub fn get_execution_record(
+        env: Env,
+        subscriber: Address,
+        merchant: Address,
+        execution_id: BytesN<32>,
+    ) -> Option<ExecutionRecord> {
+        let dedup_key = execution_dedup_key(&env, &subscriber, &merchant, &execution_id);
+        get_stored_execution_record(&env, &dedup_key)
+    }
     /// Attempt payment collection for each subscriber in one merchant-authorized call.
     ///
     /// Subscribers without an active, due, sufficiently funded subscription are
@@ -1262,3 +1408,6 @@ mod regression_tests;
 
 #[cfg(test)]
 mod pause_resume_tests;
+
+#[cfg(test)]
+mod deduplication_window_tests;
