@@ -587,6 +587,52 @@ Rewrite the listed subscription records using the current schema, defaulting new
 
 ---
 
+### `migrate_records_bounded`
+
+Execute a bounded, resumable schema migration over a collection of subscription records. Ensures atomic per-record processing, maintains persistent progress markers, and halts safely without partial writes when corrupt or invalid legacy data is encountered.
+
+**Authorization:** `admin` must sign.
+
+#### Parameters
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `admin` | `Address` | Must match the stored admin address |
+| `records` | `Vec<(Address, Address)>` | List of `(subscriber, merchant)` pairs to migrate |
+| `max_step` | `u32` | Maximum records to process in this single invocation (`1 <= max_step <= 50`) |
+
+#### Return value
+
+`Result<MigrationProgress, ContractError>`
+
+#### Error codes
+
+| Error | Code | Trigger |
+|-------|------|---------|
+| `NotInitialized` | 17 | Contract uninitialized |
+| `NotAdmin` | 16 | Caller ≠ stored admin |
+| `MigrationStepTooLarge` | 21 | `max_step == 0` or `max_step > 50` |
+| `InvalidLegacyRecord` | 20 | Legacy record violates validation; execution paused safely without partial writes |
+| `MigrationAlreadyCompleted` | 22 | Migration already completed |
+
+---
+
+### `get_migration_progress`
+
+Returns the current `MigrationProgress` (status, processed records, total records, cursor, failed record index, last error code).
+
+**Authorization:** None required (read-only query).
+
+---
+
+### `reset_migration`
+
+Resets the migration progress state back to `Idle`, allowing operators to resume or re-run migration after correcting legacy data.
+
+**Authorization:** `admin` must sign.
+
+---
+
 ### `get_version`
 
 Return the contract semantic version string (e.g. `"1.0.0"`). This is a compile-time constant — no storage read occurs.

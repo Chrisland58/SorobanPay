@@ -8,9 +8,11 @@ use soroban_sdk::{contract, contractimpl, symbol_short, token, Address, BytesN, 
 
 use crate::error::ContractError;
 use crate::storage::{
-    get_protocol_fee_config, has_execution_marker, set_protocol_fee_config, subscription_key,
-    write_execution_marker, DataKey, ProtocolFeeConfig, SubscriptionData, CONTRACT_VERSION,
-    CURRENT_SCHEMA_VERSION, MAX_AMOUNT, MAX_FEE_BPS, MAX_TTL_LEDGERS, MIN_TTL_LEDGERS,
+    get_migration_progress as get_stored_migration_progress, get_protocol_fee_config,
+    has_execution_marker, set_migration_progress, set_protocol_fee_config, subscription_key,
+    write_execution_marker, DataKey, MigrationProgress, MigrationStatus, ProtocolFeeConfig,
+    SubscriptionData, CONTRACT_VERSION, CURRENT_SCHEMA_VERSION, MAX_AMOUNT, MAX_FEE_BPS,
+    MAX_MIGRATION_STEP, MAX_TTL_LEDGERS, MIN_TTL_LEDGERS,
 };
 
 /// Maximum number of subscribers allowed in a single `batch_execute_payment` call.
@@ -326,6 +328,161 @@ impl SubscriptionProtocol {
 
         events::emit_contract_migrated(&env, &admin, CURRENT_SCHEMA_VERSION);
 
+        Ok(())
+    }
+
+    /// Execute bounded, resumable schema migration over a collection of subscription records.
+    ///
+    /// # Parameters
+    /// - `admin`: Stored administrator; must authorize invocation.
+    /// - `records`: Vector of (subscriber, merchant) subscription identifiers to migrate.
+    /// - `max_step`: Maximum number of records to process in this single invocation (<= 50).
+    ///
+    /// # Returns
+    /// Current `MigrationProgress` representing the state after executing this bounded step.
+    ///
+    /// # Errors
+    /// - `ContractError::NotInitialized` — admin not set.
+    /// - `ContractError::NotAdmin` — caller is not stored admin.
+    /// - `ContractError::MigrationStepTooLarge` — `max_step == 0` or `max_step > MAX_MIGRATION_STEP`.
+    /// - `ContractError::MigrationAlreadyCompleted` — migration status is already Completed.
+    /// - `ContractError::InvalidLegacyRecord` — encountered corrupted/invalid legacy record;
+    ///   halts execution, records progress marker with failed record index, and makes NO partial per-record writes.
+    pub fn migrate_records_bounded(
+        env: Env,
+        admin: Address,
+        records: Vec<(Address, Address)>,
+        max_step: u32,
+    ) -> Result<MigrationProgress, ContractError> {
+        admin.require_auth();
+
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(ContractError::NotInitialized)?;
+
+        if admin != stored_admin {
+            return Err(ContractError::NotAdmin);
+        }
+
+        if max_step == 0 || max_step > MAX_MIGRATION_STEP {
+            return Err(ContractError::MigrationStepTooLarge);
+        }
+
+        let mut progress = get_stored_migration_progress(&env);
+        let total_input = records.len();
+
+        if progress.status == MigrationStatus::Idle {
+            progress.status = MigrationStatus::InProgress;
+            progress.total_records = total_input;
+            progress.batch_cursor = 0;
+            progress.processed_records = 0;
+            progress.failed_record_index = None;
+            progress.last_error_code = None;
+        } else if progress.status == MigrationStatus::Completed {
+            return Err(ContractError::MigrationAlreadyCompleted);
+        } else if progress.status == MigrationStatus::Paused {
+            progress.status = MigrationStatus::InProgress;
+            progress.failed_record_index = None;
+            progress.last_error_code = None;
+        }
+
+        let start_cursor = progress.batch_cursor;
+        let end_cursor = core::cmp::min(start_cursor + max_step, records.len());
+
+        for i in start_cursor..end_cursor {
+            let (subscriber, merchant) = records.get(i).unwrap();
+            let hash = subscription_key(&env, &subscriber, &merchant);
+            let key = DataKey::Subscription(hash);
+
+            if let Some(sub_data) = env.storage().persistent().get::<DataKey, SubscriptionData>(&key) {
+                // Strict validation: invalid records report stable error without partial writes
+                if sub_data.amount <= 0
+                    || sub_data.amount > MAX_AMOUNT
+                    || sub_data.interval < 86_400
+                    || sub_data.interval > 31_536_000
+                    || sub_data.token == env.current_contract_address()
+                    || subscriber == merchant
+                {
+                    progress.status = MigrationStatus::Paused;
+                    progress.failed_record_index = Some(i);
+                    progress.last_error_code = Some(ContractError::InvalidLegacyRecord as u32);
+                    set_migration_progress(&env, &progress);
+                    events::emit_migration_interrupted(
+                        &env,
+                        &admin,
+                        i,
+                        ContractError::InvalidLegacyRecord as u32,
+                    );
+                    return Err(ContractError::InvalidLegacyRecord);
+                }
+
+                // Idempotent: record is valid; refresh storage TTL
+                env.storage()
+                    .persistent()
+                    .extend_ttl(&key, MIN_TTL_LEDGERS, MAX_TTL_LEDGERS);
+            } else {
+                // Record does not exist or unreadable: stop safely
+                progress.status = MigrationStatus::Paused;
+                progress.failed_record_index = Some(i);
+                progress.last_error_code = Some(ContractError::InvalidLegacyRecord as u32);
+                set_migration_progress(&env, &progress);
+                events::emit_migration_interrupted(
+                    &env,
+                    &admin,
+                    i,
+                    ContractError::InvalidLegacyRecord as u32,
+                );
+                return Err(ContractError::InvalidLegacyRecord);
+            }
+
+            progress.processed_records += 1;
+            progress.batch_cursor += 1;
+        }
+
+        if progress.batch_cursor >= records.len() {
+            progress.status = MigrationStatus::Completed;
+            env.storage()
+                .instance()
+                .set(&DataKey::SchemaVersion, &CURRENT_SCHEMA_VERSION);
+            events::emit_contract_migrated(&env, &admin, CURRENT_SCHEMA_VERSION);
+        } else {
+            events::emit_migration_step_completed(
+                &env,
+                &admin,
+                progress.processed_records,
+                progress.batch_cursor,
+            );
+        }
+
+        set_migration_progress(&env, &progress);
+        Ok(progress)
+    }
+
+    /// Read the current migration progress marker.
+    pub fn get_migration_progress(env: Env) -> MigrationProgress {
+        get_stored_migration_progress(&env)
+    }
+
+    /// Reset migration progress state to `Idle`.
+    ///
+    /// Requires admin authorization. Useful for operator recovery after correcting
+    /// corrupt legacy inputs.
+    pub fn reset_migration(env: Env, admin: Address) -> Result<(), ContractError> {
+        admin.require_auth();
+
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(ContractError::NotInitialized)?;
+
+        if admin != stored_admin {
+            return Err(ContractError::NotAdmin);
+        }
+
+        crate::storage::clear_migration_progress(&env);
         Ok(())
     }
 
@@ -1262,3 +1419,6 @@ mod regression_tests;
 
 #[cfg(test)]
 mod pause_resume_tests;
+
+#[cfg(test)]
+mod migration_recovery_tests;
