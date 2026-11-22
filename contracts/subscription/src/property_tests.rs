@@ -37,11 +37,11 @@ mod property_tests {
     // ─── Test environment setup ───────────────────────────────────────────────
 
     struct PropEnv {
-        env:         Env,
-        client:      SubscriptionProtocolClient,
-        subscriber:  Address,
-        merchant:    Address,
-        token:       Address,
+        env: Env,
+        client: SubscriptionProtocolClient,
+        subscriber: Address,
+        merchant: Address,
+        token: Address,
         contract_id: Address,
     }
 
@@ -53,20 +53,19 @@ mod property_tests {
             // Set a non-zero ledger timestamp so the contract doesn't return InvalidTimestamp.
             env.ledger().with_mut(|l| l.timestamp = 1_700_000_000_u64);
 
-            let admin      = Address::generate(&env);
+            let admin = Address::generate(&env);
             let subscriber = Address::generate(&env);
-            let merchant   = Address::generate(&env);
+            let merchant = Address::generate(&env);
 
             // Register SAC token and mint a large balance to the subscriber
             let token = env
                 .register_stellar_asset_contract_v2(admin.clone())
                 .address();
-            StellarAssetClient::new(&env, &token)
-                .mint(&subscriber, &(MAX_AMOUNT * 2));
+            StellarAssetClient::new(&env, &token).mint(&subscriber, &(MAX_AMOUNT * 2));
 
             // Deploy subscription contract
             let contract_id = env.register(SubscriptionProtocol, ());
-            let client      = SubscriptionProtocolClient::new(&env, &contract_id);
+            let client = SubscriptionProtocolClient::new(&env, &contract_id);
 
             // Approve contract to spend subscriber's tokens
             token::Client::new(&env, &token).approve(
@@ -76,7 +75,14 @@ mod property_tests {
                 &(env.ledger().sequence() + 1_000_000_u32),
             );
 
-            Self { env, client, subscriber, merchant, token, contract_id }
+            Self {
+                env,
+                client,
+                subscriber,
+                merchant,
+                token,
+                contract_id,
+            }
         }
     }
 
@@ -380,9 +386,9 @@ mod property_tests {
     #[test]
     fn prop_boundary_amount_minimum() {
         let p = PropEnv::new();
-        let result = p.client.try_subscribe(
-            &p.subscriber, &p.merchant, &p.token, &1_i128, &MIN_INTERVAL,
-        );
+        let result =
+            p.client
+                .try_subscribe(&p.subscriber, &p.merchant, &p.token, &1_i128, &MIN_INTERVAL);
         assert!(result.is_ok(), "amount=1 must succeed; got {:?}", result);
     }
 
@@ -391,9 +397,17 @@ mod property_tests {
     fn prop_boundary_amount_maximum() {
         let p = PropEnv::new();
         let result = p.client.try_subscribe(
-            &p.subscriber, &p.merchant, &p.token, &MAX_AMOUNT, &MIN_INTERVAL,
+            &p.subscriber,
+            &p.merchant,
+            &p.token,
+            &MAX_AMOUNT,
+            &MIN_INTERVAL,
         );
-        assert!(result.is_ok(), "amount=MAX_AMOUNT must succeed; got {:?}", result);
+        assert!(
+            result.is_ok(),
+            "amount=MAX_AMOUNT must succeed; got {:?}",
+            result
+        );
     }
 
     /// `amount = MAX_AMOUNT + 1` must always return `AmountTooLarge`.
@@ -401,7 +415,11 @@ mod property_tests {
     fn prop_boundary_amount_just_above_maximum() {
         let p = PropEnv::new();
         let result = p.client.try_subscribe(
-            &p.subscriber, &p.merchant, &p.token, &(MAX_AMOUNT + 1), &MIN_INTERVAL,
+            &p.subscriber,
+            &p.merchant,
+            &p.token,
+            &(MAX_AMOUNT + 1),
+            &MIN_INTERVAL,
         );
         assert!(
             matches!(result, Err(Ok(ContractError::AmountTooLarge))),
@@ -414,9 +432,9 @@ mod property_tests {
     #[test]
     fn prop_boundary_amount_zero() {
         let p = PropEnv::new();
-        let result = p.client.try_subscribe(
-            &p.subscriber, &p.merchant, &p.token, &0_i128, &MIN_INTERVAL,
-        );
+        let result =
+            p.client
+                .try_subscribe(&p.subscriber, &p.merchant, &p.token, &0_i128, &MIN_INTERVAL);
         assert!(
             matches!(result, Err(Ok(ContractError::AmountMustBePositive))),
             "amount=0 must return AmountMustBePositive; got {:?}",
@@ -429,9 +447,17 @@ mod property_tests {
     fn prop_boundary_interval_minimum() {
         let p = PropEnv::new();
         let result = p.client.try_subscribe(
-            &p.subscriber, &p.merchant, &p.token, &1_000_i128, &MIN_INTERVAL,
+            &p.subscriber,
+            &p.merchant,
+            &p.token,
+            &1_000_i128,
+            &MIN_INTERVAL,
         );
-        assert!(result.is_ok(), "interval=86_400 must succeed; got {:?}", result);
+        assert!(
+            result.is_ok(),
+            "interval=86_400 must succeed; got {:?}",
+            result
+        );
     }
 
     /// `interval = 86_399` (one below minimum) must return `IntervalTooShort`.
@@ -439,7 +465,11 @@ mod property_tests {
     fn prop_boundary_interval_just_below_minimum() {
         let p = PropEnv::new();
         let result = p.client.try_subscribe(
-            &p.subscriber, &p.merchant, &p.token, &1_000_i128, &(MIN_INTERVAL - 1),
+            &p.subscriber,
+            &p.merchant,
+            &p.token,
+            &1_000_i128,
+            &(MIN_INTERVAL - 1),
         );
         assert!(
             matches!(result, Err(Ok(ContractError::IntervalTooShort))),
@@ -453,9 +483,17 @@ mod property_tests {
     fn prop_boundary_interval_maximum() {
         let p = PropEnv::new();
         let result = p.client.try_subscribe(
-            &p.subscriber, &p.merchant, &p.token, &1_000_i128, &MAX_INTERVAL,
+            &p.subscriber,
+            &p.merchant,
+            &p.token,
+            &1_000_i128,
+            &MAX_INTERVAL,
         );
-        assert!(result.is_ok(), "interval=31_536_000 must succeed; got {:?}", result);
+        assert!(
+            result.is_ok(),
+            "interval=31_536_000 must succeed; got {:?}",
+            result
+        );
     }
 
     /// `interval = 31_536_001` (one above maximum) must return `IntervalTooLong`.
@@ -463,7 +501,11 @@ mod property_tests {
     fn prop_boundary_interval_just_above_maximum() {
         let p = PropEnv::new();
         let result = p.client.try_subscribe(
-            &p.subscriber, &p.merchant, &p.token, &1_000_i128, &(MAX_INTERVAL + 1),
+            &p.subscriber,
+            &p.merchant,
+            &p.token,
+            &1_000_i128,
+            &(MAX_INTERVAL + 1),
         );
         assert!(
             matches!(result, Err(Ok(ContractError::IntervalTooLong))),
@@ -936,23 +978,39 @@ mod property_tests {
         let amount = 1_i128;
 
         p.client.subscribe(
-            &p.subscriber, &p.merchant, &p.token, &amount, &MIN_INTERVAL, &false,
+            &p.subscriber,
+            &p.merchant,
+            &p.token,
+            &amount,
+            &MIN_INTERVAL,
+            &false,
         );
 
         let sub_before = balance(&p.env, &p.token, &p.subscriber);
         let mer_before = balance(&p.env, &p.token, &p.merchant);
 
         let ts = p.env.ledger().timestamp();
-        p.env.ledger().with_mut(|l| l.timestamp = ts + MIN_INTERVAL + 1);
+        p.env
+            .ledger()
+            .with_mut(|l| l.timestamp = ts + MIN_INTERVAL + 1);
 
         p.client.execute_payment(&p.subscriber, &p.merchant);
 
-        assert_eq!(sub_before - balance(&p.env, &p.token, &p.subscriber), amount,
-            "minimum amount: subscriber debit must equal 1");
-        assert_eq!(balance(&p.env, &p.token, &p.merchant) - mer_before, amount,
-            "minimum amount: merchant credit must equal 1");
-        assert_eq!(balance(&p.env, &p.token, &p.contract_id), 0_i128,
-            "contract must hold 0 after minimum-amount payment");
+        assert_eq!(
+            sub_before - balance(&p.env, &p.token, &p.subscriber),
+            amount,
+            "minimum amount: subscriber debit must equal 1"
+        );
+        assert_eq!(
+            balance(&p.env, &p.token, &p.merchant) - mer_before,
+            amount,
+            "minimum amount: merchant credit must equal 1"
+        );
+        assert_eq!(
+            balance(&p.env, &p.token, &p.contract_id),
+            0_i128,
+            "contract must hold 0 after minimum-amount payment"
+        );
     }
 
     /// Maximum valid amount (MAX_AMOUNT): conservation holds at the upper bound.
@@ -962,23 +1020,39 @@ mod property_tests {
         let amount = MAX_AMOUNT;
 
         p.client.subscribe(
-            &p.subscriber, &p.merchant, &p.token, &amount, &MIN_INTERVAL, &false,
+            &p.subscriber,
+            &p.merchant,
+            &p.token,
+            &amount,
+            &MIN_INTERVAL,
+            &false,
         );
 
         let sub_before = balance(&p.env, &p.token, &p.subscriber);
         let mer_before = balance(&p.env, &p.token, &p.merchant);
 
         let ts = p.env.ledger().timestamp();
-        p.env.ledger().with_mut(|l| l.timestamp = ts + MIN_INTERVAL + 1);
+        p.env
+            .ledger()
+            .with_mut(|l| l.timestamp = ts + MIN_INTERVAL + 1);
 
         p.client.execute_payment(&p.subscriber, &p.merchant);
 
-        assert_eq!(sub_before - balance(&p.env, &p.token, &p.subscriber), amount,
-            "maximum amount: subscriber debit must equal MAX_AMOUNT");
-        assert_eq!(balance(&p.env, &p.token, &p.merchant) - mer_before, amount,
-            "maximum amount: merchant credit must equal MAX_AMOUNT");
-        assert_eq!(balance(&p.env, &p.token, &p.contract_id), 0_i128,
-            "contract must hold 0 after maximum-amount payment");
+        assert_eq!(
+            sub_before - balance(&p.env, &p.token, &p.subscriber),
+            amount,
+            "maximum amount: subscriber debit must equal MAX_AMOUNT"
+        );
+        assert_eq!(
+            balance(&p.env, &p.token, &p.merchant) - mer_before,
+            amount,
+            "maximum amount: merchant credit must equal MAX_AMOUNT"
+        );
+        assert_eq!(
+            balance(&p.env, &p.token, &p.contract_id),
+            0_i128,
+            "contract must hold 0 after maximum-amount payment"
+        );
     }
 
     /// Double subscribe (update) followed by payment: amount used is the latest value.
@@ -990,18 +1064,30 @@ mod property_tests {
 
         // Subscribe with v1 amount
         p.client.subscribe(
-            &p.subscriber, &p.merchant, &p.token, &amount_v1, &MIN_INTERVAL, &false,
+            &p.subscriber,
+            &p.merchant,
+            &p.token,
+            &amount_v1,
+            &MIN_INTERVAL,
+            &false,
         );
         // Re-subscribe with v2 amount (overwrites v1)
         p.client.subscribe(
-            &p.subscriber, &p.merchant, &p.token, &amount_v2, &MIN_INTERVAL, &false,
+            &p.subscriber,
+            &p.merchant,
+            &p.token,
+            &amount_v2,
+            &MIN_INTERVAL,
+            &false,
         );
 
         let sub_before = balance(&p.env, &p.token, &p.subscriber);
         let mer_before = balance(&p.env, &p.token, &p.merchant);
 
         let ts = p.env.ledger().timestamp();
-        p.env.ledger().with_mut(|l| l.timestamp = ts + MIN_INTERVAL + 1);
+        p.env
+            .ledger()
+            .with_mut(|l| l.timestamp = ts + MIN_INTERVAL + 1);
 
         p.client.execute_payment(&p.subscriber, &p.merchant);
 

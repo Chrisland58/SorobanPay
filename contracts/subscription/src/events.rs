@@ -93,7 +93,7 @@ pub const EVENT_SCHEMA_VERSION: u32 = 1;
 #[contracttype]
 pub struct ExecutedEventData {
     /// Token units transferred in this payment (matches `SubscriptionData::amount`).
-    pub amount:       i128,
+    pub amount: i128,
     /// Unix timestamp of the next payment window (advanced by `interval` after this payment).
     pub next_payment: u64,
 }
@@ -117,7 +117,13 @@ pub fn emit_contract_deployed(env: &Env, version: &str) {
 /// Data:    amount (i128)
 ///
 /// Schema version: 1 (stable in v1.x.x — topic structure and data type are locked)
-pub fn emit_subscribe(env: &Env, subscriber: &Address, merchant: &Address, token: &Address, amount: i128) {
+pub fn emit_subscribe(
+    env: &Env,
+    subscriber: &Address,
+    merchant: &Address,
+    token: &Address,
+    amount: i128,
+) {
     env.events().publish(
         (
             Symbol::new(env, "subscribe"),
@@ -162,7 +168,12 @@ pub fn emit_updated(
 ///
 /// Topics:  (symbol("payment_transfer_success"), subscriber, merchant)
 /// Data:    amount (i128)
-pub fn emit_payment_transfer_success(env: &Env, subscriber: &Address, merchant: &Address, amount: i128) {
+pub fn emit_payment_transfer_success(
+    env: &Env,
+    subscriber: &Address,
+    merchant: &Address,
+    amount: i128,
+) {
     env.events().publish(
         (
             Symbol::new(env, "payment_transfer_success"),
@@ -182,7 +193,13 @@ pub fn emit_payment_transfer_success(env: &Env, subscriber: &Address, merchant: 
 /// Data:    (amount: i128, overdue_since: u64)
 ///
 /// Schema version: 1 (stable in v1.x.x — topic structure and data type are locked)
-pub fn emit_payment_transfer_failure(env: &Env, subscriber: &Address, merchant: &Address, amount: i128, overdue_since: u64) {
+pub fn emit_payment_transfer_failure(
+    env: &Env,
+    subscriber: &Address,
+    merchant: &Address,
+    amount: i128,
+    overdue_since: u64,
+) {
     env.events().publish(
         (
             Symbol::new(env, "payment_transfer_failure"),
@@ -204,7 +221,14 @@ pub fn emit_payment_transfer_failure(env: &Env, subscriber: &Address, merchant: 
 /// payment events deterministically (#1354).
 ///
 /// Schema version: 1 (stable in v1.x.x — topic structure and data type are locked)
-pub fn emit_executed(env: &Env, subscriber: &Address, merchant: &Address, token: &Address, amount: i128, nonce: u32) {
+pub fn emit_executed(
+    env: &Env,
+    subscriber: &Address,
+    merchant: &Address,
+    token: &Address,
+    amount: i128,
+    nonce: u32,
+) {
     env.events().publish(
         (
             Symbol::new(env, "executed"),
@@ -220,7 +244,14 @@ pub fn emit_executed(env: &Env, subscriber: &Address, merchant: &Address, token:
 ///
 /// Topics: `(expired, subscriber, merchant)`. The event has no data payload.
 pub fn emit_expired(env: &Env, subscriber: &Address, merchant: &Address) {
-    env.events().publish((Symbol::new(env, "expired"), subscriber.clone(), merchant.clone()), ());
+    env.events().publish(
+        (
+            Symbol::new(env, "expired"),
+            subscriber.clone(),
+            merchant.clone(),
+        ),
+        (),
+    );
 }
 
 /// Emit the `updated` event after a subscription has been updated in-place.
@@ -325,10 +356,7 @@ pub fn emit_batch_execute_initiated(env: &Env, merchant: &Address, batch_size: u
 /// Data:    new schema version (u32 as i128)
 pub fn emit_contract_migrated(env: &Env, admin: &Address, new_version: u32) {
     env.events().publish(
-        (
-            Symbol::new(env, "contract_migrated"),
-            admin.clone(),
-        ),
+        (Symbol::new(env, "contract_migrated"), admin.clone()),
         new_version as i128,
     );
 }
@@ -463,5 +491,28 @@ pub fn emit_insufficient_allowance(
             merchant.clone(),
         ),
         (allowance, required),
+    );
+}
+
+/// Emitted when a beneficiary split payment is distributed to a single recipient (#1609).
+/// One event per recipient per payment execution.
+///
+/// Topics: (symbol("split_payment"), subscriber, merchant, recipient)
+/// Data:   allocation (i128) — exact base-unit amount sent to this recipient
+pub fn emit_split_payment(
+    env: &Env,
+    subscriber: &Address,
+    merchant: &Address,
+    recipient: &Address,
+    allocation: i128,
+) {
+    env.events().publish(
+        (
+            Symbol::new(env, "split_payment"),
+            subscriber.clone(),
+            merchant.clone(),
+            recipient.clone(),
+        ),
+        allocation,
     );
 }
