@@ -55,6 +55,37 @@ pub enum DataKey {
     MaxAmount,
 }
 
+/// Status of a subscription schedule preview (#1612).
+#[contracttype]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[repr(u32)]
+pub enum ScheduleStatus {
+    /// Active and on-schedule (or awaiting next execution).
+    Active = 1,
+    /// Temporarily paused by subscriber.
+    Paused = 2,
+    /// Cancelled or non-existent subscription record.
+    Cancelled = 3,
+    /// Past due date awaiting collection or failed previous collection attempt.
+    Overdue = 4,
+}
+
+/// Deterministic schedule preview returned by read-only query (#1612).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SchedulePreview {
+    /// High-level schedule status.
+    pub status: ScheduleStatus,
+    /// Unix timestamp when the next payment is due (0 if cancelled).
+    pub next_due_time: u64,
+    /// True if payment window is currently open (now >= next_due_time and not paused).
+    pub is_executable: bool,
+    /// Timestamp when subscription first became overdue, if applicable.
+    pub overdue_since: Option<u64>,
+    /// Timestamp until which subscription is paused, if applicable.
+    pub paused_until: Option<u64>,
+}
+
 /// Persistent on-chain record for a subscription.
 ///
 /// ## Schema versioning
@@ -73,15 +104,15 @@ pub enum DataKey {
 #[derive(Clone, Debug)]
 pub struct SubscriptionData {
     /// SEP-41 token contract address
-    pub token:        Address,
+    pub token: Address,
     /// Payment amount per interval (strictly positive, <= MAX_AMOUNT)
-    pub amount:       i128,
+    pub amount: i128,
     /// Seconds between payments  [86_400, 31_536_000]
-    pub interval:     u64,
+    pub interval: u64,
     /// Unix timestamp of the next valid payment window
     pub next_payment: u64,
     /// True when subscription payments are suspended
-    pub is_paused:    bool,
+    pub is_paused: bool,
     /// Grace-period duration in seconds, if configured for this subscription.
     pub grace_period: Option<u64>,
     /// Timestamp until which payments are paused.
@@ -147,7 +178,9 @@ pub fn get_admin_config(env: &Env) -> AdminConfig {
     env.storage()
         .instance()
         .get(&DataKey::AdminConfig)
-        .unwrap_or(AdminConfig { max_subscribers_per_merchant: 0 })
+        .unwrap_or(AdminConfig {
+            max_subscribers_per_merchant: 0,
+        })
 }
 
 /// Persist the admin config to instance storage.
@@ -170,11 +203,9 @@ pub fn set_subscriber_count(env: &Env, merchant: &Address, count: u32) {
     env.storage()
         .persistent()
         .set(&DataKey::MerchantSubscriberCount(merchant.clone()), &count);
-    env.storage()
-        .persistent()
-        .extend_ttl(
-            &DataKey::MerchantSubscriberCount(merchant.clone()),
-            MIN_TTL_LEDGERS,
-            MAX_TTL_LEDGERS,
-        );
+    env.storage().persistent().extend_ttl(
+        &DataKey::MerchantSubscriberCount(merchant.clone()),
+        MIN_TTL_LEDGERS,
+        MAX_TTL_LEDGERS,
+    );
 }

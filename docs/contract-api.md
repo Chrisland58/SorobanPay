@@ -18,6 +18,7 @@ Full reference for all `SubscriptionProtocol` entry points, types, and error cod
    - [cancel](#cancel)
   - [expire_subscription](#expire_subscription)
    - [get_subscription](#get_subscription)
+   - [preview_schedule](#preview_schedule)
    - [initialize](#initialize)
    - [migrate](#migrate)
    - [get_version](#get_version)
@@ -45,6 +46,26 @@ The on-chain record persisted under `DataKey::Subscription(sha256(subscriber_xdr
 | `is_paused` | `bool` | — | `true` when subscription payments are suspended (reserved for future use) |
 
 **Amount units:** All `amount` values are in the token's smallest unit (stroops for USDC-equivalent tokens with 7 decimals: divide by `10_000_000` to get the display value). See [docs/token-decimals.md](token-decimals.md) for full guidance.
+
+### `ScheduleStatus`
+
+Enum representing subscription scheduling state returned by `preview_schedule`:
+- `Active` (1): Subscription is running and on-schedule.
+- `Paused` (2): Subscription is currently suspended or paused until a future timestamp.
+- `Cancelled` (3): Subscription does not exist or has been cancelled.
+- `Overdue` (4): Current ledger time has passed `next_due_time` or subscription has an `overdue_since` marker.
+
+### `SchedulePreview`
+
+Return type for `preview_schedule`:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `status` | `ScheduleStatus` | High-level schedule status |
+| `next_due_time` | `u64` | Ledger timestamp when next payment is due (0 if cancelled) |
+| `is_executable` | `bool` | `true` if payment window is currently open and payable |
+| `overdue_since` | `Option<u64>` | Timestamp when subscription first entered overdue state, if any |
+| `paused_until` | `Option<u64>` | Timestamp until which subscription is paused, if any |
 
 ### Storage key derivation
 
@@ -530,6 +551,37 @@ if (SorobanRpc.Api.isSimulationSuccess(simResult)) {
     console.log("Next payment due:", nextPaymentDate.toISOString());
   }
 }
+```
+
+---
+
+### `preview_schedule`
+
+Deterministic, read-only query that calculates the exact next due time and schedule status for a subscription without modifying contract storage, updating TTLs, or emitting events.
+
+**Authorization:** None required.
+
+#### Parameters
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `subscriber` | `Address` | Subscriber address |
+| `merchant` | `Address` | Merchant address |
+
+#### Return value
+
+`SchedulePreview` — Current schedule status (`Active`, `Paused`, `Cancelled`, or `Overdue`), `next_due_time`, `is_executable`, and associated paused/overdue metadata.
+
+#### CLI example
+
+```bash
+stellar contract invoke \
+  --id $CONTRACT_ID \
+  --source any-account \
+  --network testnet \
+  -- preview_schedule \
+  --subscriber GABC1234...SUBSCRIBER \
+  --merchant   GXYZ5678...MERCHANT
 ```
 
 ---

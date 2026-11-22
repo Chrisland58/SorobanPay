@@ -43,7 +43,7 @@ mod security_tests {
 
     use crate::{
         error::ContractError,
-        storage::{DataKey, MAX_AMOUNT, SubscriptionData, subscription_key},
+        storage::{subscription_key, DataKey, SubscriptionData, MAX_AMOUNT},
         SubscriptionProtocol, SubscriptionProtocolClient,
     };
 
@@ -591,8 +591,8 @@ mod security_tests {
             &s.subscriber,
             &s.subscriber, // self
             &s.token,
-            &MAX_AMOUNT,        // max valid amount
-            &31_536_000_u64,    // max valid interval
+            &MAX_AMOUNT,     // max valid amount
+            &31_536_000_u64, // max valid interval
             &false,
         );
         assert!(
@@ -1417,15 +1417,20 @@ mod security_tests {
         let interval = 86_400_u64;
 
         s.client.subscribe(
-            &s.subscriber, &s.merchant, &s.token,
-            &amount, &interval, &false,
+            &s.subscriber,
+            &s.merchant,
+            &s.token,
+            &amount,
+            &interval,
+            &false,
         );
 
         // Advance past due so execute_payment would normally succeed
         s.advance(interval + 1);
 
         // Pause the subscription (no auto-resume timestamp)
-        s.client.pause_subscription(&s.subscriber, &s.merchant, &s.token, &None);
+        s.client
+            .pause_subscription(&s.subscriber, &s.merchant, &s.token, &None);
 
         // execute_payment must be blocked
         let result = s.client.try_execute_payment(&s.subscriber, &s.merchant);
@@ -1437,8 +1442,10 @@ mod security_tests {
 
         // No tokens must have been moved
         let sub_bal = token::Client::new(&s.env, &s.token).balance(&s.subscriber);
-        assert_eq!(sub_bal, 10_000_000_i128,
-            "subscriber balance must be unchanged while paused");
+        assert_eq!(
+            sub_bal, 10_000_000_i128,
+            "subscriber balance must be unchanged while paused"
+        );
     }
 
     /// PAUSE-002: batch_execute_payment must skip paused subscriptions.
@@ -1455,16 +1462,26 @@ mod security_tests {
         let sub2 = Address::generate(&s.env);
         StellarAssetClient::new(&s.env, &s.token).mint(&sub2, &10_000_000_i128);
         token::Client::new(&s.env, &s.token).approve(
-            &sub2, &s.contract_id,
+            &sub2,
+            &s.contract_id,
             &(amount * 100),
             &(s.env.ledger().sequence() + 100_000_u32),
         );
 
-        s.client.subscribe(&s.subscriber, &s.merchant, &s.token, &amount, &interval, &false);
-        s.client.subscribe(&sub2, &s.merchant, &s.token, &amount, &interval, &false);
+        s.client.subscribe(
+            &s.subscriber,
+            &s.merchant,
+            &s.token,
+            &amount,
+            &interval,
+            &false,
+        );
+        s.client
+            .subscribe(&sub2, &s.merchant, &s.token, &amount, &interval, &false);
 
         // Pause the first subscriber only
-        s.client.pause_subscription(&s.subscriber, &s.merchant, &s.token, &None);
+        s.client
+            .pause_subscription(&s.subscriber, &s.merchant, &s.token, &None);
 
         s.advance(interval + 1);
 
@@ -1476,7 +1493,11 @@ mod security_tests {
         // results is Vec<(Address, bool)>
         let (addr0, ok0) = results.get(0).unwrap();
         let (addr1, ok1) = results.get(1).unwrap();
-        assert_eq!(addr0, s.subscriber.clone(), "first result must be the paused subscriber");
+        assert_eq!(
+            addr0,
+            s.subscriber.clone(),
+            "first result must be the paused subscriber"
+        );
         assert!(!ok0, "paused subscriber must produce false in batch");
         assert_eq!(addr1, sub2.clone());
         assert!(ok1, "active subscriber must produce true in batch");
@@ -1492,14 +1513,20 @@ mod security_tests {
         let interval = 86_400_u64;
 
         s.client.subscribe(
-            &s.subscriber, &s.merchant, &s.token,
-            &amount, &interval, &false,
+            &s.subscriber,
+            &s.merchant,
+            &s.token,
+            &amount,
+            &interval,
+            &false,
         );
         s.advance(interval + 1);
 
         // Pause then immediately resume
-        s.client.pause_subscription(&s.subscriber, &s.merchant, &s.token, &None);
-        s.client.resume_subscription(&s.subscriber, &s.merchant, &s.token);
+        s.client
+            .pause_subscription(&s.subscriber, &s.merchant, &s.token, &None);
+        s.client
+            .resume_subscription(&s.subscriber, &s.merchant, &s.token);
 
         // Advance past the new next_payment (resume resets it)
         s.advance(interval + 1);
@@ -1513,8 +1540,11 @@ mod security_tests {
 
         // Funds must have moved
         let sub_bal = token::Client::new(&s.env, &s.token).balance(&s.subscriber);
-        assert_eq!(sub_bal, 10_000_000_i128 - amount,
-            "payment amount must be deducted after resume");
+        assert_eq!(
+            sub_bal,
+            10_000_000_i128 - amount,
+            "payment amount must be deducted after resume"
+        );
     }
 
     /// PAUSE-004: Boundary — auto-resume at paused_until timestamp.
@@ -1529,24 +1559,26 @@ mod security_tests {
         let interval = 86_400_u64;
 
         s.client.subscribe(
-            &s.subscriber, &s.merchant, &s.token,
-            &amount, &interval, &false,
+            &s.subscriber,
+            &s.merchant,
+            &s.token,
+            &amount,
+            &interval,
+            &false,
         );
 
         let now = s.env.ledger().timestamp();
         let resume_at = now + interval / 2; // half an interval in the future
 
-        s.client.pause_subscription(
-            &s.subscriber, &s.merchant, &s.token,
-            &Some(resume_at),
-        );
+        s.client
+            .pause_subscription(&s.subscriber, &s.merchant, &s.token, &Some(resume_at));
 
         // Advance to just before resume_at — must still be paused
         s.advance(interval / 2 - 2);
         let result = s.client.try_execute_payment(&s.subscriber, &s.merchant);
         assert!(
             matches!(result, Err(Ok(ContractError::SubscriptionPaused)))
-            || matches!(result, Err(Ok(ContractError::PaymentNotDue))),
+                || matches!(result, Err(Ok(ContractError::PaymentNotDue))),
             "before resume_at must be paused or not due; got {:?}",
             result
         );
@@ -1573,15 +1605,20 @@ mod security_tests {
         let interval = 86_400_u64;
 
         s.client.subscribe(
-            &s.subscriber, &s.merchant, &s.token,
-            &amount, &interval, &false,
+            &s.subscriber,
+            &s.merchant,
+            &s.token,
+            &amount,
+            &interval,
+            &false,
         );
 
         // Advance to 1 second before due
         s.advance(interval - 1);
 
         // Pause
-        s.client.pause_subscription(&s.subscriber, &s.merchant, &s.token, &None);
+        s.client
+            .pause_subscription(&s.subscriber, &s.merchant, &s.token, &None);
 
         // Advance past due
         s.advance(2);
@@ -1606,8 +1643,12 @@ mod security_tests {
         // Set up subscription with full mock auth
         s.env.mock_all_auths();
         s.client.subscribe(
-            &s.subscriber, &s.merchant, &s.token,
-            &100_000_i128, &86_400_u64, &false,
+            &s.subscriber,
+            &s.merchant,
+            &s.token,
+            &100_000_i128,
+            &86_400_u64,
+            &false,
         );
 
         // Attacker attempts to pause the subscription
@@ -1616,17 +1657,13 @@ mod security_tests {
             invoke: &MockAuthInvoke {
                 contract: &s.contract_id,
                 fn_name: "pause_subscription",
-                args: (
-                    s.subscriber.clone(),
-                    s.merchant.clone(),
-                    s.token.clone(),
-                )
-                    .into_val(&s.env),
+                args: (s.subscriber.clone(), s.merchant.clone(), s.token.clone()).into_val(&s.env),
                 sub_invokes: &[],
             },
         }]);
         // subscriber.require_auth() must fail for attacker
-        s.client.pause_subscription(&s.subscriber, &s.merchant, &s.token, &None);
+        s.client
+            .pause_subscription(&s.subscriber, &s.merchant, &s.token, &None);
     }
 
     /// PAUSE-007: UNAUTHORIZED — attacker cannot resume a paused subscription.
@@ -1641,10 +1678,15 @@ mod security_tests {
         // Set up and pause with full mock auth
         s.env.mock_all_auths();
         s.client.subscribe(
-            &s.subscriber, &s.merchant, &s.token,
-            &100_000_i128, &86_400_u64, &false,
+            &s.subscriber,
+            &s.merchant,
+            &s.token,
+            &100_000_i128,
+            &86_400_u64,
+            &false,
         );
-        s.client.pause_subscription(&s.subscriber, &s.merchant, &s.token, &None);
+        s.client
+            .pause_subscription(&s.subscriber, &s.merchant, &s.token, &None);
 
         // Attacker attempts to resume
         s.env.mock_auths(&[MockAuth {
@@ -1652,17 +1694,13 @@ mod security_tests {
             invoke: &MockAuthInvoke {
                 contract: &s.contract_id,
                 fn_name: "resume_subscription",
-                args: (
-                    s.subscriber.clone(),
-                    s.merchant.clone(),
-                    s.token.clone(),
-                )
-                    .into_val(&s.env),
+                args: (s.subscriber.clone(), s.merchant.clone(), s.token.clone()).into_val(&s.env),
                 sub_invokes: &[],
             },
         }]);
         // subscriber.require_auth() must fail for attacker
-        s.client.resume_subscription(&s.subscriber, &s.merchant, &s.token);
+        s.client
+            .resume_subscription(&s.subscriber, &s.merchant, &s.token);
     }
 
     /// PAUSE-008: UNAUTHORIZED — merchant cannot pause a subscriber's subscription.
@@ -1676,8 +1714,12 @@ mod security_tests {
 
         s.env.mock_all_auths();
         s.client.subscribe(
-            &s.subscriber, &s.merchant, &s.token,
-            &100_000_i128, &86_400_u64, &false,
+            &s.subscriber,
+            &s.merchant,
+            &s.token,
+            &100_000_i128,
+            &86_400_u64,
+            &false,
         );
 
         // Merchant attempts to pause (must fail)
@@ -1686,16 +1728,12 @@ mod security_tests {
             invoke: &MockAuthInvoke {
                 contract: &s.contract_id,
                 fn_name: "pause_subscription",
-                args: (
-                    s.subscriber.clone(),
-                    s.merchant.clone(),
-                    s.token.clone(),
-                )
-                    .into_val(&s.env),
+                args: (s.subscriber.clone(), s.merchant.clone(), s.token.clone()).into_val(&s.env),
                 sub_invokes: &[],
             },
         }]);
-        s.client.pause_subscription(&s.subscriber, &s.merchant, &s.token, &None);
+        s.client
+            .pause_subscription(&s.subscriber, &s.merchant, &s.token, &None);
     }
 
     /// PAUSE-009: DUPLICATE — double-pause returns SubscriptionPaused.
@@ -1706,20 +1744,24 @@ mod security_tests {
     fn sec_double_pause_returns_subscription_paused() {
         let s = SecEnv::new_with_mock_auth();
         s.client.subscribe(
-            &s.subscriber, &s.merchant, &s.token,
-            &100_000_i128, &86_400_u64, &false,
+            &s.subscriber,
+            &s.merchant,
+            &s.token,
+            &100_000_i128,
+            &86_400_u64,
+            &false,
         );
 
         // First pause succeeds
-        let r1 = s.client.try_pause_subscription(
-            &s.subscriber, &s.merchant, &s.token, &None,
-        );
+        let r1 = s
+            .client
+            .try_pause_subscription(&s.subscriber, &s.merchant, &s.token, &None);
         assert!(r1.is_ok(), "first pause must succeed; got {:?}", r1);
 
         // Second pause must fail
-        let r2 = s.client.try_pause_subscription(
-            &s.subscriber, &s.merchant, &s.token, &None,
-        );
+        let r2 = s
+            .client
+            .try_pause_subscription(&s.subscriber, &s.merchant, &s.token, &None);
         assert!(
             matches!(r2, Err(Ok(ContractError::SubscriptionPaused))),
             "double-pause must return SubscriptionPaused; got {:?}",
@@ -1735,17 +1777,26 @@ mod security_tests {
     fn sec_double_resume_returns_subscription_not_paused() {
         let s = SecEnv::new_with_mock_auth();
         s.client.subscribe(
-            &s.subscriber, &s.merchant, &s.token,
-            &100_000_i128, &86_400_u64, &false,
+            &s.subscriber,
+            &s.merchant,
+            &s.token,
+            &100_000_i128,
+            &86_400_u64,
+            &false,
         );
 
         // Pause then resume
-        s.client.pause_subscription(&s.subscriber, &s.merchant, &s.token, &None);
-        let r1 = s.client.try_resume_subscription(&s.subscriber, &s.merchant, &s.token);
+        s.client
+            .pause_subscription(&s.subscriber, &s.merchant, &s.token, &None);
+        let r1 = s
+            .client
+            .try_resume_subscription(&s.subscriber, &s.merchant, &s.token);
         assert!(r1.is_ok(), "first resume must succeed; got {:?}", r1);
 
         // Second resume must fail
-        let r2 = s.client.try_resume_subscription(&s.subscriber, &s.merchant, &s.token);
+        let r2 = s
+            .client
+            .try_resume_subscription(&s.subscriber, &s.merchant, &s.token);
         assert!(
             matches!(r2, Err(Ok(ContractError::SubscriptionNotPaused))),
             "double-resume must return SubscriptionNotPaused; got {:?}",
@@ -1761,13 +1812,23 @@ mod security_tests {
     fn sec_get_subscription_accessible_while_paused() {
         let s = SecEnv::new_with_mock_auth();
         s.client.subscribe(
-            &s.subscriber, &s.merchant, &s.token,
-            &100_000_i128, &86_400_u64, &false,
+            &s.subscriber,
+            &s.merchant,
+            &s.token,
+            &100_000_i128,
+            &86_400_u64,
+            &false,
         );
-        s.client.pause_subscription(&s.subscriber, &s.merchant, &s.token, &None);
+        s.client
+            .pause_subscription(&s.subscriber, &s.merchant, &s.token, &None);
 
-        let result = s.client.get_subscription(&s.subscriber, &s.merchant, &s.token);
-        assert!(result.is_some(), "get_subscription must return data while paused");
+        let result = s
+            .client
+            .get_subscription(&s.subscriber, &s.merchant, &s.token);
+        assert!(
+            result.is_some(),
+            "get_subscription must return data while paused"
+        );
         let data = result.unwrap();
         assert!(data.is_paused, "is_paused must be true");
     }
@@ -1780,10 +1841,15 @@ mod security_tests {
     fn sec_cancel_accessible_while_paused() {
         let s = SecEnv::new_with_mock_auth();
         s.client.subscribe(
-            &s.subscriber, &s.merchant, &s.token,
-            &100_000_i128, &86_400_u64, &false,
+            &s.subscriber,
+            &s.merchant,
+            &s.token,
+            &100_000_i128,
+            &86_400_u64,
+            &false,
         );
-        s.client.pause_subscription(&s.subscriber, &s.merchant, &s.token, &None);
+        s.client
+            .pause_subscription(&s.subscriber, &s.merchant, &s.token, &None);
 
         let result = s.client.try_cancel(&s.subscriber, &s.merchant);
         assert!(
@@ -1806,20 +1872,26 @@ mod security_tests {
 
         // Grant very large allowance
         token::Client::new(&s.env, &s.token).approve(
-            &s.subscriber, &s.contract_id,
+            &s.subscriber,
+            &s.contract_id,
             &(amount * 1000),
             &(s.env.ledger().sequence() + 100_000_u32),
         );
 
         s.client.subscribe(
-            &s.subscriber, &s.merchant, &s.token,
-            &amount, &interval, &false,
+            &s.subscriber,
+            &s.merchant,
+            &s.token,
+            &amount,
+            &interval,
+            &false,
         );
 
         s.advance(interval + 1);
 
         // Pause the subscription
-        s.client.pause_subscription(&s.subscriber, &s.merchant, &s.token, &None);
+        s.client
+            .pause_subscription(&s.subscriber, &s.merchant, &s.token, &None);
 
         // Merchant attempts to collect — must be blocked by pause, not proceed to allowance
         let result = s.client.try_execute_payment(&s.subscriber, &s.merchant);
@@ -1831,8 +1903,10 @@ mod security_tests {
 
         // Funds must be intact
         let sub_bal = token::Client::new(&s.env, &s.token).balance(&s.subscriber);
-        assert_eq!(sub_bal, 10_000_000_i128,
-            "funds must be intact — pause guard must fire before any transfer logic");
+        assert_eq!(
+            sub_bal, 10_000_000_i128,
+            "funds must be intact — pause guard must fire before any transfer logic"
+        );
     }
 
     /// PAUSE-014: pause_subscription on a non-existent subscription returns NoActiveSubscription.
@@ -1840,9 +1914,9 @@ mod security_tests {
     fn sec_pause_nonexistent_subscription_returns_error() {
         let s = SecEnv::new_with_mock_auth();
         // No subscribe call
-        let result = s.client.try_pause_subscription(
-            &s.subscriber, &s.merchant, &s.token, &None,
-        );
+        let result = s
+            .client
+            .try_pause_subscription(&s.subscriber, &s.merchant, &s.token, &None);
         assert!(
             matches!(result, Err(Ok(ContractError::NoActiveSubscription))),
             "pause on non-existent subscription must return NoActiveSubscription; got {:?}",
@@ -1854,7 +1928,9 @@ mod security_tests {
     #[test]
     fn sec_resume_nonexistent_subscription_returns_error() {
         let s = SecEnv::new_with_mock_auth();
-        let result = s.client.try_resume_subscription(&s.subscriber, &s.merchant, &s.token);
+        let result = s
+            .client
+            .try_resume_subscription(&s.subscriber, &s.merchant, &s.token);
         assert!(
             matches!(result, Err(Ok(ContractError::NoActiveSubscription))),
             "resume on non-existent subscription must return NoActiveSubscription; got {:?}",
@@ -1898,12 +1974,8 @@ mod security_tests {
 
         // Remove all auth — update_subscription must panic
         s.env.mock_auths(&[]);
-        s.client.update_subscription(
-            &s.subscriber,
-            &s.merchant,
-            &2_000_i128,
-            &86_400_u64,
-        );
+        s.client
+            .update_subscription(&s.subscriber, &s.merchant, &2_000_i128, &86_400_u64);
     }
 
     /// INV-002: update_subscription panics when called with merchant auth instead of subscriber.
@@ -1938,12 +2010,8 @@ mod security_tests {
             },
         }]);
         // subscriber.require_auth() fails — merchant cannot update on subscriber's behalf
-        s.client.update_subscription(
-            &s.subscriber,
-            &s.merchant,
-            &2_000_i128,
-            &86_400_u64,
-        );
+        s.client
+            .update_subscription(&s.subscriber, &s.merchant, &2_000_i128, &86_400_u64);
     }
 
     /// INV-003: update_subscription panics when called with attacker auth.
@@ -1977,12 +2045,8 @@ mod security_tests {
             },
         }]);
         // subscriber.require_auth() fails for attacker
-        s.client.update_subscription(
-            &s.subscriber,
-            &s.merchant,
-            &2_000_i128,
-            &86_400_u64,
-        );
+        s.client
+            .update_subscription(&s.subscriber, &s.merchant, &2_000_i128, &86_400_u64);
     }
 
     /// INV-004: update_subscription succeeds with proper subscriber auth and
@@ -2017,12 +2081,9 @@ mod security_tests {
             },
         }]);
 
-        let result = s.client.try_update_subscription(
-            &s.subscriber,
-            &s.merchant,
-            &5_000_i128,
-            &172_800_u64,
-        );
+        let result =
+            s.client
+                .try_update_subscription(&s.subscriber, &s.merchant, &5_000_i128, &172_800_u64);
         assert!(
             result.is_ok(),
             "update_subscription with correct subscriber auth must succeed; got {:?}",
@@ -2035,7 +2096,10 @@ mod security_tests {
             .get_subscription(&s.subscriber, &s.merchant, &s.token)
             .expect("subscription must still exist after update");
         assert_eq!(sub.amount, 5_000_i128, "amount must be updated to 5_000");
-        assert_eq!(sub.interval, 172_800_u64, "interval must be updated to 172_800");
+        assert_eq!(
+            sub.interval, 172_800_u64,
+            "interval must be updated to 172_800"
+        );
     }
 
     /// INV-005: subscribe requires fresh auth on every call.
@@ -2099,12 +2163,8 @@ mod security_tests {
             &86_400_u64,
             &false,
         );
-        s.client.update_subscription(
-            &s.subscriber,
-            &s.merchant,
-            &2_000_i128,
-            &86_400_u64,
-        );
+        s.client
+            .update_subscription(&s.subscriber, &s.merchant, &2_000_i128, &86_400_u64);
 
         // Remove all auth — cancel must still require fresh subscriber auth
         s.env.mock_auths(&[]);
@@ -2125,12 +2185,8 @@ mod security_tests {
             &86_400_u64,
             &false,
         );
-        s.client.update_subscription(
-            &s.subscriber,
-            &s.merchant,
-            &2_000_i128,
-            &86_400_u64,
-        );
+        s.client
+            .update_subscription(&s.subscriber, &s.merchant, &2_000_i128, &86_400_u64);
         s.advance(86_401);
 
         // Remove all auth — execute_payment must require fresh merchant auth
@@ -2156,12 +2212,8 @@ mod security_tests {
 
         // Empty auth envelope — require_auth must fire and panic
         s.env.mock_auths(&[]);
-        s.client.update_subscription(
-            &s.subscriber,
-            &s.merchant,
-            &3_000_i128,
-            &86_400_u64,
-        );
+        s.client
+            .update_subscription(&s.subscriber, &s.merchant, &3_000_i128, &86_400_u64);
     }
 
     /// INV-009: A random operator address (not subscriber, not merchant) cannot
@@ -2200,12 +2252,7 @@ mod security_tests {
             },
         }]);
         // subscriber.require_auth() fails — operator is not the subscriber
-        s.client.update_subscription(
-            &s.subscriber,
-            &s.merchant,
-            &9_000_i128,
-            &86_400_u64,
-        );
+        s.client
+            .update_subscription(&s.subscriber, &s.merchant, &9_000_i128, &86_400_u64);
     }
-
 }
