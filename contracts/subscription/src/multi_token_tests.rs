@@ -18,12 +18,12 @@ use crate::{error::ContractError, SubscriptionProtocol, SubscriptionProtocolClie
 // ─── Shared test harness ──────────────────────────────────────────────────────
 
 struct MultiTokenEnv {
-    env:         Env,
-    client:      SubscriptionProtocolClient,
-    subscriber:  Address,
-    merchant:    Address,
-    token_a:     Address,
-    token_b:     Address,
+    env: Env,
+    client: SubscriptionProtocolClient,
+    subscriber: Address,
+    merchant: Address,
+    token_a: Address,
+    token_b: Address,
     contract_id: Address,
 }
 
@@ -33,15 +33,19 @@ impl MultiTokenEnv {
         env.mock_all_auths_allowing_non_root_auth();
         env.ledger().with_mut(|l| l.timestamp = 1_700_000_000_u64);
 
-        let admin      = Address::generate(&env);
+        let admin = Address::generate(&env);
         let subscriber = Address::generate(&env);
-        let merchant   = Address::generate(&env);
+        let merchant = Address::generate(&env);
 
-        let token_a = env.register_stellar_asset_contract_v2(admin.clone()).address();
-        let token_b = env.register_stellar_asset_contract_v2(admin.clone()).address();
+        let token_a = env
+            .register_stellar_asset_contract_v2(admin.clone())
+            .address();
+        let token_b = env
+            .register_stellar_asset_contract_v2(admin.clone())
+            .address();
 
         let contract_id = env.register(SubscriptionProtocol, ());
-        let client      = SubscriptionProtocolClient::new(&env, &contract_id);
+        let client = SubscriptionProtocolClient::new(&env, &contract_id);
 
         // Mint both tokens to subscriber.
         StellarAssetClient::new(&env, &token_a).mint(&subscriber, &10_000_000_i128);
@@ -57,7 +61,15 @@ impl MultiTokenEnv {
             );
         }
 
-        Self { env, client, subscriber, merchant, token_a, token_b, contract_id }
+        Self {
+            env,
+            client,
+            subscriber,
+            merchant,
+            token_a,
+            token_b,
+            contract_id,
+        }
     }
 
     fn advance(&self, secs: u64) {
@@ -78,13 +90,15 @@ impl MultiTokenEnv {
 fn same_pair_can_hold_independent_token_subscriptions() {
     let env = Env::default();
     env.mock_all_auths_allowing_non_root_auth();
-    let admin      = Address::generate(&env);
+    let admin = Address::generate(&env);
     let subscriber = Address::generate(&env);
-    let merchant   = Address::generate(&env);
-    let token_a    = env.register_stellar_asset_contract_v2(admin.clone()).address();
-    let token_b    = env.register_stellar_asset_contract_v2(admin).address();
+    let merchant = Address::generate(&env);
+    let token_a = env
+        .register_stellar_asset_contract_v2(admin.clone())
+        .address();
+    let token_b = env.register_stellar_asset_contract_v2(admin).address();
     let contract_id = env.register(SubscriptionProtocol, ());
-    let client     = SubscriptionProtocolClient::new(&env, &contract_id);
+    let client = SubscriptionProtocolClient::new(&env, &contract_id);
 
     for token_address in [&token_a, &token_b] {
         StellarAssetClient::new(&env, token_address).mint(&subscriber, &10_000_i128);
@@ -104,12 +118,20 @@ fn same_pair_can_hold_independent_token_subscriptions() {
         );
     }
 
-    assert!(client.get_subscription(&subscriber, &merchant, &token_a).is_some());
-    assert!(client.get_subscription(&subscriber, &merchant, &token_b).is_some());
+    assert!(client
+        .get_subscription(&subscriber, &merchant, &token_a)
+        .is_some());
+    assert!(client
+        .get_subscription(&subscriber, &merchant, &token_b)
+        .is_some());
 
     client.cancel(&subscriber, &merchant, &token_a);
-    assert!(client.get_subscription(&subscriber, &merchant, &token_a).is_none());
-    assert!(client.get_subscription(&subscriber, &merchant, &token_b).is_some());
+    assert!(client
+        .get_subscription(&subscriber, &merchant, &token_a)
+        .is_none());
+    assert!(client
+        .get_subscription(&subscriber, &merchant, &token_b)
+        .is_some());
 }
 
 // ─── New isolation tests ───────────────────────────────────────────────────────
@@ -122,17 +144,35 @@ fn same_pair_can_hold_independent_token_subscriptions() {
 fn cancel_token_a_leaves_token_b_intact() {
     let m = MultiTokenEnv::new();
 
-    m.client.subscribe(&m.subscriber, &m.merchant, &m.token_a, &1_000_i128, &86_400_u64, &false);
-    m.client.subscribe(&m.subscriber, &m.merchant, &m.token_b, &2_000_i128, &86_400_u64, &false);
+    m.client.subscribe(
+        &m.subscriber,
+        &m.merchant,
+        &m.token_a,
+        &1_000_i128,
+        &86_400_u64,
+        &false,
+    );
+    m.client.subscribe(
+        &m.subscriber,
+        &m.merchant,
+        &m.token_b,
+        &2_000_i128,
+        &86_400_u64,
+        &false,
+    );
 
     m.client.cancel(&m.subscriber, &m.merchant, &m.token_a);
 
     assert!(
-        m.client.get_subscription(&m.subscriber, &m.merchant, &m.token_a).is_none(),
+        m.client
+            .get_subscription(&m.subscriber, &m.merchant, &m.token_a)
+            .is_none(),
         "token_a subscription must be removed after cancel"
     );
 
-    let sub_b = m.client.get_subscription(&m.subscriber, &m.merchant, &m.token_b);
+    let sub_b = m
+        .client
+        .get_subscription(&m.subscriber, &m.merchant, &m.token_b);
     assert!(
         sub_b.is_some(),
         "token_b subscription must remain after cancelling token_a"
@@ -150,32 +190,51 @@ fn execute_payment_token_a_does_not_affect_token_b_balance() {
     let amt_a = 500_i128;
     let amt_b = 999_i128;
 
-    m.client.subscribe(&m.subscriber, &m.merchant, &m.token_a, &amt_a, &86_400_u64, &false);
-    m.client.subscribe(&m.subscriber, &m.merchant, &m.token_b, &amt_b, &86_400_u64, &false);
+    m.client.subscribe(
+        &m.subscriber,
+        &m.merchant,
+        &m.token_a,
+        &amt_a,
+        &86_400_u64,
+        &false,
+    );
+    m.client.subscribe(
+        &m.subscriber,
+        &m.merchant,
+        &m.token_b,
+        &amt_b,
+        &86_400_u64,
+        &false,
+    );
 
     let sub_bal_b_before = m.balance(&m.subscriber, &m.token_b);
-    let mer_bal_b_before = m.balance(&m.merchant,   &m.token_b);
+    let mer_bal_b_before = m.balance(&m.merchant, &m.token_b);
 
     m.advance(86_401);
-    m.client.execute_payment(&m.subscriber, &m.merchant, &m.token_a);
+    m.client
+        .execute_payment(&m.subscriber, &m.merchant, &m.token_a);
 
     // token_a balances changed as expected.
     assert_eq!(
-        m.balance(&m.subscriber, &m.token_a), 10_000_000 - amt_a,
+        m.balance(&m.subscriber, &m.token_a),
+        10_000_000 - amt_a,
         "subscriber token_a balance must decrease by amt_a"
     );
     assert_eq!(
-        m.balance(&m.merchant, &m.token_a), amt_a,
+        m.balance(&m.merchant, &m.token_a),
+        amt_a,
         "merchant token_a balance must increase by amt_a"
     );
 
     // token_b balances must be completely unchanged.
     assert_eq!(
-        m.balance(&m.subscriber, &m.token_b), sub_bal_b_before,
+        m.balance(&m.subscriber, &m.token_b),
+        sub_bal_b_before,
         "subscriber token_b balance must not change when token_a payment is executed"
     );
     assert_eq!(
-        m.balance(&m.merchant, &m.token_b), mer_bal_b_before,
+        m.balance(&m.merchant, &m.token_b),
+        mer_bal_b_before,
         "merchant token_b balance must not change when token_a payment is executed"
     );
 }
@@ -188,21 +247,60 @@ fn execute_payment_token_a_does_not_affect_token_b_balance() {
 fn resubscribe_token_a_does_not_mutate_token_b_state() {
     let m = MultiTokenEnv::new();
 
-    m.client.subscribe(&m.subscriber, &m.merchant, &m.token_a, &1_000_i128, &86_400_u64,  &false);
-    m.client.subscribe(&m.subscriber, &m.merchant, &m.token_b, &2_000_i128, &172_800_u64, &false);
+    m.client.subscribe(
+        &m.subscriber,
+        &m.merchant,
+        &m.token_a,
+        &1_000_i128,
+        &86_400_u64,
+        &false,
+    );
+    m.client.subscribe(
+        &m.subscriber,
+        &m.merchant,
+        &m.token_b,
+        &2_000_i128,
+        &172_800_u64,
+        &false,
+    );
 
     // Re-subscribe token_a with different amount and interval.
-    m.client.subscribe(&m.subscriber, &m.merchant, &m.token_a, &3_000_i128, &259_200_u64, &false);
+    m.client.subscribe(
+        &m.subscriber,
+        &m.merchant,
+        &m.token_a,
+        &3_000_i128,
+        &259_200_u64,
+        &false,
+    );
 
-    let sub_a = m.client.get_subscription(&m.subscriber, &m.merchant, &m.token_a).unwrap();
-    let sub_b = m.client.get_subscription(&m.subscriber, &m.merchant, &m.token_b).unwrap();
+    let sub_a = m
+        .client
+        .get_subscription(&m.subscriber, &m.merchant, &m.token_a)
+        .unwrap();
+    let sub_b = m
+        .client
+        .get_subscription(&m.subscriber, &m.merchant, &m.token_b)
+        .unwrap();
 
-    assert_eq!(sub_a.amount,   3_000_i128,   "token_a amount must reflect the update");
-    assert_eq!(sub_a.interval, 259_200_u64,  "token_a interval must reflect the update");
+    assert_eq!(
+        sub_a.amount, 3_000_i128,
+        "token_a amount must reflect the update"
+    );
+    assert_eq!(
+        sub_a.interval, 259_200_u64,
+        "token_a interval must reflect the update"
+    );
 
     // token_b record must be completely unchanged.
-    assert_eq!(sub_b.amount,   2_000_i128,   "token_b amount must not change when token_a is updated");
-    assert_eq!(sub_b.interval, 172_800_u64,  "token_b interval must not change");
+    assert_eq!(
+        sub_b.amount, 2_000_i128,
+        "token_b amount must not change when token_a is updated"
+    );
+    assert_eq!(
+        sub_b.interval, 172_800_u64,
+        "token_b interval must not change"
+    );
 }
 
 /// `next_payment` timestamps are tracked independently per token.
@@ -211,25 +309,43 @@ fn resubscribe_token_a_does_not_mutate_token_b_state() {
 /// the token_b field must remain at its original value.
 #[test]
 fn next_payment_advances_only_for_paid_token() {
-    let m   = MultiTokenEnv::new();
+    let m = MultiTokenEnv::new();
     let ivl = 86_400_u64;
 
-    m.client.subscribe(&m.subscriber, &m.merchant, &m.token_a, &100_i128, &ivl, &false);
-    m.client.subscribe(&m.subscriber, &m.merchant, &m.token_b, &200_i128, &ivl, &false);
+    m.client.subscribe(
+        &m.subscriber,
+        &m.merchant,
+        &m.token_a,
+        &100_i128,
+        &ivl,
+        &false,
+    );
+    m.client.subscribe(
+        &m.subscriber,
+        &m.merchant,
+        &m.token_b,
+        &200_i128,
+        &ivl,
+        &false,
+    );
 
-    let next_b_before = m.client
+    let next_b_before = m
+        .client
         .get_subscription(&m.subscriber, &m.merchant, &m.token_b)
         .unwrap()
         .next_payment;
 
     m.advance(ivl + 1);
-    m.client.execute_payment(&m.subscriber, &m.merchant, &m.token_a);
+    m.client
+        .execute_payment(&m.subscriber, &m.merchant, &m.token_a);
 
-    let next_a_after = m.client
+    let next_a_after = m
+        .client
         .get_subscription(&m.subscriber, &m.merchant, &m.token_a)
         .unwrap()
         .next_payment;
-    let next_b_after = m.client
+    let next_b_after = m
+        .client
         .get_subscription(&m.subscriber, &m.merchant, &m.token_b)
         .unwrap()
         .next_payment;
@@ -254,16 +370,22 @@ fn three_tokens_cancel_middle_leaves_first_and_third_intact() {
     env.mock_all_auths_allowing_non_root_auth();
     env.ledger().with_mut(|l| l.timestamp = 1_700_000_000_u64);
 
-    let admin      = Address::generate(&env);
+    let admin = Address::generate(&env);
     let subscriber = Address::generate(&env);
-    let merchant   = Address::generate(&env);
+    let merchant = Address::generate(&env);
 
-    let token0 = env.register_stellar_asset_contract_v2(admin.clone()).address();
-    let token1 = env.register_stellar_asset_contract_v2(admin.clone()).address();
-    let token2 = env.register_stellar_asset_contract_v2(admin.clone()).address();
+    let token0 = env
+        .register_stellar_asset_contract_v2(admin.clone())
+        .address();
+    let token1 = env
+        .register_stellar_asset_contract_v2(admin.clone())
+        .address();
+    let token2 = env
+        .register_stellar_asset_contract_v2(admin.clone())
+        .address();
 
     let contract_id = env.register(SubscriptionProtocol, ());
-    let client      = SubscriptionProtocolClient::new(&env, &contract_id);
+    let client = SubscriptionProtocolClient::new(&env, &contract_id);
 
     for tok in [&token0, &token1, &token2] {
         StellarAssetClient::new(&env, tok).mint(&subscriber, &10_000_i128);
@@ -280,15 +402,21 @@ fn three_tokens_cancel_middle_leaves_first_and_third_intact() {
     client.cancel(&subscriber, &merchant, &token1);
 
     assert!(
-        client.get_subscription(&subscriber, &merchant, &token0).is_some(),
+        client
+            .get_subscription(&subscriber, &merchant, &token0)
+            .is_some(),
         "first token subscription must remain after cancelling middle"
     );
     assert!(
-        client.get_subscription(&subscriber, &merchant, &token1).is_none(),
+        client
+            .get_subscription(&subscriber, &merchant, &token1)
+            .is_none(),
         "middle token subscription must be removed"
     );
     assert!(
-        client.get_subscription(&subscriber, &merchant, &token2).is_some(),
+        client
+            .get_subscription(&subscriber, &merchant, &token2)
+            .is_some(),
         "third token subscription must remain after cancelling middle"
     );
 }
@@ -301,8 +429,22 @@ fn three_tokens_cancel_middle_leaves_first_and_third_intact() {
 fn cancel_without_allowance_does_not_affect_other_token_state() {
     let m = MultiTokenEnv::new();
 
-    m.client.subscribe(&m.subscriber, &m.merchant, &m.token_a, &1_000_i128, &86_400_u64, &false);
-    m.client.subscribe(&m.subscriber, &m.merchant, &m.token_b, &1_000_i128, &86_400_u64, &false);
+    m.client.subscribe(
+        &m.subscriber,
+        &m.merchant,
+        &m.token_a,
+        &1_000_i128,
+        &86_400_u64,
+        &false,
+    );
+    m.client.subscribe(
+        &m.subscriber,
+        &m.merchant,
+        &m.token_b,
+        &1_000_i128,
+        &86_400_u64,
+        &false,
+    );
 
     // Revoke token_b allowance entirely.
     token::Client::new(&m.env, &m.token_b).approve(
@@ -316,13 +458,15 @@ fn cancel_without_allowance_does_not_affect_other_token_state() {
     m.client.cancel(&m.subscriber, &m.merchant, &m.token_b);
 
     // token_a subscription must be fully intact.
-    let sub_a = m.client.get_subscription(&m.subscriber, &m.merchant, &m.token_a);
+    let sub_a = m
+        .client
+        .get_subscription(&m.subscriber, &m.merchant, &m.token_a);
     assert!(sub_a.is_some(), "token_a subscription must remain intact");
     assert_eq!(sub_a.unwrap().amount, 1_000_i128);
 
     // token_a allowance must not have been affected.
-    let allowance_a = token::Client::new(&m.env, &m.token_a)
-        .allowance(&m.subscriber, &m.contract_id);
+    let allowance_a =
+        token::Client::new(&m.env, &m.token_a).allowance(&m.subscriber, &m.contract_id);
     assert!(
         allowance_a >= 1_000_i128,
         "token_a allowance must not be reduced when token_b subscription is cancelled"
@@ -338,12 +482,21 @@ fn execute_payment_wrong_token_returns_no_active_subscription() {
     let m = MultiTokenEnv::new();
 
     // Subscribe only for token_a.
-    m.client.subscribe(&m.subscriber, &m.merchant, &m.token_a, &500_i128, &86_400_u64, &false);
+    m.client.subscribe(
+        &m.subscriber,
+        &m.merchant,
+        &m.token_a,
+        &500_i128,
+        &86_400_u64,
+        &false,
+    );
 
     m.advance(86_401);
 
     // Attempt to collect with token_b — no subscription exists for this triple.
-    let result = m.client.try_execute_payment(&m.subscriber, &m.merchant, &m.token_b);
+    let result = m
+        .client
+        .try_execute_payment(&m.subscriber, &m.merchant, &m.token_b);
     assert!(
         matches!(result, Err(Ok(ContractError::NoActiveSubscription))),
         "execute_payment with wrong token must return NoActiveSubscription, got {:?}",
@@ -357,23 +510,40 @@ fn execute_payment_wrong_token_returns_no_active_subscription() {
 /// Verifies that payment windows are tracked independently per token.
 #[test]
 fn paying_token_a_does_not_affect_token_b_payment_window() {
-    let m   = MultiTokenEnv::new();
+    let m = MultiTokenEnv::new();
     let ivl = 86_400_u64;
 
-    m.client.subscribe(&m.subscriber, &m.merchant, &m.token_a, &100_i128, &ivl, &false);
-    m.client.subscribe(&m.subscriber, &m.merchant, &m.token_b, &200_i128, &ivl, &false);
+    m.client.subscribe(
+        &m.subscriber,
+        &m.merchant,
+        &m.token_a,
+        &100_i128,
+        &ivl,
+        &false,
+    );
+    m.client.subscribe(
+        &m.subscriber,
+        &m.merchant,
+        &m.token_b,
+        &200_i128,
+        &ivl,
+        &false,
+    );
 
     m.advance(ivl + 1);
 
     // Pay token_a.
-    m.client.execute_payment(&m.subscriber, &m.merchant, &m.token_a);
+    m.client
+        .execute_payment(&m.subscriber, &m.merchant, &m.token_a);
 
     // token_b is still due — it has its own independent payment window.
     let mer_bal_b_before = m.balance(&m.merchant, &m.token_b);
-    m.client.execute_payment(&m.subscriber, &m.merchant, &m.token_b);
+    m.client
+        .execute_payment(&m.subscriber, &m.merchant, &m.token_b);
 
     assert_eq!(
-        m.balance(&m.merchant, &m.token_b), mer_bal_b_before + 200_i128,
+        m.balance(&m.merchant, &m.token_b),
+        mer_bal_b_before + 200_i128,
         "token_b payment must go through independently after token_a is paid"
     );
 }
@@ -390,11 +560,13 @@ fn distinct_pairs_with_same_token_are_isolated() {
     env.ledger().with_mut(|l| l.timestamp = 1_700_000_000_u64);
 
     let admin = Address::generate(&env);
-    let token = env.register_stellar_asset_contract_v2(admin.clone()).address();
+    let token = env
+        .register_stellar_asset_contract_v2(admin.clone())
+        .address();
 
-    let sub_a  = Address::generate(&env);
-    let sub_b  = Address::generate(&env);
-    let merch  = Address::generate(&env);
+    let sub_a = Address::generate(&env);
+    let sub_b = Address::generate(&env);
+    let merch = Address::generate(&env);
 
     let contract_id = env.register(SubscriptionProtocol, ());
     let client = SubscriptionProtocolClient::new(&env, &contract_id);
@@ -402,7 +574,9 @@ fn distinct_pairs_with_same_token_are_isolated() {
     for sub in [&sub_a, &sub_b] {
         StellarAssetClient::new(&env, &token).mint(sub, &10_000_i128);
         token::Client::new(&env, &token).approve(
-            sub, &contract_id, &5_000_i128,
+            sub,
+            &contract_id,
+            &5_000_i128,
             &(env.ledger().sequence() + 100_000_u32),
         );
     }
@@ -422,7 +596,10 @@ fn distinct_pairs_with_same_token_are_isolated() {
         "sub_b subscription must remain after sub_a cancels"
     );
     assert_eq!(
-        client.get_subscription(&sub_b, &merch, &token).unwrap().amount,
+        client
+            .get_subscription(&sub_b, &merch, &token)
+            .unwrap()
+            .amount,
         200_i128
     );
 }
