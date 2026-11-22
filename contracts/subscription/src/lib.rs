@@ -9,8 +9,9 @@ use soroban_sdk::{contract, contractimpl, symbol_short, token, Address, BytesN, 
 use crate::error::ContractError;
 use crate::storage::{
     get_protocol_fee_config, has_execution_marker, set_protocol_fee_config, subscription_key,
-    write_execution_marker, DataKey, ProtocolFeeConfig, SubscriptionData, CONTRACT_VERSION,
-    CURRENT_SCHEMA_VERSION, MAX_AMOUNT, MAX_FEE_BPS, MAX_TTL_LEDGERS, MIN_TTL_LEDGERS,
+    write_execution_marker, AdminConfig, DataKey, ProtocolFeeConfig, SubscriptionData,
+    CONTRACT_VERSION, CURRENT_SCHEMA_VERSION, DEFAULT_MAX_HORIZON, MAX_AMOUNT, MAX_FEE_BPS,
+    MAX_TTL_LEDGERS, MIN_TTL_LEDGERS,
 };
 
 /// Maximum number of subscribers allowed in a single `batch_execute_payment` call.
@@ -31,6 +32,29 @@ fn ledger_timestamp(env: &Env) -> Result<u64, ContractError> {
 fn checked_next_payment(ts: u64, interval: u64) -> Result<u64, ContractError> {
     ts.checked_add(interval)
         .ok_or(ContractError::InvalidTimestamp)
+}
+
+/// Validate that a schedule interval or next payment time does not exceed the maximum supported horizon
+/// relative to current ledger time, and that arithmetic does not overflow (#1607).
+#[inline]
+fn validate_schedule_horizon(
+    now: u64,
+    interval: u64,
+    max_horizon: u64,
+) -> Result<u64, ContractError> {
+    if interval > max_horizon {
+        return Err(ContractError::ScheduleHorizonExceeded);
+    }
+    let next_payment = now
+        .checked_add(interval)
+        .ok_or(ContractError::InvalidTimestamp)?;
+    let max_allowed = now
+        .checked_add(max_horizon)
+        .ok_or(ContractError::InvalidTimestamp)?;
+    if next_payment > max_allowed {
+        return Err(ContractError::ScheduleHorizonExceeded);
+    }
+    Ok(next_payment)
 }
 
 /// Enforce the time-lock for a single subscription entry.
@@ -212,7 +236,13 @@ impl SubscriptionProtocol {
         env.storage()
             .instance()
             .set(&DataKey::SchemaVersion, &CURRENT_SCHEMA_VERSION);
-        env.storage().instance().set(&DataKey::AdminConfig, &AdminConfig { admin, max_amount: MAX_AMOUNT });
+        env.storage().instance().set(
+            &DataKey::AdminConfig,
+            &AdminConfig {
+                admin,
+                max_amount: MAX_AMOUNT,
+            },
+        );
     }
 
     /// Compatibility alias for [`initialize`].
@@ -225,7 +255,9 @@ impl SubscriptionProtocol {
     ///
     /// # Returns
     /// Nothing. Panics if the contract has already been initialized.
-    pub fn init(env: Env, admin: Address) { Self::initialize(env, admin) }
+    pub fn init(env: Env, admin: Address) {
+        Self::initialize(env, admin)
+    }
 
     /// Read the administrator and amount limit configuration.
     ///
@@ -237,7 +269,10 @@ impl SubscriptionProtocol {
     ///
     /// No authorization is required.
     pub fn get_config(env: Env) -> Result<AdminConfig, ContractError> {
-        env.storage().instance().get(&DataKey::AdminConfig).ok_or(ContractError::NotInitialized)
+        env.storage()
+            .instance()
+            .get(&DataKey::AdminConfig)
+            .ok_or(ContractError::NotInitialized)
     }
 
     /// Change the maximum amount accepted by `subscribe`.
@@ -255,12 +290,51 @@ impl SubscriptionProtocol {
     /// - `ContractError::NotAdmin` — `admin` is not the stored administrator.
     pub fn set_max_amount(env: Env, admin: Address, new_max: i128) -> Result<(), ContractError> {
         admin.require_auth();
-        if new_max <= 0 || new_max > MAX_AMOUNT { return Err(ContractError::AmountTooLarge); }
+        if new_max <= 0 || new_max > MAX_AMOUNT {
+            return Err(ContractError::AmountTooLarge);
+        }
         let mut config: AdminConfig = Self::get_config(env.clone())?;
-        if config.admin != admin { return Err(ContractError::NotAdmin); }
+        if config.admin != admin {
+            return Err(ContractError::NotAdmin);
+        }
         config.max_amount = new_max;
         env.storage().instance().set(&DataKey::AdminConfig, &config);
         Ok(())
+    }
+
+    /// Configure the maximum supported subscription schedule horizon (#1607).
+    ///
+    /// # Governance
+    /// Only the stored contract administrator can invoke this method.
+    ///
+    /// # Unit & Constraints
+    /// Units: Seconds (`u64`). Must be in `86_400..=315_360_000` (1 day to 10 years).
+    pub fn set_max_horizon(
+        env: Env,
+        admin: Address,
+        new_horizon: u64,
+    ) -> Result<(), ContractError> {
+        admin.require_auth();
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(ContractError::NotInitialized)?;
+        if admin != stored_admin {
+            return Err(ContractError::NotAdmin);
+        }
+        if new_horizon < 86_400 || new_horizon > 315_360_000 {
+            return Err(ContractError::InvalidHorizon);
+        }
+        let old_horizon = storage::get_max_horizon(&env);
+        storage::set_max_horizon(&env, new_horizon);
+        events::emit_max_horizon_updated(&env, &admin, old_horizon, new_horizon);
+        Ok(())
+    }
+
+    /// Read the currently configured maximum supported subscription horizon in seconds (#1607).
+    pub fn get_max_horizon(env: Env) -> u64 {
+        storage::get_max_horizon(&env)
     }
 
     /// Return the contract semantic version string (for example, `"1.0.0"`).
@@ -373,7 +447,13 @@ impl SubscriptionProtocol {
             return Err(ContractError::FeeBpsTooHigh);
         }
 
-        set_protocol_fee_config(&env, ProtocolFeeConfig { fee_bps, fee_collector });
+        set_protocol_fee_config(
+            &env,
+            ProtocolFeeConfig {
+                fee_bps,
+                fee_collector,
+            },
+        );
 
         Ok(())
     }
@@ -445,10 +525,7 @@ impl SubscriptionProtocol {
     ///
     /// # Parameters
     /// - `merchant`: Merchant whose active subscriptions are queried.
-    pub fn get_merchant_subscriptions(
-        env: Env,
-        merchant: Address,
-    ) -> Vec<SubscriptionEntry> {
+    pub fn get_merchant_subscriptions(env: Env, merchant: Address) -> Vec<SubscriptionEntry> {
         let roster_key = DataKey::MerchantSubscribers(merchant.clone());
         let subscribers: Vec<Address> = env
             .storage()
@@ -460,7 +537,11 @@ impl SubscriptionProtocol {
         for subscriber in subscribers.iter() {
             let hash = subscription_key(&env, &subscriber, &merchant);
             let key = DataKey::Subscription(hash);
-            if let Some(data) = env.storage().persistent().get::<DataKey, SubscriptionData>(&key) {
+            if let Some(data) = env
+                .storage()
+                .persistent()
+                .get::<DataKey, SubscriptionData>(&key)
+            {
                 entries.push_back(SubscriptionEntry {
                     subscriber: subscriber.clone(),
                     data,
@@ -519,8 +600,14 @@ impl SubscriptionProtocol {
         if amount > MAX_AMOUNT {
             return Err(ContractError::AmountTooLarge);
         }
-        if let Some(config) = env.storage().instance().get::<_, AdminConfig>(&DataKey::AdminConfig) {
-            if amount > config.max_amount { return Err(ContractError::AmountExceedsLimit); }
+        if let Some(config) = env
+            .storage()
+            .instance()
+            .get::<_, AdminConfig>(&DataKey::AdminConfig)
+        {
+            if amount > config.max_amount {
+                return Err(ContractError::AmountExceedsLimit);
+            }
         }
         if interval < 86_400 {
             return Err(ContractError::IntervalTooShort);
@@ -544,7 +631,8 @@ impl SubscriptionProtocol {
         }
 
         let ts = ledger_timestamp(&env)?;
-        let next_payment = checked_next_payment(ts, interval)?;
+        let max_horizon = storage::get_max_horizon(&env);
+        let next_payment = validate_schedule_horizon(ts, interval, max_horizon)?;
         let data = SubscriptionData {
             token: token.clone(),
             amount,
@@ -610,7 +698,8 @@ impl SubscriptionProtocol {
         subscriber.require_auth();
 
         // 2. Verify subscription exists.
-        let key = DataKey::Subscription(subscriber.clone(), merchant.clone());
+        let hash = subscription_key(&env, &subscriber, &merchant);
+        let key = DataKey::Subscription(hash);
         let mut data: SubscriptionData = env
             .storage()
             .persistent()
@@ -625,7 +714,7 @@ impl SubscriptionProtocol {
             return Err(ContractError::AmountTooLarge);
         }
 
-        // 4. Validate new interval (same rules as subscribe()).
+        // 4. Validate new interval and horizon (same rules as subscribe()).
         if new_interval < 86_400 {
             return Err(ContractError::IntervalTooShort);
         }
@@ -633,13 +722,24 @@ impl SubscriptionProtocol {
             return Err(ContractError::IntervalTooLong);
         }
 
+        let now = ledger_timestamp(&env)?;
+        let max_horizon = storage::get_max_horizon(&env);
+        let _ = validate_schedule_horizon(now, new_interval, max_horizon)?;
+
+        let max_allowed = now
+            .checked_add(max_horizon)
+            .ok_or(ContractError::InvalidTimestamp)?;
+        if data.next_payment > max_allowed {
+            return Err(ContractError::ScheduleHorizonExceeded);
+        }
+
         // 5. Capture old values for the event before overwriting.
-        let old_amount   = data.amount;
+        let old_amount = data.amount;
         let old_interval = data.interval;
 
         // 6. Update in-place — deliberately do NOT touch next_payment so the
         //    subscriber's current billing cycle continues uninterrupted.
-        data.amount   = new_amount;
+        data.amount = new_amount;
         data.interval = new_interval;
 
         // 7. Persist.
@@ -869,7 +969,13 @@ impl SubscriptionProtocol {
         // to spend at least the payment amount before touching the token contract.
         let allowance = token_client.allowance(&subscriber, &contract_address);
         if allowance < data.amount {
-            events::emit_insufficient_allowance(&env, &subscriber, &merchant, allowance, data.amount);
+            events::emit_insufficient_allowance(
+                &env,
+                &subscriber,
+                &merchant,
+                allowance,
+                data.amount,
+            );
             return Err(ContractError::InsufficientAllowance);
         }
 
@@ -879,7 +985,13 @@ impl SubscriptionProtocol {
             let overdue_since = data.overdue_since.unwrap_or(now);
             data.overdue_since = Some(overdue_since);
             env.storage().persistent().set(&key, &data);
-            events::emit_payment_transfer_failure(&env, &subscriber, &merchant, data.amount, overdue_since);
+            events::emit_payment_transfer_failure(
+                &env,
+                &subscriber,
+                &merchant,
+                data.amount,
+                overdue_since,
+            );
             return Err(ContractError::TransferFailed);
         }
 
@@ -909,7 +1021,10 @@ impl SubscriptionProtocol {
         // drift accumulation for merchants who collect consistently late.
         data.next_payment = now + data.interval;
         data.overdue_since = None;
-        data.payment_nonce = data.payment_nonce.checked_add(1).ok_or(ContractError::InvalidTimestamp)?;
+        data.payment_nonce = data
+            .payment_nonce
+            .checked_add(1)
+            .ok_or(ContractError::InvalidTimestamp)?;
         env.storage().persistent().set(&key, &data);
         env.storage()
             .persistent()
@@ -921,7 +1036,18 @@ impl SubscriptionProtocol {
         // until its TTL expires, preventing late-arriving duplicate transactions.
         write_execution_marker(&env, &hash, data.payment_nonce);
 
-        events::emit_executed(&env, &subscriber, &merchant, &data.token, data.amount, data.payment_nonce);
+        events::emit_executed(
+            &env,
+            &subscriber,
+            &merchant,
+            &data.token,
+            data.amount,
+            data.payment_nonce,
+        );
+
+        Ok(())
+    }
+
     /// Attempt payment collection for each subscriber in one merchant-authorized call.
     ///
     /// Subscribers without an active, due, sufficiently funded subscription are
@@ -994,7 +1120,13 @@ impl SubscriptionProtocol {
             // Allowance check (Issue #51): skip subscriber if allowance is insufficient.
             let allowance = token_client.allowance(&subscriber, &contract_address);
             if allowance < data.amount {
-                events::emit_insufficient_allowance(&env, &subscriber, &merchant, allowance, data.amount);
+                events::emit_insufficient_allowance(
+                    &env,
+                    &subscriber,
+                    &merchant,
+                    allowance,
+                    data.amount,
+                );
                 results.push_back((subscriber.clone(), false));
                 continue;
             }
@@ -1004,7 +1136,13 @@ impl SubscriptionProtocol {
                 let overdue_since = data.overdue_since.unwrap_or(now);
                 data.overdue_since = Some(overdue_since);
                 env.storage().persistent().set(&key, &data);
-                events::emit_payment_transfer_failure(&env, &subscriber, &merchant, data.amount, overdue_since);
+                events::emit_payment_transfer_failure(
+                    &env,
+                    &subscriber,
+                    &merchant,
+                    data.amount,
+                    overdue_since,
+                );
                 results.push_back((subscriber.clone(), false));
                 continue;
             }
@@ -1031,12 +1169,22 @@ impl SubscriptionProtocol {
             // with execute_payment behaviour.
             data.next_payment = now + data.interval;
             data.overdue_since = None;
-            data.payment_nonce = data.payment_nonce.checked_add(1).ok_or(ContractError::InvalidTimestamp)?;
+            data.payment_nonce = data
+                .payment_nonce
+                .checked_add(1)
+                .ok_or(ContractError::InvalidTimestamp)?;
             env.storage().persistent().set(&key, &data);
             hashes_to_extend.push_back(hash);
 
             events::emit_payment_transfer_success(&env, &subscriber, &merchant, data.amount);
-            events::emit_executed(&env, &subscriber, &merchant, &data.token, data.amount, data.payment_nonce);
+            events::emit_executed(
+                &env,
+                &subscriber,
+                &merchant,
+                &data.token,
+                data.amount,
+                data.payment_nonce,
+            );
 
             results.push_back((subscriber.clone(), true));
         }
@@ -1262,3 +1410,6 @@ mod regression_tests;
 
 #[cfg(test)]
 mod pause_resume_tests;
+
+#[cfg(test)]
+mod horizon_boundary_tests;

@@ -53,6 +53,9 @@ pub enum DataKey {
 
     /// Optional maximum subscription amount for this deployment.
     MaxAmount,
+
+    /// Maximum supported subscription schedule horizon in seconds (#1607).
+    MaxHorizon,
 }
 
 /// Persistent on-chain record for a subscription.
@@ -73,15 +76,15 @@ pub enum DataKey {
 #[derive(Clone, Debug)]
 pub struct SubscriptionData {
     /// SEP-41 token contract address
-    pub token:        Address,
+    pub token: Address,
     /// Payment amount per interval (strictly positive, <= MAX_AMOUNT)
-    pub amount:       i128,
+    pub amount: i128,
     /// Seconds between payments  [86_400, 31_536_000]
-    pub interval:     u64,
+    pub interval: u64,
     /// Unix timestamp of the next valid payment window
     pub next_payment: u64,
     /// True when subscription payments are suspended
-    pub is_paused:    bool,
+    pub is_paused: bool,
     /// Grace-period duration in seconds, if configured for this subscription.
     pub grace_period: Option<u64>,
     /// Timestamp until which payments are paused.
@@ -147,7 +150,9 @@ pub fn get_admin_config(env: &Env) -> AdminConfig {
     env.storage()
         .instance()
         .get(&DataKey::AdminConfig)
-        .unwrap_or(AdminConfig { max_subscribers_per_merchant: 0 })
+        .unwrap_or(AdminConfig {
+            max_subscribers_per_merchant: 0,
+        })
 }
 
 /// Persist the admin config to instance storage.
@@ -170,11 +175,27 @@ pub fn set_subscriber_count(env: &Env, merchant: &Address, count: u32) {
     env.storage()
         .persistent()
         .set(&DataKey::MerchantSubscriberCount(merchant.clone()), &count);
+    env.storage().persistent().extend_ttl(
+        &DataKey::MerchantSubscriberCount(merchant.clone()),
+        MIN_TTL_LEDGERS,
+        MAX_TTL_LEDGERS,
+    );
+}
+
+// ─── MaxHorizon helpers (#1607) ──────────────────────────────────────────────
+
+/// Default maximum subscription horizon: 365 days in seconds.
+pub const DEFAULT_MAX_HORIZON: u64 = 31_536_000;
+
+/// Return the configured maximum subscription horizon in seconds, or the default.
+pub fn get_max_horizon(env: &Env) -> u64 {
     env.storage()
-        .persistent()
-        .extend_ttl(
-            &DataKey::MerchantSubscriberCount(merchant.clone()),
-            MIN_TTL_LEDGERS,
-            MAX_TTL_LEDGERS,
-        );
+        .instance()
+        .get(&DataKey::MaxHorizon)
+        .unwrap_or(DEFAULT_MAX_HORIZON)
+}
+
+/// Persist the configured maximum subscription horizon to instance storage.
+pub fn set_max_horizon(env: &Env, horizon: u64) {
+    env.storage().instance().set(&DataKey::MaxHorizon, &horizon);
 }

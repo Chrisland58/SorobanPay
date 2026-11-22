@@ -88,6 +88,7 @@ Create or update a recurring payment subscription. Calling `subscribe` a second 
 | `IntervalTooLong` | 3 | `interval > 31536000` |
 | `InvalidTimestamp` | 8 | Ledger timestamp is zero or `now + interval` overflows `u64` |
 | `InsufficientAllowance` | 14 | `strict == true` and subscriber's token allowance < `amount` |
+| `ScheduleHorizonExceeded` | 28 | `interval` or `next_payment` extends beyond the configured maximum horizon |
 
 #### Events emitted
 
@@ -622,6 +623,39 @@ Return the on-chain schema version stored during the last `migrate` call (or `in
 
 ---
 
+### `set_max_horizon`
+
+Configure the maximum supported subscription schedule horizon in seconds. Governance: only callable by the stored contract administrator.
+
+Enforced consistently at creation (`subscribe`) and update (`update_subscription`) relative to current ledger time.
+
+**Authorization:** `admin` must sign.
+
+#### Parameters
+
+| Parameter | Type | Constraints | Description |
+|-----------|------|-------------|-------------|
+| `admin` | `Address` | Stored admin | Admin account |
+| `new_horizon` | `u64` | `[86400, 315360000]` | Maximum horizon in seconds (1 day to 10 years) |
+
+#### Return value
+
+`Result<(), ContractError>` — returns `()` on success.
+
+---
+
+### `get_max_horizon`
+
+Read the currently configured maximum supported subscription horizon in seconds. Defaults to `31536000` (365 days / 1 year) if not explicitly customized.
+
+**Authorization:** None required.
+
+#### Return value
+
+`u64` — Horizon limit in seconds.
+
+---
+
 ### `compute_subscription_key`
 
 Compute and return the compact 32-byte SHA-256 storage key for a subscription pair. Useful for off-chain tooling that wants to inspect raw ledger storage entries without going through the contract.
@@ -685,6 +719,8 @@ Complete table of all 17 error codes with trigger conditions, affected entry poi
 | 16 | `NotAdmin` | `migrate` | Caller ≠ stored admin address | Use the admin identity set during `initialize` |
 | 17 | `NotInitialized` | `migrate` | `initialize` not yet called | Call `initialize(admin)` first |
 | 19 | `GracePeriodNotElapsed` | `expire_subscription` | Overdue timestamp is absent or grace period has not elapsed | Wait until `overdue_since + grace_period` |
+| 28 | `ScheduleHorizonExceeded` | `subscribe`, `update_subscription` | Interval or next_payment extends beyond configured maximum horizon | Use an interval or schedule within max horizon |
+| 29 | `InvalidHorizon` | `set_max_horizon` | Horizon value is < 86,400s (1 day) or > 315,360,000s (10 years) | Configure horizon within valid bounds |
 
 ### Errors returned per entry point
 
