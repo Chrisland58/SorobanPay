@@ -50,6 +50,16 @@ The on-chain record persisted under `DataKey::Subscription(sha256(subscriber_xdr
 
 Subscription entries are keyed by `sha256(subscriber_xdr ++ merchant_xdr)`, a compact 32-byte `BytesN<32>`. Use [`compute_subscription_key`](#compute_subscription_key) to derive the key off-chain for direct storage inspection.
 
+### `TokenStatus`
+
+Token allowlist lifecycle status (`TokenStatus`):
+
+| Variant | Value | Description |
+|---------|-------|-------------|
+| `Active` | 1 | Token is approved for new subscriptions and obligation settlements |
+| `Disabled` | 2 | New subscriptions blocked; existing subscriptions may still settle obligations |
+| `Retired` | 3 | Terminal state: blocked for both new subscriptions and existing obligation settlement |
+
 ---
 
 ## Entry points
@@ -661,6 +671,46 @@ Return all subscription key hashes indexed for a given merchant. Off-chain tools
 
 ---
 
+### `set_token_status`
+
+Set the lifecycle status for a token asset in the allowlist. Only the contract admin can execute this operation. Emits a `token_status_updated` event.
+
+**Authorization:** `admin` must authorize.
+
+#### Parameters
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `admin` | `Address` | Must match stored contract admin |
+| `token` | `Address` | Token contract address |
+| `new_status` | `TokenStatus` | Active (1), Disabled (2), or Retired (3) |
+
+---
+
+### `set_token_allowlist_enabled`
+
+Configure whether strict token allowlist mode is enabled. When enabled, only Active tokens can be used for new subscriptions.
+
+**Authorization:** `admin` must authorize.
+
+---
+
+### `get_token_status`
+
+Read-only query returning the current `TokenStatus` for a token (`None` if unconfigured).
+
+**Authorization:** None required.
+
+---
+
+### `is_token_allowlist_enabled`
+
+Read-only query returning whether strict token allowlist enforcement is enabled.
+
+**Authorization:** None required.
+
+---
+
 ## Error code reference
 
 Complete table of all 17 error codes with trigger conditions, affected entry points, and resolution guidance.
@@ -685,6 +735,10 @@ Complete table of all 17 error codes with trigger conditions, affected entry poi
 | 16 | `NotAdmin` | `migrate` | Caller ≠ stored admin address | Use the admin identity set during `initialize` |
 | 17 | `NotInitialized` | `migrate` | `initialize` not yet called | Call `initialize(admin)` first |
 | 19 | `GracePeriodNotElapsed` | `expire_subscription` | Overdue timestamp is absent or grace period has not elapsed | Wait until `overdue_since + grace_period` |
+| 24 | `TokenNotAllowed` | `subscribe` | Token is not on the allowlist when allowlist mode is enabled | Add token to allowlist via `set_token_status` |
+| 25 | `TokenDisabled` | `subscribe` | Token status is `Disabled`; new subscriptions blocked | Existing subscriptions settle normally; re-enable token to allow new |
+| 26 | `TokenRetired` | `subscribe`, `execute_payment` | Token status is `Retired`; all operations blocked | Retired is a terminal state; migrate subscriptions to active token |
+| 27 | `InvalidTokenStatusTransition` | `set_token_status` | Attempted transition from terminal `Retired` status | Once retired, a token status cannot be changed |
 
 ### Errors returned per entry point
 

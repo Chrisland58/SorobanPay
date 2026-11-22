@@ -8,9 +8,10 @@ use soroban_sdk::{contract, contractimpl, symbol_short, token, Address, BytesN, 
 
 use crate::error::ContractError;
 use crate::storage::{
-    get_protocol_fee_config, has_execution_marker, set_protocol_fee_config, subscription_key,
-    write_execution_marker, DataKey, ProtocolFeeConfig, SubscriptionData, CONTRACT_VERSION,
-    CURRENT_SCHEMA_VERSION, MAX_AMOUNT, MAX_FEE_BPS, MAX_TTL_LEDGERS, MIN_TTL_LEDGERS,
+    self, get_protocol_fee_config, has_execution_marker, set_protocol_fee_config, subscription_key,
+    write_execution_marker, AdminConfig, DataKey, ProtocolFeeConfig, SubscriptionData, TokenStatus,
+    CONTRACT_VERSION, CURRENT_SCHEMA_VERSION, MAX_AMOUNT, MAX_FEE_BPS, MAX_TTL_LEDGERS,
+    MIN_TTL_LEDGERS,
 };
 
 /// Maximum number of subscribers allowed in a single `batch_execute_payment` call.
@@ -212,7 +213,13 @@ impl SubscriptionProtocol {
         env.storage()
             .instance()
             .set(&DataKey::SchemaVersion, &CURRENT_SCHEMA_VERSION);
-        env.storage().instance().set(&DataKey::AdminConfig, &AdminConfig { admin, max_amount: MAX_AMOUNT });
+        env.storage().instance().set(
+            &DataKey::AdminConfig,
+            &AdminConfig {
+                admin,
+                max_amount: MAX_AMOUNT,
+            },
+        );
     }
 
     /// Compatibility alias for [`initialize`].
@@ -225,7 +232,9 @@ impl SubscriptionProtocol {
     ///
     /// # Returns
     /// Nothing. Panics if the contract has already been initialized.
-    pub fn init(env: Env, admin: Address) { Self::initialize(env, admin) }
+    pub fn init(env: Env, admin: Address) {
+        Self::initialize(env, admin)
+    }
 
     /// Read the administrator and amount limit configuration.
     ///
@@ -237,7 +246,10 @@ impl SubscriptionProtocol {
     ///
     /// No authorization is required.
     pub fn get_config(env: Env) -> Result<AdminConfig, ContractError> {
-        env.storage().instance().get(&DataKey::AdminConfig).ok_or(ContractError::NotInitialized)
+        env.storage()
+            .instance()
+            .get(&DataKey::AdminConfig)
+            .ok_or(ContractError::NotInitialized)
     }
 
     /// Change the maximum amount accepted by `subscribe`.
@@ -255,12 +267,89 @@ impl SubscriptionProtocol {
     /// - `ContractError::NotAdmin` — `admin` is not the stored administrator.
     pub fn set_max_amount(env: Env, admin: Address, new_max: i128) -> Result<(), ContractError> {
         admin.require_auth();
-        if new_max <= 0 || new_max > MAX_AMOUNT { return Err(ContractError::AmountTooLarge); }
+        if new_max <= 0 || new_max > MAX_AMOUNT {
+            return Err(ContractError::AmountTooLarge);
+        }
         let mut config: AdminConfig = Self::get_config(env.clone())?;
-        if config.admin != admin { return Err(ContractError::NotAdmin); }
+        if config.admin != admin {
+            return Err(ContractError::NotAdmin);
+        }
         config.max_amount = new_max;
         env.storage().instance().set(&DataKey::AdminConfig, &config);
         Ok(())
+    }
+
+    /// Set token allowlist lifecycle status (#1608).
+    ///
+    /// # Lifecycle Transitions:
+    /// - Active: Token can be used for new subscriptions and settling existing ones.
+    /// - Disabled: Token cannot be used for new subscriptions, but existing subscriptions
+    ///   may still settle obligations.
+    /// - Retired: Terminal status. Token can neither create new subscriptions nor settle existing ones.
+    /// - A Retired token cannot transition back to Active or Disabled.
+    ///
+    /// # Authorization:
+    /// Requires authorization from the contract admin.
+    pub fn set_token_status(
+        env: Env,
+        admin: Address,
+        token: Address,
+        new_status: TokenStatus,
+    ) -> Result<(), ContractError> {
+        admin.require_auth();
+        let config = Self::get_config(env.clone())?;
+        if config.admin != admin {
+            return Err(ContractError::NotAdmin);
+        }
+        if token == env.current_contract_address() {
+            return Err(ContractError::InvalidTokenAddress);
+        }
+
+        let old_status_opt = storage::get_token_status(&env, &token);
+        if let Some(TokenStatus::Retired) = old_status_opt {
+            return Err(ContractError::InvalidTokenStatusTransition);
+        }
+
+        let old_status_val = match old_status_opt {
+            Some(TokenStatus::Active) => 1u32,
+            Some(TokenStatus::Disabled) => 2u32,
+            Some(TokenStatus::Retired) => 3u32,
+            None => 0u32,
+        };
+        let new_status_val = match new_status {
+            TokenStatus::Active => 1u32,
+            TokenStatus::Disabled => 2u32,
+            TokenStatus::Retired => 3u32,
+        };
+
+        storage::set_token_status(&env, &token, new_status);
+        events::emit_token_status_updated(&env, &admin, &token, old_status_val, new_status_val);
+        Ok(())
+    }
+
+    /// Enable or disable strict token allowlist enforcement for new subscriptions (#1608).
+    pub fn set_token_allowlist_enabled(
+        env: Env,
+        admin: Address,
+        enabled: bool,
+    ) -> Result<(), ContractError> {
+        admin.require_auth();
+        let config = Self::get_config(env.clone())?;
+        if config.admin != admin {
+            return Err(ContractError::NotAdmin);
+        }
+        storage::set_token_allowlist_enabled(&env, enabled);
+        Ok(())
+    }
+
+    /// Read the current lifecycle status of a token in the allowlist (#1608).
+    pub fn get_token_status(env: Env, token: Address) -> Option<TokenStatus> {
+        storage::get_token_status(&env, &token)
+    }
+
+    /// Check whether strict token allowlist enforcement is enabled (#1608).
+    pub fn is_token_allowlist_enabled(env: Env) -> bool {
+        storage::is_token_allowlist_enabled(&env)
     }
 
     /// Return the contract semantic version string (for example, `"1.0.0"`).
@@ -373,7 +462,13 @@ impl SubscriptionProtocol {
             return Err(ContractError::FeeBpsTooHigh);
         }
 
-        set_protocol_fee_config(&env, ProtocolFeeConfig { fee_bps, fee_collector });
+        set_protocol_fee_config(
+            &env,
+            ProtocolFeeConfig {
+                fee_bps,
+                fee_collector,
+            },
+        );
 
         Ok(())
     }
@@ -445,10 +540,7 @@ impl SubscriptionProtocol {
     ///
     /// # Parameters
     /// - `merchant`: Merchant whose active subscriptions are queried.
-    pub fn get_merchant_subscriptions(
-        env: Env,
-        merchant: Address,
-    ) -> Vec<SubscriptionEntry> {
+    pub fn get_merchant_subscriptions(env: Env, merchant: Address) -> Vec<SubscriptionEntry> {
         let roster_key = DataKey::MerchantSubscribers(merchant.clone());
         let subscribers: Vec<Address> = env
             .storage()
@@ -460,7 +552,11 @@ impl SubscriptionProtocol {
         for subscriber in subscribers.iter() {
             let hash = subscription_key(&env, &subscriber, &merchant);
             let key = DataKey::Subscription(hash);
-            if let Some(data) = env.storage().persistent().get::<DataKey, SubscriptionData>(&key) {
+            if let Some(data) = env
+                .storage()
+                .persistent()
+                .get::<DataKey, SubscriptionData>(&key)
+            {
                 entries.push_back(SubscriptionEntry {
                     subscriber: subscriber.clone(),
                     data,
@@ -519,8 +615,14 @@ impl SubscriptionProtocol {
         if amount > MAX_AMOUNT {
             return Err(ContractError::AmountTooLarge);
         }
-        if let Some(config) = env.storage().instance().get::<_, AdminConfig>(&DataKey::AdminConfig) {
-            if amount > config.max_amount { return Err(ContractError::AmountExceedsLimit); }
+        if let Some(config) = env
+            .storage()
+            .instance()
+            .get::<_, AdminConfig>(&DataKey::AdminConfig)
+        {
+            if amount > config.max_amount {
+                return Err(ContractError::AmountExceedsLimit);
+            }
         }
         if interval < 86_400 {
             return Err(ContractError::IntervalTooShort);
@@ -531,6 +633,27 @@ impl SubscriptionProtocol {
 
         // Allowance validation (#346).
         let contract_address = env.current_contract_address();
+        if token == contract_address {
+            return Err(ContractError::InvalidTokenAddress);
+        }
+
+        // Token lifecycle validation (#1608)
+        let token_status_opt = storage::get_token_status(&env, &token);
+        if storage::is_token_allowlist_enabled(&env) {
+            match token_status_opt {
+                Some(TokenStatus::Active) => {}
+                Some(TokenStatus::Disabled) => return Err(ContractError::TokenDisabled),
+                Some(TokenStatus::Retired) => return Err(ContractError::TokenRetired),
+                None => return Err(ContractError::TokenNotAllowed),
+            }
+        } else {
+            match token_status_opt {
+                Some(TokenStatus::Disabled) => return Err(ContractError::TokenDisabled),
+                Some(TokenStatus::Retired) => return Err(ContractError::TokenRetired),
+                _ => {}
+            }
+        }
+
         let token_client = token::Client::new(&env, &token);
         token_client.symbol();
         let allowance = token_client.allowance(&subscriber, &contract_address);
@@ -634,12 +757,12 @@ impl SubscriptionProtocol {
         }
 
         // 5. Capture old values for the event before overwriting.
-        let old_amount   = data.amount;
+        let old_amount = data.amount;
         let old_interval = data.interval;
 
         // 6. Update in-place — deliberately do NOT touch next_payment so the
         //    subscriber's current billing cycle continues uninterrupted.
-        data.amount   = new_amount;
+        data.amount = new_amount;
         data.interval = new_interval;
 
         // 7. Persist.
@@ -852,6 +975,12 @@ impl SubscriptionProtocol {
             return Err(ContractError::PaymentNotDue);
         }
 
+        // Token lifecycle validation (#1608): retired tokens cannot settle obligations.
+        // Note: Disabled tokens are explicitly permitted to settle existing subscriptions.
+        if let Some(TokenStatus::Retired) = storage::get_token_status(&env, &data.token) {
+            return Err(ContractError::TokenRetired);
+        }
+
         // ── Duplicate execution guard (#1083) ────────────────────────────────
         // Check whether this (subscription_hash, payment_nonce) pair was already
         // executed.  The marker is written to temporary storage after a successful
@@ -869,7 +998,13 @@ impl SubscriptionProtocol {
         // to spend at least the payment amount before touching the token contract.
         let allowance = token_client.allowance(&subscriber, &contract_address);
         if allowance < data.amount {
-            events::emit_insufficient_allowance(&env, &subscriber, &merchant, allowance, data.amount);
+            events::emit_insufficient_allowance(
+                &env,
+                &subscriber,
+                &merchant,
+                allowance,
+                data.amount,
+            );
             return Err(ContractError::InsufficientAllowance);
         }
 
@@ -879,7 +1014,13 @@ impl SubscriptionProtocol {
             let overdue_since = data.overdue_since.unwrap_or(now);
             data.overdue_since = Some(overdue_since);
             env.storage().persistent().set(&key, &data);
-            events::emit_payment_transfer_failure(&env, &subscriber, &merchant, data.amount, overdue_since);
+            events::emit_payment_transfer_failure(
+                &env,
+                &subscriber,
+                &merchant,
+                data.amount,
+                overdue_since,
+            );
             return Err(ContractError::TransferFailed);
         }
 
@@ -909,7 +1050,10 @@ impl SubscriptionProtocol {
         // drift accumulation for merchants who collect consistently late.
         data.next_payment = now + data.interval;
         data.overdue_since = None;
-        data.payment_nonce = data.payment_nonce.checked_add(1).ok_or(ContractError::InvalidTimestamp)?;
+        data.payment_nonce = data
+            .payment_nonce
+            .checked_add(1)
+            .ok_or(ContractError::InvalidTimestamp)?;
         env.storage().persistent().set(&key, &data);
         env.storage()
             .persistent()
@@ -921,7 +1065,18 @@ impl SubscriptionProtocol {
         // until its TTL expires, preventing late-arriving duplicate transactions.
         write_execution_marker(&env, &hash, data.payment_nonce);
 
-        events::emit_executed(&env, &subscriber, &merchant, &data.token, data.amount, data.payment_nonce);
+        events::emit_executed(
+            &env,
+            &subscriber,
+            &merchant,
+            &data.token,
+            data.amount,
+            data.payment_nonce,
+        );
+
+        Ok(())
+    }
+
     /// Attempt payment collection for each subscriber in one merchant-authorized call.
     ///
     /// Subscribers without an active, due, sufficiently funded subscription are
@@ -988,13 +1143,24 @@ impl SubscriptionProtocol {
                 continue;
             }
 
+            if let Some(TokenStatus::Retired) = storage::get_token_status(&env, &data.token) {
+                results.push_back((subscriber.clone(), false));
+                continue;
+            }
+
             let contract_address = env.current_contract_address();
             let token_client = token::Client::new(&env, &data.token);
 
             // Allowance check (Issue #51): skip subscriber if allowance is insufficient.
             let allowance = token_client.allowance(&subscriber, &contract_address);
             if allowance < data.amount {
-                events::emit_insufficient_allowance(&env, &subscriber, &merchant, allowance, data.amount);
+                events::emit_insufficient_allowance(
+                    &env,
+                    &subscriber,
+                    &merchant,
+                    allowance,
+                    data.amount,
+                );
                 results.push_back((subscriber.clone(), false));
                 continue;
             }
@@ -1004,7 +1170,13 @@ impl SubscriptionProtocol {
                 let overdue_since = data.overdue_since.unwrap_or(now);
                 data.overdue_since = Some(overdue_since);
                 env.storage().persistent().set(&key, &data);
-                events::emit_payment_transfer_failure(&env, &subscriber, &merchant, data.amount, overdue_since);
+                events::emit_payment_transfer_failure(
+                    &env,
+                    &subscriber,
+                    &merchant,
+                    data.amount,
+                    overdue_since,
+                );
                 results.push_back((subscriber.clone(), false));
                 continue;
             }
@@ -1031,12 +1203,22 @@ impl SubscriptionProtocol {
             // with execute_payment behaviour.
             data.next_payment = now + data.interval;
             data.overdue_since = None;
-            data.payment_nonce = data.payment_nonce.checked_add(1).ok_or(ContractError::InvalidTimestamp)?;
+            data.payment_nonce = data
+                .payment_nonce
+                .checked_add(1)
+                .ok_or(ContractError::InvalidTimestamp)?;
             env.storage().persistent().set(&key, &data);
             hashes_to_extend.push_back(hash);
 
             events::emit_payment_transfer_success(&env, &subscriber, &merchant, data.amount);
-            events::emit_executed(&env, &subscriber, &merchant, &data.token, data.amount, data.payment_nonce);
+            events::emit_executed(
+                &env,
+                &subscriber,
+                &merchant,
+                &data.token,
+                data.amount,
+                data.payment_nonce,
+            );
 
             results.push_back((subscriber.clone(), true));
         }
@@ -1262,3 +1444,6 @@ mod regression_tests;
 
 #[cfg(test)]
 mod pause_resume_tests;
+
+#[cfg(test)]
+mod token_lifecycle_tests;
