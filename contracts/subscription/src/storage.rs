@@ -53,6 +53,25 @@ pub enum DataKey {
 
     /// Optional maximum subscription amount for this deployment.
     MaxAmount,
+
+    /// Status of a supported token asset (#1608).
+    TokenStatus(Address),
+
+    /// Whether strict token allowlist is actively enforced (#1608).
+    TokenAllowlistEnabled,
+}
+
+/// Token lifecycle status for allowlist administration (#1608).
+#[contracttype]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[repr(u32)]
+pub enum TokenStatus {
+    /// Token is active: new subscriptions allowed, obligations settle normally.
+    Active = 1,
+    /// Token is disabled: new subscriptions blocked, existing obligations may settle.
+    Disabled = 2,
+    /// Token is retired: new subscriptions blocked, obligation settlements blocked.
+    Retired = 3,
 }
 
 /// Persistent on-chain record for a subscription.
@@ -73,15 +92,15 @@ pub enum DataKey {
 #[derive(Clone, Debug)]
 pub struct SubscriptionData {
     /// SEP-41 token contract address
-    pub token:        Address,
+    pub token: Address,
     /// Payment amount per interval (strictly positive, <= MAX_AMOUNT)
-    pub amount:       i128,
+    pub amount: i128,
     /// Seconds between payments  [86_400, 31_536_000]
-    pub interval:     u64,
+    pub interval: u64,
     /// Unix timestamp of the next valid payment window
     pub next_payment: u64,
     /// True when subscription payments are suspended
-    pub is_paused:    bool,
+    pub is_paused: bool,
     /// Grace-period duration in seconds, if configured for this subscription.
     pub grace_period: Option<u64>,
     /// Timestamp until which payments are paused.
@@ -147,7 +166,9 @@ pub fn get_admin_config(env: &Env) -> AdminConfig {
     env.storage()
         .instance()
         .get(&DataKey::AdminConfig)
-        .unwrap_or(AdminConfig { max_subscribers_per_merchant: 0 })
+        .unwrap_or(AdminConfig {
+            max_subscribers_per_merchant: 0,
+        })
 }
 
 /// Persist the admin config to instance storage.
@@ -170,11 +191,42 @@ pub fn set_subscriber_count(env: &Env, merchant: &Address, count: u32) {
     env.storage()
         .persistent()
         .set(&DataKey::MerchantSubscriberCount(merchant.clone()), &count);
+    env.storage().persistent().extend_ttl(
+        &DataKey::MerchantSubscriberCount(merchant.clone()),
+        MIN_TTL_LEDGERS,
+        MAX_TTL_LEDGERS,
+    );
+}
+
+// ─── Token allowlist lifecycle helpers (#1608) ───────────────────────────────
+
+/// Retrieve the lifecycle status for a token asset.
+pub fn get_token_status(env: &Env, token: &Address) -> Option<TokenStatus> {
     env.storage()
         .persistent()
-        .extend_ttl(
-            &DataKey::MerchantSubscriberCount(merchant.clone()),
-            MIN_TTL_LEDGERS,
-            MAX_TTL_LEDGERS,
-        );
+        .get(&DataKey::TokenStatus(token.clone()))
+}
+
+/// Set the lifecycle status for a token asset and extend its storage TTL.
+pub fn set_token_status(env: &Env, token: &Address, status: TokenStatus) {
+    let key = DataKey::TokenStatus(token.clone());
+    env.storage().persistent().set(&key, &status);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, MIN_TTL_LEDGERS, MAX_TTL_LEDGERS);
+}
+
+/// Return whether strict allowlist enforcement is enabled.
+pub fn is_token_allowlist_enabled(env: &Env) -> bool {
+    env.storage()
+        .instance()
+        .get(&DataKey::TokenAllowlistEnabled)
+        .unwrap_or(false)
+}
+
+/// Set whether strict allowlist enforcement is enabled.
+pub fn set_token_allowlist_enabled(env: &Env, enabled: bool) {
+    env.storage()
+        .instance()
+        .set(&DataKey::TokenAllowlistEnabled, &enabled);
 }
