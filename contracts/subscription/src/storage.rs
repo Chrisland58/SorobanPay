@@ -1,4 +1,4 @@
-use soroban_sdk::{contracttype, Address, BytesN, Env};
+use soroban_sdk::{contracttype, Address, BytesN, Env, Vec};
 
 // ==================== Version Metadata ====================
 
@@ -53,6 +53,9 @@ pub enum DataKey {
 
     /// Optional maximum subscription amount for this deployment.
     MaxAmount,
+
+    /// Beneficiary split configuration for a subscription pair (#1609).
+    SplitConfig(BytesN<32>),
 }
 
 /// Persistent on-chain record for a subscription.
@@ -73,15 +76,15 @@ pub enum DataKey {
 #[derive(Clone, Debug)]
 pub struct SubscriptionData {
     /// SEP-41 token contract address
-    pub token:        Address,
+    pub token: Address,
     /// Payment amount per interval (strictly positive, <= MAX_AMOUNT)
-    pub amount:       i128,
+    pub amount: i128,
     /// Seconds between payments  [86_400, 31_536_000]
-    pub interval:     u64,
+    pub interval: u64,
     /// Unix timestamp of the next valid payment window
     pub next_payment: u64,
     /// True when subscription payments are suspended
-    pub is_paused:    bool,
+    pub is_paused: bool,
     /// Grace-period duration in seconds, if configured for this subscription.
     pub grace_period: Option<u64>,
     /// Timestamp until which payments are paused.
@@ -147,7 +150,9 @@ pub fn get_admin_config(env: &Env) -> AdminConfig {
     env.storage()
         .instance()
         .get(&DataKey::AdminConfig)
-        .unwrap_or(AdminConfig { max_subscribers_per_merchant: 0 })
+        .unwrap_or(AdminConfig {
+            max_subscribers_per_merchant: 0,
+        })
 }
 
 /// Persist the admin config to instance storage.
@@ -170,11 +175,55 @@ pub fn set_subscriber_count(env: &Env, merchant: &Address, count: u32) {
     env.storage()
         .persistent()
         .set(&DataKey::MerchantSubscriberCount(merchant.clone()), &count);
+    env.storage().persistent().extend_ttl(
+        &DataKey::MerchantSubscriberCount(merchant.clone()),
+        MIN_TTL_LEDGERS,
+        MAX_TTL_LEDGERS,
+    );
+}
+
+// ─── Beneficiary Split Configuration (#1609) ──────────────────────────────────
+
+/// Maximum number of beneficiaries in a payment split.
+pub const MAX_SPLIT_RECIPIENTS: u32 = 5;
+
+/// Basis-point denominator for split shares (10,000 = 100%).
+pub const SPLIT_BASIS_POINTS: u32 = 10_000;
+
+/// A single beneficiary in a payment split.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SplitRecipient {
+    pub recipient: Address,
+    pub share_bps: u32,
+}
+
+/// Split configuration for a subscription.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SplitConfig {
+    pub recipients: Vec<SplitRecipient>,
+}
+
+/// Read split configuration for a subscription key.
+pub fn get_split_config(env: &Env, key: &BytesN<32>) -> Option<SplitConfig> {
     env.storage()
         .persistent()
-        .extend_ttl(
-            &DataKey::MerchantSubscriberCount(merchant.clone()),
-            MIN_TTL_LEDGERS,
-            MAX_TTL_LEDGERS,
-        );
+        .get(&DataKey::SplitConfig(key.clone()))
+}
+
+/// Store split configuration for a subscription key and extend TTL.
+pub fn set_split_config(env: &Env, key: &BytesN<32>, config: &SplitConfig) {
+    let data_key = DataKey::SplitConfig(key.clone());
+    env.storage().persistent().set(&data_key, config);
+    env.storage()
+        .persistent()
+        .extend_ttl(&data_key, MIN_TTL_LEDGERS, MAX_TTL_LEDGERS);
+}
+
+/// Remove split configuration for a subscription key.
+pub fn remove_split_config(env: &Env, key: &BytesN<32>) {
+    env.storage()
+        .persistent()
+        .remove(&DataKey::SplitConfig(key.clone()));
 }

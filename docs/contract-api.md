@@ -24,6 +24,8 @@ Full reference for all `SubscriptionProtocol` entry points, types, and error cod
    - [get_schema_version](#get_schema_version)
    - [compute_subscription_key](#compute_subscription_key)
    - [get_merchant_subscription_keys](#get_merchant_subscription_keys)
+   - [set_split](#set_split)
+   - [get_split](#get_split)
 3. [Error code reference](#error-code-reference)
 4. [Transaction fee guidance](#transaction-fee-guidance)
 5. [End-to-end flow example](#end-to-end-flow-example)
@@ -45,6 +47,23 @@ The on-chain record persisted under `DataKey::Subscription(sha256(subscriber_xdr
 | `is_paused` | `bool` | — | `true` when subscription payments are suspended (reserved for future use) |
 
 **Amount units:** All `amount` values are in the token's smallest unit (stroops for USDC-equivalent tokens with 7 decimals: divide by `10_000_000` to get the display value). See [docs/token-decimals.md](token-decimals.md) for full guidance.
+
+### `SplitRecipient`
+
+A single beneficiary in a payment split (#1609):
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `recipient` | `Address` | Beneficiary destination address |
+| `share_bps` | `u32` | Share in basis points (`1..=10000`, 10000 = 100%) |
+
+### `SplitConfig`
+
+Split configuration for a subscription (#1609):
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `recipients` | `Vec<SplitRecipient>` | Up to 5 beneficiaries whose shares sum to exactly 10,000 |
 
 ### Storage key derivation
 
@@ -661,6 +680,55 @@ Return all subscription key hashes indexed for a given merchant. Off-chain tools
 
 ---
 
+### `set_split`
+
+Configure or clear the beneficiary payment split for a subscription (#1609).
+
+When a split is configured, `execute_payment` distributes the merchant portion directly from the subscriber to each beneficiary proportionally. The last recipient absorbs any integer division remainder so no dust is lost.
+
+Pass an empty `recipients` vector to clear an existing split.
+
+**Authorization:** `merchant` must sign.
+
+#### Parameters
+
+| Parameter | Type | Constraints | Description |
+|-----------|------|-------------|-------------|
+| `subscriber` | `Address` | Existing subscription | Subscriber address |
+| `merchant` | `Address` | Existing subscription | Merchant authorizing split |
+| `recipients` | `Vec<SplitRecipient>` | Max 5, sum = 10,000 bps | Beneficiaries and shares |
+
+#### Errors
+
+| Error | Code | Trigger |
+|-------|------|---------|
+| `NoActiveSubscription` | 4 | No active subscription found for pair |
+| `TooManyRecipients` | 30 | More than 5 recipients provided |
+| `InvalidShareSum` | 31 | Shares do not sum to 10,000 |
+| `DuplicateRecipient` | 32 | Duplicate recipient address in list |
+| `ZeroShare` | 33 | Individual share is zero |
+
+---
+
+### `get_split`
+
+Query the current split configuration for a subscriber-merchant pair (#1609).
+
+**Authorization:** None required (read-only).
+
+#### Parameters
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `subscriber` | `Address` | Subscriber address |
+| `merchant` | `Address` | Merchant address |
+
+#### Return value
+
+`Option<SplitConfig>` — `Some(SplitConfig)` if a split is configured, `None` otherwise.
+
+---
+
 ## Error code reference
 
 Complete table of all 17 error codes with trigger conditions, affected entry points, and resolution guidance.
@@ -685,6 +753,10 @@ Complete table of all 17 error codes with trigger conditions, affected entry poi
 | 16 | `NotAdmin` | `migrate` | Caller ≠ stored admin address | Use the admin identity set during `initialize` |
 | 17 | `NotInitialized` | `migrate` | `initialize` not yet called | Call `initialize(admin)` first |
 | 19 | `GracePeriodNotElapsed` | `expire_subscription` | Overdue timestamp is absent or grace period has not elapsed | Wait until `overdue_since + grace_period` |
+| 30 | `TooManyRecipients` | `set_split` | More than 5 recipients in split configuration | Limit split recipients to maximum of 5 |
+| 31 | `InvalidShareSum` | `set_split` | Shares sum ≠ 10,000 basis points | Ensure recipient shares sum to exactly 10,000 (100%) |
+| 32 | `DuplicateRecipient` | `set_split` | Two or more split recipients have the same address | Provide distinct beneficiary addresses |
+| 33 | `ZeroShare` | `set_split` | Any recipient has share_bps == 0 | Ensure each recipient has a strictly positive share |
 
 ### Errors returned per entry point
 
@@ -695,6 +767,8 @@ Complete table of all 17 error codes with trigger conditions, affected entry poi
 | `batch_execute_payment` | 8, 12, 13 |
 | `cancel` | 4 |
 | `expire_subscription` | 4, 8, 19 |
+| `set_split` | 4, 30, 31, 32, 33 |
+| `get_split` | _(none — returns `Option`)_ |
 | `get_subscription` | _(none — returns `Option`)_ |
 | `migrate` | 15, 16, 17 |
 
