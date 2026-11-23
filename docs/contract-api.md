@@ -685,14 +685,16 @@ Complete table of all 17 error codes with trigger conditions, affected entry poi
 | 16 | `NotAdmin` | `migrate` | Caller ≠ stored admin address | Use the admin identity set during `initialize` |
 | 17 | `NotInitialized` | `migrate` | `initialize` not yet called | Call `initialize(admin)` first |
 | 19 | `GracePeriodNotElapsed` | `expire_subscription` | Overdue timestamp is absent or grace period has not elapsed | Wait until `overdue_since + grace_period` |
+| 25 | `SequenceOverflow` | `execute_payment`, `batch_execute_payment` | Payment sequence counter would overflow `u32::MAX` | Contract sequence ceiling reached |
 
 ### Errors returned per entry point
 
 | Entry point | Possible errors |
 |-------------|----------------|
 | `subscribe` | 1, 2, 3, 8, 9, 10, 11, 14 |
-| `execute_payment` | 4, 5, 6, 7, 8 |
-| `batch_execute_payment` | 8, 12, 13 |
+| `execute_payment` | 4, 5, 6, 7, 8, 25 |
+| `batch_execute_payment` | 8, 12, 13, 25 |
+| `get_payment_sequence` | 4 |
 | `cancel` | 4 |
 | `expire_subscription` | 4, 8, 19 |
 | `get_subscription` | _(none — returns `Option`)_ |

@@ -41,4 +41,6 @@ pub enum ContractError {
     NotInitialized        = 17,
     /// Error code 19: subscription grace period has not elapsed.
     GracePeriodNotElapsed = 19,
+    /// Error code 25: payment sequence counter would overflow u32::MAX.
+    SequenceOverflow      = 25,
 }
