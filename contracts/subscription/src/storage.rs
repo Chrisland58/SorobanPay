@@ -20,6 +20,15 @@ pub const CONTRACT_NAME: &str = "SorobanPay-SubscriptionProtocol";
 #[contracttype]
 pub enum DataKey {
     Subscription(Address, Address),
+    TransferProposal(Address, Address),  // (subscriber, from_merchant)
+}
+
+/// A pending transfer proposal from one merchant to another.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct TransferProposal {
+    pub to_merchant: Address,   // intended new merchant (must accept)
+    pub expires_at:  u64,       // Unix timestamp after which proposal is void
 }
 
 /// Persistent on-chain record for a subscription.
@@ -50,3 +59,49 @@ pub const MIN_TTL_LEDGERS: u32 = 30 * 24 * 60 * 60 / 5;
 
 /// ~365 days at 5-second ledger close time (6_307_200 ledgers)
 pub const MAX_TTL_LEDGERS: u32 = 365 * 24 * 60 * 60 / 5;
+
+/// Minimum transfer expiry window: 1 hour
+pub const MIN_TRANSFER_EXPIRY_SECS: u64 = 3_600;
+/// Maximum transfer expiry window: 30 days
+pub const MAX_TRANSFER_EXPIRY_SECS: u64 = 2_592_000;
+
+/// Public configuration returned by `get_config`.
+/// Contains only active, non-administrative parameters visible to integrators.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct ProtocolConfig {
+    /// Minimum payment interval in seconds (86400 = 1 day)
+    pub min_interval_secs:    u64,
+    /// Maximum payment interval in seconds (31536000 = 365 days)
+    pub max_interval_secs:    u64,
+    /// Maximum single payment amount in base token units (1e18)
+    pub max_payment_amount:   i128,
+    /// Schema version for integrators to detect breaking changes
+    pub schema_version:       u32,
+    /// Minimum TTL extension in ledgers for persistent storage entries
+    pub min_ttl_ledgers:      u32,
+    /// Maximum TTL extension in ledgers for persistent storage entries
+    pub max_ttl_ledgers:      u32,
+}
+
+// ==================== Settlement Fee Accounting ====================
+
+/// Protocol fee basis points (0 = no fee currently, expressed as basis points out of 10000).
+/// 100 bps = 1%, 0 bps = 0% (fee-free).
+pub const PROTOCOL_FEE_BPS: u32 = 0;
+
+/// Denominator for basis-point fee calculations.
+pub const FEE_DENOMINATOR: u32 = 10_000;
+
+/// Settlement breakdown for a single payment.
+/// Separates gross amount, protocol fee, and merchant net for unambiguous accounting.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct Settlement {
+    /// Gross amount charged to subscriber (base token units, no rounding)
+    pub gross_amount:  i128,
+    /// Protocol fee deducted from gross (base token units, 0 when fee is 0 bps)
+    pub protocol_fee:  i128,
+    /// Net amount received by merchant (gross - protocol_fee, base token units)
+    pub net_amount:    i128,
+}

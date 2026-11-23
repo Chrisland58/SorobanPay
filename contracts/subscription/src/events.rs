@@ -113,3 +113,58 @@ pub fn emit_batch_execute_initiated(env: &Env, merchant: &Address, batch_size: u
         batch_size as i128,
     );
 }
+
+/// Emit the `payment_settled` event with explicit fee breakdown.
+///
+/// Topics:  (symbol("payment_settled"), subscriber, merchant, token)
+/// Data:    Settlement struct (gross_amount, protocol_fee, net_amount)
+///
+/// This event provides unambiguous accounting: gross, fee, and net are all
+/// reported in base token units without rounding, enabling accurate reconciliation.
+pub fn emit_payment_settled(
+    env: &Env,
+    subscriber: &Address,
+    merchant: &Address,
+    token: &Address,
+    settlement: &crate::storage::Settlement,
+) {
+    env.events().publish(
+        (
+            Symbol::new(env, "payment_settled"),
+            subscriber.clone(),
+            merchant.clone(),
+            token.clone(),
+        ),
+        settlement.clone(),
+    );
+}
+
+/// Emit the `transfer_proposed` event when a subscription transfer is proposed.
+/// Topics: (symbol("transfer_proposed"), subscriber, from_merchant, to_merchant)
+/// Data: expires_at (u64 as i128)
+pub fn emit_transfer_proposed(env: &Env, subscriber: &Address, from_merchant: &Address, to_merchant: &Address, expires_at: u64) {
+    env.events().publish(
+        (
+            Symbol::new(env, "transfer_proposed"),
+            subscriber.clone(),
+            from_merchant.clone(),
+            to_merchant.clone(),
+        ),
+        expires_at as i128,
+    );
+}
+
+/// Emit the `transfer_accepted` event when a subscription transfer is accepted.
+/// Topics: (symbol("transfer_accepted"), subscriber, from_merchant, to_merchant)
+/// Data: () empty
+pub fn emit_transfer_accepted(env: &Env, subscriber: &Address, from_merchant: &Address, to_merchant: &Address) {
+    env.events().publish(
+        (
+            Symbol::new(env, "transfer_accepted"),
+            subscriber.clone(),
+            from_merchant.clone(),
+            to_merchant.clone(),
+        ),
+        (),
+    );
+}

@@ -7,7 +7,7 @@ mod storage;
 use soroban_sdk::{contract, contractimpl, token, Address, Env, Symbol};
 
 use crate::error::ContractError;
-use crate::storage::{DataKey, SubscriptionData, MAX_AMOUNT, MAX_TTL_LEDGERS, MIN_TTL_LEDGERS};
+use crate::storage::{DataKey, ProtocolConfig, Settlement, SubscriptionData, TransferProposal, MAX_AMOUNT, MAX_TTL_LEDGERS, MIN_TTL_LEDGERS, PROTOCOL_FEE_BPS, FEE_DENOMINATOR, MIN_TRANSFER_EXPIRY_SECS, MAX_TRANSFER_EXPIRY_SECS};
 
 // ─── Internal helpers ─────────────────────────────────────────────────────────
 
@@ -329,6 +329,37 @@ fn execute_token_transfer(
     Ok(())
 }
 
+/// Calculate settlement breakdown using checked arithmetic.
+///
+/// Returns a `Settlement` with gross, protocol_fee, and net_amount.
+/// Uses checked arithmetic throughout to prevent overflow.
+/// At 0 bps, protocol_fee is always 0 and net_amount equals gross.
+///
+/// # Errors
+/// Returns `ContractError::SettlementOverflow` if any intermediate calculation overflows.
+fn calculate_settlement(gross_amount: i128) -> Result<Settlement, ContractError> {
+    // fee = floor(gross * FEE_BPS / FEE_DENOMINATOR)
+    // Both FEE_BPS and FEE_DENOMINATOR are u32; cast to i128 for multiplication.
+    let fee_bps = PROTOCOL_FEE_BPS as i128;
+    let denominator = FEE_DENOMINATOR as i128;
+
+    let protocol_fee = gross_amount
+        .checked_mul(fee_bps)
+        .ok_or(ContractError::SettlementOverflow)?
+        .checked_div(denominator)
+        .ok_or(ContractError::SettlementOverflow)?;
+
+    let net_amount = gross_amount
+        .checked_sub(protocol_fee)
+        .ok_or(ContractError::SettlementOverflow)?;
+
+    Ok(Settlement {
+        gross_amount,
+        protocol_fee,
+        net_amount,
+    })
+}
+
 #[contract]
 pub struct SubscriptionProtocol;
 
@@ -522,6 +553,12 @@ impl SubscriptionProtocol {
             &merchant,
             &data.amount,
         );
+
+        // Calculate explicit settlement breakdown with checked arithmetic.
+        let settlement = calculate_settlement(data.amount)?;
+
+        // Emit settlement event with gross, fee, and net breakdown.
+        events::emit_payment_settled(&env, &subscriber, &merchant, &data.token, &settlement);
 
         // 5. Transfer succeeded — calculate next payment with late-payment-aware logic.
         //
@@ -766,6 +803,153 @@ impl SubscriptionProtocol {
     ) -> Option<SubscriptionData> {
         let key = DataKey::Subscription(subscriber, merchant);
         env.storage().persistent().get(&key)
+    }
+
+    /// Return the active protocol configuration parameters for integrator inspection.
+    ///
+    /// This view is read-only and requires no authorization. It reflects the
+    /// currently active values, not proposed or deprecated ones.
+    /// The response shape (ProtocolConfig) is versioned via `schema_version`
+    /// so integrators can detect breaking changes.
+    ///
+    /// # Returns
+    /// A `ProtocolConfig` struct containing:
+    /// - Interval bounds (min/max seconds)
+    /// - Maximum payment amount (base token units)
+    /// - Schema version for integrator compatibility checks
+    /// - TTL bounds for storage lifecycle planning
+    ///
+    /// # Authorization
+    /// None required — purely read-only.
+    ///
+    /// # Notes
+    /// - Does NOT expose admin keys, fee recipients, or upgrade state.
+    /// - All values are active/enforced by the contract, not merely advisory.
+    pub fn get_config(_env: Env) -> ProtocolConfig {
+        ProtocolConfig {
+            min_interval_secs:  86_400_u64,
+            max_interval_secs:  31_536_000_u64,
+            max_payment_amount: MAX_AMOUNT,
+            schema_version:     1_u32,
+            min_ttl_ledgers:    MIN_TTL_LEDGERS,
+            max_ttl_ledgers:    MAX_TTL_LEDGERS,
+        }
+    }
+
+    /// Propose transferring a subscription from the current merchant to a new merchant.
+    ///
+    /// The old merchant remains authoritative until the destination explicitly accepts.
+    /// The proposal expires after `expires_in_secs` seconds (between 1 hour and 30 days).
+    ///
+    /// # Authorization
+    /// Requires a valid signature from `subscriber` in the transaction auth envelope.
+    /// The subscriber initiates transfers (they own the subscription relationship).
+    ///
+    /// # Errors
+    /// - `ContractError::NoSubscriptionToTransfer` — if no active subscription exists.
+    /// - `ContractError::InvalidTransferExpiry` — if expiry is outside [3600, 2592000].
+    /// - `ContractError::InvalidTimestamp` — if ledger timestamp is zero.
+    pub fn propose_transfer(
+        env: Env,
+        subscriber: Address,
+        from_merchant: Address,
+        to_merchant: Address,
+        expires_in_secs: u64,
+    ) -> Result<(), ContractError> {
+        subscriber.require_auth();
+
+        // Validate subscription exists
+        let sub_key = DataKey::Subscription(subscriber.clone(), from_merchant.clone());
+        if !env.storage().persistent().has(&sub_key) {
+            return Err(ContractError::NoSubscriptionToTransfer);
+        }
+
+        // Validate expiry window
+        if expires_in_secs < MIN_TRANSFER_EXPIRY_SECS {
+            return Err(ContractError::InvalidTransferExpiry);
+        }
+        if expires_in_secs > MAX_TRANSFER_EXPIRY_SECS {
+            return Err(ContractError::InvalidTransferExpiry);
+        }
+
+        let now = ledger_timestamp(&env)?;
+        let expires_at = now.checked_add(expires_in_secs).ok_or(ContractError::InvalidTimestamp)?;
+
+        let proposal = TransferProposal {
+            to_merchant: to_merchant.clone(),
+            expires_at,
+        };
+
+        let proposal_key = DataKey::TransferProposal(subscriber.clone(), from_merchant.clone());
+        env.storage().persistent().set(&proposal_key, &proposal);
+        env.storage().persistent().extend_ttl(&proposal_key, MIN_TTL_LEDGERS, MAX_TTL_LEDGERS);
+
+        events::emit_transfer_proposed(&env, &subscriber, &from_merchant, &to_merchant, expires_at);
+
+        Ok(())
+    }
+
+    /// Accept a pending subscription transfer to become the new merchant.
+    ///
+    /// The old subscription (subscriber, from_merchant) is removed and a new one
+    /// (subscriber, to_merchant) is created with the same token, amount, and interval.
+    /// The next_payment timestamp is preserved from the original subscription so
+    /// pending payment state is not reset.
+    ///
+    /// # Authorization
+    /// Requires a valid signature from `to_merchant` in the transaction auth envelope.
+    ///
+    /// # Errors
+    /// - `ContractError::NoTransferProposal` — if no proposal exists for the pair.
+    /// - `ContractError::TransferExpired`    — if the proposal has passed its expiry timestamp.
+    /// - `ContractError::NoActiveSubscription` — if the original subscription no longer exists.
+    pub fn accept_transfer(
+        env: Env,
+        subscriber: Address,
+        from_merchant: Address,
+        to_merchant: Address,
+    ) -> Result<(), ContractError> {
+        to_merchant.require_auth();
+
+        // Load proposal
+        let proposal_key = DataKey::TransferProposal(subscriber.clone(), from_merchant.clone());
+        let proposal: TransferProposal = env
+            .storage()
+            .persistent()
+            .get(&proposal_key)
+            .ok_or(ContractError::NoTransferProposal)?;
+
+        // Verify to_merchant matches the proposal
+        if proposal.to_merchant != to_merchant {
+            return Err(ContractError::TransferUnauthorized);
+        }
+
+        // Check expiry
+        let now = ledger_timestamp(&env)?;
+        if now > proposal.expires_at {
+            return Err(ContractError::TransferExpired);
+        }
+
+        // Load original subscription
+        let old_sub_key = DataKey::Subscription(subscriber.clone(), from_merchant.clone());
+        let old_data: SubscriptionData = env
+            .storage()
+            .persistent()
+            .get(&old_sub_key)
+            .ok_or(ContractError::NoActiveSubscription)?;
+
+        // Create new subscription under to_merchant, preserving payment state
+        let new_sub_key = DataKey::Subscription(subscriber.clone(), to_merchant.clone());
+        env.storage().persistent().set(&new_sub_key, &old_data);
+        env.storage().persistent().extend_ttl(&new_sub_key, MIN_TTL_LEDGERS, MAX_TTL_LEDGERS);
+
+        // Remove old subscription and proposal
+        env.storage().persistent().remove(&old_sub_key);
+        env.storage().persistent().remove(&proposal_key);
+
+        events::emit_transfer_accepted(&env, &subscriber, &from_merchant, &to_merchant);
+
+        Ok(())
     }
 }
 
