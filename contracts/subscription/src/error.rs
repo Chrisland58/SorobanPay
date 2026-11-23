@@ -24,4 +24,16 @@ pub enum ContractError {
     InvalidTimestamp     = 8,
     /// `subscribe` called with amount exceeding the safe maximum threshold
     AmountTooLarge       = 9,
+    /// `propose_transfer` called with no pending transfer proposal for this pair
+    NoPendingTransfer = 10,
+    /// `accept_transfer` called but the proposal has expired
+    TransferExpired = 11,
+    /// `accept_transfer` called by wrong address (not the pending recipient)
+    TransferUnauthorized = 12,
+    /// `propose_transfer` called with no active subscription
+    NoSubscriptionToTransfer = 13,
+    /// `accept_transfer` called but no proposal exists
+    NoTransferProposal = 14,
+    /// `propose_transfer` called with invalid expiry (must be in future)
+    InvalidTransferExpiry = 15,
 }

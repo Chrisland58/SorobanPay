@@ -1731,3 +1731,186 @@ fn test_amount_zero_rejected() {
     assert!(matches!(r, Err(Ok(ContractError::AmountMustBePositive))));
     assert!(!t.has_sub());
 }
+
+// ─── Issue #1614 — Subscription Transfer with Destination Consent ─────────────
+
+/// Test successful transfer: propose → accept → old sub gone, new sub has same data
+#[test]
+fn test_transfer_full_lifecycle() {
+    let t = T::new();
+    let new_merchant = Address::generate(&t.env);
+    let amt = 100_000_i128;
+    let ivl = 86_400_u64;
+
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &amt, &ivl);
+    let original = t.get_sub();
+
+    // Propose transfer
+    let expiry = 7_200_u64; // 2 hours
+    t.client.propose_transfer(&t.subscriber, &t.merchant, &new_merchant, &expiry);
+
+    // Old subscription still exists (old merchant still authoritative)
+    assert!(t.has_sub(), "old subscription must still exist after proposal");
+
+    // Accept transfer
+    t.client.accept_transfer(&t.subscriber, &t.merchant, &new_merchant);
+
+    // Old subscription removed
+    assert!(!t.has_sub(), "old subscription must be removed after accept");
+
+    // New subscription exists with same data
+    let new_key = DataKey::Subscription(t.subscriber.clone(), new_merchant.clone());
+    let new_data: SubscriptionData = t.env.storage().persistent()
+        .get(&new_key).expect("new subscription must exist");
+    assert_eq!(new_data.amount, original.amount, "amount must be preserved");
+    assert_eq!(new_data.interval, original.interval, "interval must be preserved");
+    assert_eq!(new_data.next_payment, original.next_payment, "next_payment must be preserved");
+}
+
+/// Test that old merchant remains authoritative until acceptance
+#[test]
+fn test_old_merchant_authoritative_until_accept() {
+    let t = T::new();
+    let new_merchant = Address::generate(&t.env);
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &100_000_i128, &86_400_u64);
+    t.client.propose_transfer(&t.subscriber, &t.merchant, &new_merchant, &7_200_u64);
+
+    // Advance time past due date
+    t.advance(86_401);
+
+    // Old merchant can still collect payment
+    t.client.execute_payment(&t.subscriber, &t.merchant);
+    assert!(t.mer_bal() > 0, "old merchant should still collect payment while proposal is pending");
+}
+
+/// Test rejected transfer: wrong address tries to accept
+#[test]
+fn test_transfer_rejected_wrong_acceptor() {
+    let t = T::new();
+    let new_merchant = Address::generate(&t.env);
+    let impostor = Address::generate(&t.env);
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &100_000_i128, &86_400_u64);
+    t.client.propose_transfer(&t.subscriber, &t.merchant, &new_merchant, &7_200_u64);
+
+    let r = t.client.try_accept_transfer(&t.subscriber, &t.merchant, &impostor);
+    assert!(matches!(r, Err(Ok(ContractError::TransferUnauthorized))));
+    // Old subscription still intact
+    assert!(t.has_sub());
+}
+
+/// Test expired transfer proposal
+#[test]
+fn test_transfer_expired() {
+    let t = T::new();
+    let new_merchant = Address::generate(&t.env);
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &100_000_i128, &86_400_u64);
+    let expiry = 3_600_u64; // 1 hour minimum
+    t.client.propose_transfer(&t.subscriber, &t.merchant, &new_merchant, &expiry);
+
+    // Advance past expiry
+    t.advance(expiry + 1);
+
+    let r = t.client.try_accept_transfer(&t.subscriber, &t.merchant, &new_merchant);
+    assert!(matches!(r, Err(Ok(ContractError::TransferExpired))));
+    // Old subscription still intact
+    assert!(t.has_sub());
+}
+
+/// Test accept when no proposal exists
+#[test]
+fn test_accept_transfer_no_proposal() {
+    let t = T::new();
+    let new_merchant = Address::generate(&t.env);
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &100_000_i128, &86_400_u64);
+
+    let r = t.client.try_accept_transfer(&t.subscriber, &t.merchant, &new_merchant);
+    assert!(matches!(r, Err(Ok(ContractError::NoTransferProposal))));
+}
+
+/// Test propose transfer when no subscription exists
+#[test]
+fn test_propose_transfer_no_subscription() {
+    let t = T::new();
+    let new_merchant = Address::generate(&t.env);
+
+    let r = t.client.try_propose_transfer(&t.subscriber, &t.merchant, &new_merchant, &7_200_u64);
+    assert!(matches!(r, Err(Ok(ContractError::NoSubscriptionToTransfer))));
+}
+
+/// Test propose transfer with invalid expiry (too short)
+#[test]
+fn test_propose_transfer_expiry_too_short() {
+    let t = T::new();
+    let new_merchant = Address::generate(&t.env);
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &100_000_i128, &86_400_u64);
+
+    let r = t.client.try_propose_transfer(&t.subscriber, &t.merchant, &new_merchant, &3_599_u64);
+    assert!(matches!(r, Err(Ok(ContractError::InvalidTransferExpiry))));
+}
+
+/// Test propose transfer with invalid expiry (too long)
+#[test]
+fn test_propose_transfer_expiry_too_long() {
+    let t = T::new();
+    let new_merchant = Address::generate(&t.env);
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &100_000_i128, &86_400_u64);
+
+    let r = t.client.try_propose_transfer(&t.subscriber, &t.merchant, &new_merchant, &2_592_001_u64);
+    assert!(matches!(r, Err(Ok(ContractError::InvalidTransferExpiry))));
+}
+
+/// Test that re-proposing overwrites the previous proposal
+#[test]
+fn test_propose_transfer_repeated_overwrites() {
+    let t = T::new();
+    let new_merchant = Address::generate(&t.env);
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &100_000_i128, &86_400_u64);
+
+    // First proposal with 1 hour
+    t.client.propose_transfer(&t.subscriber, &t.merchant, &new_merchant, &3_600_u64);
+
+    // Second proposal with 2 hours (overwrites first)
+    t.client.propose_transfer(&t.subscriber, &t.merchant, &new_merchant, &7_200_u64);
+
+    // Should still be accepted (most recent proposal is valid)
+    let r = t.client.try_accept_transfer(&t.subscriber, &t.merchant, &new_merchant);
+    assert!(r.is_ok(), "repeated proposal should allow acceptance with latest expiry");
+}
+
+/// Test that transfer preserves next_payment so pending state is not reset
+#[test]
+fn test_transfer_preserves_next_payment() {
+    let t = T::new();
+    let new_merchant = Address::generate(&t.env);
+    let ivl = 86_400_u64;
+    let ts0 = t.env.ledger().timestamp();
+
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &100_000_i128, &ivl);
+    let original_next = t.get_sub().next_payment;
+    assert_eq!(original_next, ts0 + ivl);
+
+    t.client.propose_transfer(&t.subscriber, &t.merchant, &new_merchant, &7_200_u64);
+    t.client.accept_transfer(&t.subscriber, &t.merchant, &new_merchant);
+
+    let new_key = DataKey::Subscription(t.subscriber.clone(), new_merchant.clone());
+    let new_data: SubscriptionData = t.env.storage().persistent()
+        .get(&new_key).expect("new subscription must exist");
+    assert_eq!(new_data.next_payment, original_next, "next_payment must be preserved after transfer");
+}
+
+/// Test transfer emits transfer_proposed and transfer_accepted events
+#[test]
+fn test_transfer_emits_events() {
+    let t = T::new();
+    let new_merchant = Address::generate(&t.env);
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &100_000_i128, &86_400_u64);
+
+    let n_before = t.env.events().all().iter().filter(|e| e.0 == t.contract_id).count();
+    t.client.propose_transfer(&t.subscriber, &t.merchant, &new_merchant, &7_200_u64);
+    let n_after_propose = t.env.events().all().iter().filter(|e| e.0 == t.contract_id).count();
+    assert_eq!(n_after_propose, n_before + 1, "propose_transfer must emit 1 event");
+
+    t.client.accept_transfer(&t.subscriber, &t.merchant, &new_merchant);
+    let n_after_accept = t.env.events().all().iter().filter(|e| e.0 == t.contract_id).count();
+    assert_eq!(n_after_accept, n_after_propose + 1, "accept_transfer must emit 1 event");
+}

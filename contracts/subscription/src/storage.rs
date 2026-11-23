@@ -20,6 +20,15 @@ pub const CONTRACT_NAME: &str = "SorobanPay-SubscriptionProtocol";
 #[contracttype]
 pub enum DataKey {
     Subscription(Address, Address),
+    TransferProposal(Address, Address),  // (subscriber, from_merchant)
+}
+
+/// A pending transfer proposal from one merchant to another.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct TransferProposal {
+    pub to_merchant: Address,   // intended new merchant (must accept)
+    pub expires_at:  u64,       // Unix timestamp after which proposal is void
 }
 
 /// Persistent on-chain record for a subscription.
@@ -50,3 +59,8 @@ pub const MIN_TTL_LEDGERS: u32 = 30 * 24 * 60 * 60 / 5;
 
 /// ~365 days at 5-second ledger close time (6_307_200 ledgers)
 pub const MAX_TTL_LEDGERS: u32 = 365 * 24 * 60 * 60 / 5;
+
+/// Minimum transfer expiry window: 1 hour
+pub const MIN_TRANSFER_EXPIRY_SECS: u64 = 3_600;
+/// Maximum transfer expiry window: 30 days
+pub const MAX_TRANSFER_EXPIRY_SECS: u64 = 2_592_000;
