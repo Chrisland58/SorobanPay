@@ -326,6 +326,7 @@ Copy this block into `CHANGELOG.md` immediately above `## [Unreleased]`:
 - [ ] Version constants updated:
   - `contracts/subscription/src/storage.rs` — `CONTRACT_VERSION`, `VERSION_MAJOR/MINOR/PATCH`
   - `frontend/package.json` — `"version"` field
+- [ ] **Compatibility matrix updated** (`docs/compatibility-matrix.md` & `backend/src/services/compatibilityService.ts`): record new component versions, minimum compatible dependencies, breaking changes, and sunset dates to prevent stale entries.
 - [ ] `make build` passes cleanly.
 - [ ] `make test` passes — all tests green.
 - [ ] `cd frontend && npm run type-check` passes.
