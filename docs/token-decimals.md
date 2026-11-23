@@ -8,8 +8,12 @@ indivisible unit of the token, with no decimal interpretation applied on-chain.
 This matches the SEP-41 (Stellar Asset Contract) interface:
 `transfer(from, to, amount)` where `amount` is an `i128` in the token's base unit.
 
-The contract never reads, stores, or enforces a decimal configuration. All decimal
-handling is an **off-chain responsibility**.
+### On-chain decimal validation at onboarding
+
+To eliminate undocumented decimal assumptions and protect against incorrect subscription amounts:
+1. **Metadata Validation**: During `subscribe`, the contract queries `token_client.decimals()` and enforces `decimals <= MAX_SUPPORTED_DECIMALS` (18). Unsupported tokens (>18 decimals) are rejected with `ContractError::UnsupportedTokenDecimals` (code 23) before any subscription state is written.
+2. **Explicit Onboarding Configuration**: Integrators can specify their expected token decimals via `subscribe_with_decimals(..., expected_decimals)`. If the configured decimals do not strictly equal the token's on-chain metadata, the transaction is rejected with `ContractError::InconsistentTokenDecimals` (code 24).
+3. **Read-Only Validation**: Integrators can call `validate_token_decimals(token, expected_decimals)` prior to onboarding to verify asset compatibility.
 
 ---
 

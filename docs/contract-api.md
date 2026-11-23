@@ -685,12 +685,16 @@ Complete table of all 17 error codes with trigger conditions, affected entry poi
 | 16 | `NotAdmin` | `migrate` | Caller ≠ stored admin address | Use the admin identity set during `initialize` |
 | 17 | `NotInitialized` | `migrate` | `initialize` not yet called | Call `initialize(admin)` first |
 | 19 | `GracePeriodNotElapsed` | `expire_subscription` | Overdue timestamp is absent or grace period has not elapsed | Wait until `overdue_since + grace_period` |
+| 23 | `UnsupportedTokenDecimals` | `subscribe`, `subscribe_with_decimals`, `validate_token_decimals` | Token decimals exceed `MAX_SUPPORTED_DECIMALS` (18) | Use a token with 0 to 18 decimals |
+| 24 | `InconsistentTokenDecimals` | `subscribe_with_decimals`, `validate_token_decimals` | Explicit decimal configuration does not match on-chain token metadata | Correct the configured expected decimals to match token metadata |
 
 ### Errors returned per entry point
 
 | Entry point | Possible errors |
 |-------------|----------------|
-| `subscribe` | 1, 2, 3, 8, 9, 10, 11, 14 |
+| `subscribe` | 1, 2, 3, 8, 9, 10, 11, 14, 23 |
+| `subscribe_with_decimals` | 1, 2, 3, 8, 9, 10, 11, 14, 23, 24 |
+| `validate_token_decimals` | 23, 24 |
 | `execute_payment` | 4, 5, 6, 7, 8 |
 | `batch_execute_payment` | 8, 12, 13 |
 | `cancel` | 4 |

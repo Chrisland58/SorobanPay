@@ -41,4 +41,8 @@ pub enum ContractError {
     NotInitialized        = 17,
     /// Error code 19: subscription grace period has not elapsed.
     GracePeriodNotElapsed = 19,
+    /// Error code 23: token metadata reports decimals exceeding MAX_SUPPORTED_DECIMALS (18).
+    UnsupportedTokenDecimals = 23,
+    /// Error code 24: explicit decimal configuration does not match on-chain token metadata.
+    InconsistentTokenDecimals = 24,
 }
