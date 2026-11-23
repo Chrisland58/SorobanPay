@@ -813,6 +813,27 @@ Once all consumers have migrated (or after the migration deadline):
 
 ## 7. Rollback Procedure
 
+SorobanPay uses automated rollback checkpoints and health gating (`deploy/rollback.sh`). A rollback is **not considered complete** until critical application and dependency readiness checks pass. If dependencies (database, Redis, Stellar RPC) remain unreachable or degraded, the rollback script will abort marking the rollback complete, classify the failure (e.g. TIMEOUT or PARTIAL_RECOVERY), and escalate with links to the operational runbook.
+
+### Automated Rollback & Post-Rollback Health Gating
+
+```bash
+# Execute rollback and gate on post-rollback health checks:
+bash deploy/rollback.sh --rollback
+
+# Verify post-rollback health on a specific endpoint:
+bash deploy/rollback.sh --verify-health http://localhost:3001/health/ready
+
+# Auto-verify and rollback on failure:
+bash deploy/rollback.sh --auto-verify http://localhost:3001/health/ready
+```
+
+Configurable parameters:
+- `MAX_HEALTH_RETRIES`: Number of retry attempts (default: `10`).
+- `HEALTH_RETRY_INTERVAL`: Interval between retries in seconds (default: `3`).
+- `HEALTH_TIMEOUT_SECONDS`: Per-request timeout in seconds (default: `5`).
+- `RUNBOOK_URL`: Runbook link surfaced on failure (default: `docs/operations.md#10-failed-rollback-escalation-runbook`).
+
 ### Rolling back the backend
 
 If a backend deployment introduces a bug, roll back to the previous image:

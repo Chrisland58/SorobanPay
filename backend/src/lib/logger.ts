@@ -1,5 +1,5 @@
 /**
- * #1386 — Structured logging with Pino and correlation IDs.
+ * #1386 & #1682 — Structured logging with Pino, correlation IDs, and policy-driven redaction.
  *
  * Features:
  *  - JSON output to stdout (Pino)
@@ -7,6 +7,7 @@
  *  - SERVICE_ROLE env var included in every log line (e.g. "indexer", "api",
  *    "webhook-worker") — set by the Kubernetes deployment as an env var
  *  - Sensitive Stellar addresses redacted to first-8 + last-8 chars
+ *  - Automatic field-name and known-secret redaction matching organizational policy
  *  - pino-pretty transport in development (NODE_ENV !== "production"),
  *    falls back to plain JSON if pino-pretty is not installed
  *  - createServiceLogger(service) — factory for child loggers with a stable
@@ -14,6 +15,7 @@
  */
 
 import pino from 'pino';
+import { SENSITIVE_FIELD_PATTERN } from './logPolicy';
 
 // ---------------------------------------------------------------------------
 // Redaction helpers (exported for use in middleware and services)
@@ -27,7 +29,7 @@ export function redactAddress(address: string): string {
   return `${prefix}...${suffix}`;
 }
 
-/** Redact a Stellar secret seed or private token. */
+/** Redact a Stellar secret seed, JWT, Bearer token, or private key. */
 export function redactSecret(secret: string): string {
   if (!secret) return secret;
   // Stellar secret seed: starts with S, 56 chars
@@ -40,15 +42,40 @@ export function redactSecret(secret: string): string {
   return '[REDACTED]';
 }
 
-const SENSITIVE_KEY_PATTERN =
-  /^(password|secret|seed|authorization|token|apikey|privatekey|webhooksecret)$/i;
+/** Redact email address: keep first char and domain, mask user identifier */
+export function redactEmail(email: string): string {
+  const atIndex = email.indexOf('@');
+  if (atIndex <= 1) return '***@' + (email.slice(atIndex + 1) || 'redacted.com');
+  return `${email[0]}***@${email.slice(atIndex + 1)}`;
+}
+
+/** Redact connection URI (strips password) */
+export function redactUri(uri: string): string {
+  return uri.replace(
+    /((?:postgres|postgresql|mysql|mongodb|redis):\/\/[^:\s]+):([^@\s]+)@/i,
+    '$1:[REDACTED]@',
+  );
+}
 
 /** Recursively redact sensitive fields from telemetry or log payload objects. */
 export function redactTelemetryPayload<T>(payload: T): T {
   if (payload === null || payload === undefined) return payload;
   if (typeof payload === 'string') {
+    // Stellar secret seed
     if (/^S[A-Z2-7]{55}$/.test(payload)) {
       return redactSecret(payload) as unknown as T;
+    }
+    // Database URL
+    if (/(?:postgres|postgresql|mysql|mongodb|redis):\/\/[^:\s]+:[^@\s]+@/i.test(payload)) {
+      return redactUri(payload) as unknown as T;
+    }
+    // Bearer token
+    if (/^Bearer\s+[a-zA-Z0-9_.\-~+/]+=*$/i.test(payload)) {
+      return 'Bearer [REDACTED]' as unknown as T;
+    }
+    // JWT
+    if (/^eyJ[a-zA-Z0-9_-]{10,}\.eyJ[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,}$/.test(payload)) {
+      return '[REDACTED_JWT]' as unknown as T;
     }
     return payload;
   }
@@ -60,13 +87,18 @@ export function redactTelemetryPayload<T>(payload: T): T {
     for (const [key, value] of Object.entries(
       payload as Record<string, unknown>,
     )) {
-      if (SENSITIVE_KEY_PATTERN.test(key)) {
+      if (SENSITIVE_FIELD_PATTERN.test(key)) {
         output[key] = '[REDACTED]';
       } else if (
         key.toLowerCase().includes('address') &&
         typeof value === 'string'
       ) {
         output[key] = redactAddress(value);
+      } else if (
+        key.toLowerCase() === 'email' &&
+        typeof value === 'string'
+      ) {
+        output[key] = redactEmail(value);
       } else {
         output[key] = redactTelemetryPayload(value);
       }
@@ -112,12 +144,60 @@ function buildTransport(): pino.TransportSingleOptions | undefined {
 
 const transport = buildTransport();
 
-/** Root application logger. */
+/** Root application logger with automatic serializer-level redaction. */
 export const logger = pino(
   {
     level: logLevel,
     base: { service: serviceRole },
     timestamp: pino.stdTimeFunctions.isoTime,
+    redact: {
+      paths: [
+        'password',
+        'passwd',
+        'secret',
+        'secret_key',
+        'secretKey',
+        'private_key',
+        'privateKey',
+        'seed',
+        'secret_seed',
+        'token',
+        'accessToken',
+        'access_token',
+        'refreshToken',
+        'refresh_token',
+        'authorization',
+        'apiKey',
+        'api_key',
+        'webhookSecret',
+        'webhook_secret',
+        'admin_jwt_secret',
+        'cookie',
+        'session',
+        'sessionId',
+        'creditCard',
+        'credit_card',
+        'cardNumber',
+        'cvv',
+        'cvc',
+        'ssn',
+        '*.password',
+        '*.passwd',
+        '*.secret',
+        '*.secret_key',
+        '*.secretKey',
+        '*.private_key',
+        '*.privateKey',
+        '*.seed',
+        '*.token',
+        '*.authorization',
+        '*.apiKey',
+        '*.api_key',
+        '*.webhookSecret',
+        '*.webhook_secret',
+      ],
+      censor: '[REDACTED]',
+    },
     serializers: {
       err: pino.stdSerializers.err,
       error: pino.stdSerializers.err,
