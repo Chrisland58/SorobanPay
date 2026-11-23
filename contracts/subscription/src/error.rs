@@ -24,4 +24,6 @@ pub enum ContractError {
     InvalidTimestamp     = 8,
     /// `subscribe` called with amount exceeding the safe maximum threshold
     AmountTooLarge       = 9,
+    /// Arithmetic overflow in settlement calculation
+    SettlementOverflow   = 10,
 }

@@ -7,7 +7,7 @@ mod storage;
 use soroban_sdk::{contract, contractimpl, token, Address, Env, Symbol};
 
 use crate::error::ContractError;
-use crate::storage::{DataKey, SubscriptionData, MAX_AMOUNT, MAX_TTL_LEDGERS, MIN_TTL_LEDGERS};
+use crate::storage::{DataKey, ProtocolConfig, Settlement, SubscriptionData, MAX_AMOUNT, MAX_TTL_LEDGERS, MIN_TTL_LEDGERS, PROTOCOL_FEE_BPS, FEE_DENOMINATOR};
 
 // ─── Internal helpers ─────────────────────────────────────────────────────────
 
@@ -766,6 +766,37 @@ impl SubscriptionProtocol {
     ) -> Option<SubscriptionData> {
         let key = DataKey::Subscription(subscriber, merchant);
         env.storage().persistent().get(&key)
+    }
+
+    /// Return the active protocol configuration parameters for integrator inspection.
+    ///
+    /// This view is read-only and requires no authorization. It reflects the
+    /// currently active values, not proposed or deprecated ones.
+    /// The response shape (ProtocolConfig) is versioned via `schema_version`
+    /// so integrators can detect breaking changes.
+    ///
+    /// # Returns
+    /// A `ProtocolConfig` struct containing:
+    /// - Interval bounds (min/max seconds)
+    /// - Maximum payment amount (base token units)
+    /// - Schema version for integrator compatibility checks
+    /// - TTL bounds for storage lifecycle planning
+    ///
+    /// # Authorization
+    /// None required — purely read-only.
+    ///
+    /// # Notes
+    /// - Does NOT expose admin keys, fee recipients, or upgrade state.
+    /// - All values are active/enforced by the contract, not merely advisory.
+    pub fn get_config(_env: Env) -> ProtocolConfig {
+        ProtocolConfig {
+            min_interval_secs:  86_400_u64,
+            max_interval_secs:  31_536_000_u64,
+            max_payment_amount: MAX_AMOUNT,
+            schema_version:     1_u32,
+            min_ttl_ledgers:    MIN_TTL_LEDGERS,
+            max_ttl_ledgers:    MAX_TTL_LEDGERS,
+        }
     }
 }
 

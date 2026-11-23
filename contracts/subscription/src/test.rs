@@ -1731,3 +1731,286 @@ fn test_amount_zero_rejected() {
     assert!(matches!(r, Err(Ok(ContractError::AmountMustBePositive))));
     assert!(!t.has_sub());
 }
+
+// ─── Issue #1614 — Subscription Transfer with Destination Consent ─────────────
+
+/// Test successful transfer: propose → accept → old sub gone, new sub has same data
+#[test]
+fn test_transfer_full_lifecycle() {
+    let t = T::new();
+    let new_merchant = Address::generate(&t.env);
+    let amt = 100_000_i128;
+    let ivl = 86_400_u64;
+
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &amt, &ivl);
+    let original = t.get_sub();
+
+    // Propose transfer
+    let expiry = 7_200_u64; // 2 hours
+    t.client.propose_transfer(&t.subscriber, &t.merchant, &new_merchant, &expiry);
+
+    // Old subscription still exists (old merchant still authoritative)
+    assert!(t.has_sub(), "old subscription must still exist after proposal");
+
+    // Accept transfer
+    t.client.accept_transfer(&t.subscriber, &t.merchant, &new_merchant);
+
+    // Old subscription removed
+    assert!(!t.has_sub(), "old subscription must be removed after accept");
+
+    // New subscription exists with same data
+    let new_key = DataKey::Subscription(t.subscriber.clone(), new_merchant.clone());
+    let new_data: SubscriptionData = t.env.storage().persistent()
+        .get(&new_key).expect("new subscription must exist");
+    assert_eq!(new_data.amount, original.amount, "amount must be preserved");
+    assert_eq!(new_data.interval, original.interval, "interval must be preserved");
+    assert_eq!(new_data.next_payment, original.next_payment, "next_payment must be preserved");
+}
+
+/// Test that old merchant remains authoritative until acceptance
+#[test]
+fn test_old_merchant_authoritative_until_accept() {
+    let t = T::new();
+    let new_merchant = Address::generate(&t.env);
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &100_000_i128, &86_400_u64);
+    t.client.propose_transfer(&t.subscriber, &t.merchant, &new_merchant, &7_200_u64);
+
+    // Advance time past due date
+    t.advance(86_401);
+
+    // Old merchant can still collect payment
+    t.client.execute_payment(&t.subscriber, &t.merchant);
+    assert!(t.mer_bal() > 0, "old merchant should still collect payment while proposal is pending");
+}
+
+/// Test rejected transfer: wrong address tries to accept
+#[test]
+fn test_transfer_rejected_wrong_acceptor() {
+    let t = T::new();
+    let new_merchant = Address::generate(&t.env);
+    let impostor = Address::generate(&t.env);
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &100_000_i128, &86_400_u64);
+    t.client.propose_transfer(&t.subscriber, &t.merchant, &new_merchant, &7_200_u64);
+
+    let r = t.client.try_accept_transfer(&t.subscriber, &t.merchant, &impostor);
+    assert!(matches!(r, Err(Ok(ContractError::TransferUnauthorized))));
+    // Old subscription still intact
+    assert!(t.has_sub());
+}
+
+/// Test expired transfer proposal
+#[test]
+fn test_transfer_expired() {
+    let t = T::new();
+    let new_merchant = Address::generate(&t.env);
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &100_000_i128, &86_400_u64);
+    let expiry = 3_600_u64; // 1 hour minimum
+    t.client.propose_transfer(&t.subscriber, &t.merchant, &new_merchant, &expiry);
+
+    // Advance past expiry
+    t.advance(expiry + 1);
+
+    let r = t.client.try_accept_transfer(&t.subscriber, &t.merchant, &new_merchant);
+    assert!(matches!(r, Err(Ok(ContractError::TransferExpired))));
+    // Old subscription still intact
+    assert!(t.has_sub());
+}
+
+/// Test accept when no proposal exists
+#[test]
+fn test_accept_transfer_no_proposal() {
+    let t = T::new();
+    let new_merchant = Address::generate(&t.env);
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &100_000_i128, &86_400_u64);
+
+    let r = t.client.try_accept_transfer(&t.subscriber, &t.merchant, &new_merchant);
+    assert!(matches!(r, Err(Ok(ContractError::NoTransferProposal))));
+}
+
+/// Test propose transfer when no subscription exists
+#[test]
+fn test_propose_transfer_no_subscription() {
+    let t = T::new();
+    let new_merchant = Address::generate(&t.env);
+
+    let r = t.client.try_propose_transfer(&t.subscriber, &t.merchant, &new_merchant, &7_200_u64);
+    assert!(matches!(r, Err(Ok(ContractError::NoSubscriptionToTransfer))));
+}
+
+/// Test propose transfer with invalid expiry (too short)
+#[test]
+fn test_propose_transfer_expiry_too_short() {
+    let t = T::new();
+    let new_merchant = Address::generate(&t.env);
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &100_000_i128, &86_400_u64);
+
+    let r = t.client.try_propose_transfer(&t.subscriber, &t.merchant, &new_merchant, &3_599_u64);
+    assert!(matches!(r, Err(Ok(ContractError::InvalidTransferExpiry))));
+}
+
+/// Test propose transfer with invalid expiry (too long)
+#[test]
+fn test_propose_transfer_expiry_too_long() {
+    let t = T::new();
+    let new_merchant = Address::generate(&t.env);
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &100_000_i128, &86_400_u64);
+
+    let r = t.client.try_propose_transfer(&t.subscriber, &t.merchant, &new_merchant, &2_592_001_u64);
+    assert!(matches!(r, Err(Ok(ContractError::InvalidTransferExpiry))));
+}
+
+/// Test that re-proposing overwrites the previous proposal
+#[test]
+fn test_propose_transfer_repeated_overwrites() {
+    let t = T::new();
+    let new_merchant = Address::generate(&t.env);
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &100_000_i128, &86_400_u64);
+
+    // First proposal with 1 hour
+    t.client.propose_transfer(&t.subscriber, &t.merchant, &new_merchant, &3_600_u64);
+
+    // Second proposal with 2 hours (overwrites first)
+    t.client.propose_transfer(&t.subscriber, &t.merchant, &new_merchant, &7_200_u64);
+
+    // Should still be accepted (most recent proposal is valid)
+    let r = t.client.try_accept_transfer(&t.subscriber, &t.merchant, &new_merchant);
+    assert!(r.is_ok(), "repeated proposal should allow acceptance with latest expiry");
+}
+
+/// Test that transfer preserves next_payment so pending state is not reset
+#[test]
+fn test_transfer_preserves_next_payment() {
+    let t = T::new();
+    let new_merchant = Address::generate(&t.env);
+    let ivl = 86_400_u64;
+    let ts0 = t.env.ledger().timestamp();
+
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &100_000_i128, &ivl);
+    let original_next = t.get_sub().next_payment;
+    assert_eq!(original_next, ts0 + ivl);
+
+    t.client.propose_transfer(&t.subscriber, &t.merchant, &new_merchant, &7_200_u64);
+    t.client.accept_transfer(&t.subscriber, &t.merchant, &new_merchant);
+
+    let new_key = DataKey::Subscription(t.subscriber.clone(), new_merchant.clone());
+    let new_data: SubscriptionData = t.env.storage().persistent()
+        .get(&new_key).expect("new subscription must exist");
+    assert_eq!(new_data.next_payment, original_next, "next_payment must be preserved after transfer");
+}
+
+/// Test transfer emits transfer_proposed and transfer_accepted events
+#[test]
+fn test_transfer_emits_events() {
+    let t = T::new();
+    let new_merchant = Address::generate(&t.env);
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &100_000_i128, &86_400_u64);
+
+    let n_before = t.env.events().all().iter().filter(|e| e.0 == t.contract_id).count();
+    t.client.propose_transfer(&t.subscriber, &t.merchant, &new_merchant, &7_200_u64);
+    let n_after_propose = t.env.events().all().iter().filter(|e| e.0 == t.contract_id).count();
+    assert_eq!(n_after_propose, n_before + 1, "propose_transfer must emit 1 event");
+
+    t.client.accept_transfer(&t.subscriber, &t.merchant, &new_merchant);
+    let n_after_accept = t.env.events().all().iter().filter(|e| e.0 == t.contract_id).count();
+    assert_eq!(n_after_accept, n_after_propose + 1, "accept_transfer must emit 1 event");
+}
+
+// ─── Issue #1618 — Read-Only Configuration Audit View ────────────────────────
+
+/// Test that get_config returns the expected protocol parameters.
+/// Values must match what subscribe and execute_payment enforce.
+#[test]
+fn test_get_config_returns_active_parameters() {
+    let t = T::new();
+    let cfg = t.client.get_config();
+
+    assert_eq!(cfg.min_interval_secs, 86_400_u64, "min interval must be 1 day");
+    assert_eq!(cfg.max_interval_secs, 31_536_000_u64, "max interval must be 365 days");
+    assert_eq!(cfg.max_payment_amount, 1_000_000_000_000_000_000_i128, "max amount must be 1e18");
+    assert_eq!(cfg.schema_version, 1_u32, "schema version must be 1");
+}
+
+/// Test that get_config does not require any authorization (no auth needed).
+/// Calling it without any mock auth setup must succeed.
+#[test]
+fn test_get_config_requires_no_auth() {
+    let env = Env::default();
+    // Intentionally do NOT call env.mock_all_auths()
+    let contract_id = env.register(SubscriptionProtocol, ());
+    let client = SubscriptionProtocolClient::new(&env, &contract_id);
+
+    // Should not panic despite no auth setup
+    let cfg = client.get_config();
+    assert_eq!(cfg.min_interval_secs, 86_400_u64);
+}
+
+/// Test that get_config does not change storage (read-only guarantee).
+/// Calling it before and after storing a subscription must yield identical results.
+#[test]
+fn test_get_config_does_not_mutate_storage() {
+    let t = T::new();
+
+    let cfg_before = t.client.get_config();
+
+    // Store a subscription (mutates storage)
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &100_000_i128, &86_400_u64);
+
+    let cfg_after = t.client.get_config();
+
+    // Config values must be identical regardless of subscription state
+    assert_eq!(cfg_before.min_interval_secs,  cfg_after.min_interval_secs);
+    assert_eq!(cfg_before.max_interval_secs,  cfg_after.max_interval_secs);
+    assert_eq!(cfg_before.max_payment_amount, cfg_after.max_payment_amount);
+    assert_eq!(cfg_before.schema_version,     cfg_after.schema_version);
+    assert_eq!(cfg_before.min_ttl_ledgers,    cfg_after.min_ttl_ledgers);
+    assert_eq!(cfg_before.max_ttl_ledgers,    cfg_after.max_ttl_ledgers);
+}
+
+/// Test that the config interval bounds match what subscribe actually enforces.
+/// A subscribe with interval = min_interval must succeed;
+/// a subscribe with interval = min_interval - 1 must fail.
+#[test]
+fn test_get_config_bounds_match_subscribe_enforcement() {
+    let t = T::new();
+    let cfg = t.client.get_config();
+
+    // Exact lower bound must succeed
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &100_i128, &cfg.min_interval_secs);
+    assert!(t.has_sub(), "subscribe at exactly min_interval_secs must succeed");
+
+    // One below lower bound must fail
+    let r = t.client.try_subscribe(&t.subscriber, &t.merchant, &t.token, &100_i128, &(cfg.min_interval_secs - 1));
+    assert!(matches!(r, Err(Ok(ContractError::IntervalTooShort))));
+}
+
+/// Test that max_payment_amount from config matches what subscribe enforces.
+#[test]
+fn test_get_config_max_amount_matches_enforcement() {
+    let t = T::new();
+    let cfg = t.client.get_config();
+
+    // Amount exactly at max must succeed (subscribe doesn't transfer, just stores)
+    t.client.subscribe(&t.subscriber, &t.merchant, &t.token, &cfg.max_payment_amount, &86_400_u64);
+    assert!(t.has_sub(), "subscribe at max_payment_amount must succeed");
+
+    // Amount above max must fail
+    let r = t.client.try_subscribe(&t.subscriber, &t.merchant, &t.token, &(cfg.max_payment_amount + 1), &86_400_u64);
+    assert!(matches!(r, Err(Ok(ContractError::AmountTooLarge))));
+}
+
+/// Test that schema_version is a positive integer (stability marker for integrators).
+#[test]
+fn test_get_config_schema_version_positive() {
+    let t = T::new();
+    let cfg = t.client.get_config();
+    assert!(cfg.schema_version >= 1, "schema_version must be at least 1");
+}
+
+/// Test that TTL bounds in config are consistent (min < max).
+#[test]
+fn test_get_config_ttl_bounds_consistent() {
+    let t = T::new();
+    let cfg = t.client.get_config();
+    assert!(cfg.min_ttl_ledgers < cfg.max_ttl_ledgers, "min_ttl_ledgers must be less than max_ttl_ledgers");
+    assert!(cfg.min_ttl_ledgers > 0, "min_ttl_ledgers must be positive");
+}

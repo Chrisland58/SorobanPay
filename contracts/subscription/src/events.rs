@@ -113,3 +113,28 @@ pub fn emit_batch_execute_initiated(env: &Env, merchant: &Address, batch_size: u
         batch_size as i128,
     );
 }
+
+/// Emit the `payment_settled` event with explicit fee breakdown.
+///
+/// Topics:  (symbol("payment_settled"), subscriber, merchant, token)
+/// Data:    Settlement struct (gross_amount, protocol_fee, net_amount)
+///
+/// This event provides unambiguous accounting: gross, fee, and net are all
+/// reported in base token units without rounding, enabling accurate reconciliation.
+pub fn emit_payment_settled(
+    env: &Env,
+    subscriber: &Address,
+    merchant: &Address,
+    token: &Address,
+    settlement: &crate::storage::Settlement,
+) {
+    env.events().publish(
+        (
+            Symbol::new(env, "payment_settled"),
+            subscriber.clone(),
+            merchant.clone(),
+            token.clone(),
+        ),
+        settlement.clone(),
+    );
+}
