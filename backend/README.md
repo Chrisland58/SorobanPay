@@ -73,6 +73,19 @@ GET /api/summaries/:id
 - **Daily Summaries**: 1:00 AM every day
 - **Weekly Summaries**: 2:00 AM every Sunday
 
+## Event Indexer Recovery
+
+The EventIndexer tracks its position using the highest `ledgerTimestamp` stored in the `Event` table. If the process crashes, it auto-resumes from `MAX(ledgerTimestamp) - 2` ledgers (the safe replay bound) on the next start — no manual cursor reset is needed.
+
+For detailed recovery procedures, including read-only diagnosis queries, state-changing recovery steps, a testnet walkthrough with expected console output, and verification steps before resuming normal operation, see [`docs/indexer-recovery.md`](docs/indexer-recovery.md).
+
+Relevant methods on `EventIndexer`:
+
+| Method | Description |
+|---|---|
+| `getCheckpoint()` | Returns `MAX(ledgerTimestamp)` from the Event table, or `0` if empty |
+| `getSafeReplayLedger(checkpoint, buffer?)` | Returns `checkpoint - buffer` (default buffer = 2), minimum 0 |
+
 ## Project Structure
 
 ```

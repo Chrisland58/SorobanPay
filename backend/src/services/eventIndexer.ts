@@ -15,8 +15,45 @@ export class EventIndexer {
     this.server = new SorobanRpc.Server(rpcUrl);
   }
 
+  /**
+   * Returns the last processed ledger by reading MAX(ledgerTimestamp) from the
+   * Event table. Returns 0 when no events have been stored yet.
+   */
+  async getCheckpoint(): Promise<number> {
+    const result = await prisma.event.findFirst({
+      orderBy: { ledgerTimestamp: 'desc' },
+      select: { ledgerTimestamp: true },
+    });
+    if (!result) return 0;
+    return Number(result.ledgerTimestamp);
+  }
+
+  /**
+   * Returns the safe ledger from which replay should start.
+   * Subtracts `buffer` (default 2) from `checkpoint` to cover in-flight events
+   * that may have been fetched but not yet written before a crash.
+   * Never returns a value below 0.
+   */
+  getSafeReplayLedger(checkpoint: number, buffer: number = 2): number {
+    return Math.max(0, checkpoint - buffer);
+  }
+
+  /**
+   * Fetches events from the Soroban RPC and stores them in the database.
+   *
+   * When `startLedger` is omitted the method auto-resolves it from the current
+   * checkpoint minus the replay buffer, so a process restart after a crash
+   * requires no operator intervention.
+   */
   async fetchAndStoreEvents(startLedger?: number): Promise<void> {
     try {
+      // Auto-resolve start ledger from checkpoint when not supplied
+      let resolvedStartLedger = startLedger;
+      if (resolvedStartLedger === undefined) {
+        const checkpoint = await this.getCheckpoint();
+        resolvedStartLedger = this.getSafeReplayLedger(checkpoint);
+      }
+
       let events: SorobanRpc.GetEventsResponse = {
         events: [],
         latestLedger: 0,
@@ -24,7 +61,7 @@ export class EventIndexer {
 
       // Fetch events for the contract
       const eventsResponse = await this.server.getEvents({
-        startLedger: startLedger,
+        startLedger: resolvedStartLedger,
         filters: [
           {
             type: 'contract',
