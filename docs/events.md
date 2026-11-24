@@ -2,6 +2,8 @@
 
 This document provides comprehensive documentation for all events emitted by the SorobanPay subscription contract.
 
+> **Operator Reference**: For the complete state transition glossary mapping these events to off-chain backend states, webhooks, and merchant UI labels, see [docs/operator-state-transition-glossary.md](./operator-state-transition-glossary.md).
+
 ---
 
 ## Table of contents

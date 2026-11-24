@@ -1265,6 +1265,7 @@ payment window), configure a proactive TTL refresh using the procedure in
 
 ### See Also (updated)
 
+- [Operator State Transition Glossary](./operator-state-transition-glossary.md) — Cross-system mapping of contract events, backend states, webhooks, and merchant UI labels with exceptional outcome tables
 - [Storage TTL Guide](./storage-ttl.md) — TTL constants, cost implications, and the emergency extension procedure
 - [Network Configuration Guide](./networks.md) — testnet vs. mainnet RPC and passphrase values
 - [Backend API Cookbook](./api-cookbook.md) — Recipe 8: Monitor subscription TTL health
