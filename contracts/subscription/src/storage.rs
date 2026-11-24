@@ -53,6 +53,12 @@ pub enum DataKey {
 
     /// Optional maximum subscription amount for this deployment.
     MaxAmount,
+
+    /// Global admin configuration holding admin address and maximum amount limit.
+    AdminConfig,
+
+    /// Protocol fee configuration parameters.
+    ProtocolFeeConfig,
 }
 
 /// Persistent on-chain record for a subscription.
@@ -140,19 +146,51 @@ pub const MIN_TTL_LEDGERS: u32 = 30 * 24 * 60 * 60 / 5;
 /// Maximum storage TTL, approximately 365 days at a five-second ledger close time.
 pub const MAX_TTL_LEDGERS: u32 = 365 * 24 * 60 * 60 / 5;
 
+/// Upper bound on the protocol fee basis points (500 bps = 5.00%).
+pub const MAX_FEE_BPS: u32 = 500;
+
+/// Global administrator configuration.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AdminConfig {
+    /// Privileged address permitted to invoke administration and migration entry points.
+    pub admin: Address,
+    /// Per-contract ceiling on `SubscriptionData.amount` in token base units.
+    pub max_amount: i128,
+}
+
+/// Protocol fee configuration.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProtocolFeeConfig {
+    /// Protocol fee basis points (0 to MAX_FEE_BPS).
+    pub fee_bps: u32,
+    /// Destination address for collected protocol fees.
+    pub fee_collector: Address,
+}
+
 // ─── AdminConfig helpers ──────────────────────────────────────────────────────
 
-/// Load the admin config from instance storage; returns a zero-cap default if absent.
-pub fn get_admin_config(env: &Env) -> AdminConfig {
-    env.storage()
-        .instance()
-        .get(&DataKey::AdminConfig)
-        .unwrap_or(AdminConfig { max_subscribers_per_merchant: 0 })
+/// Load the admin config from instance storage; returns None if uninitialized.
+pub fn get_admin_config(env: &Env) -> Option<AdminConfig> {
+    env.storage().instance().get(&DataKey::AdminConfig)
 }
 
 /// Persist the admin config to instance storage.
 pub fn set_admin_config(env: &Env, config: AdminConfig) {
     env.storage().instance().set(&DataKey::AdminConfig, &config);
+}
+
+// ─── ProtocolFeeConfig helpers ────────────────────────────────────────────────
+
+/// Load protocol fee configuration from instance storage, if set.
+pub fn get_protocol_fee_config(env: &Env) -> Option<ProtocolFeeConfig> {
+    env.storage().instance().get(&DataKey::ProtocolFeeConfig)
+}
+
+/// Persist protocol fee configuration to instance storage.
+pub fn set_protocol_fee_config(env: &Env, config: ProtocolFeeConfig) {
+    env.storage().instance().set(&DataKey::ProtocolFeeConfig, &config);
 }
 
 // ─── MerchantSubscriberCount helpers ─────────────────────────────────────────

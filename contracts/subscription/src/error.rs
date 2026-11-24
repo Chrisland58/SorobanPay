@@ -41,4 +41,8 @@ pub enum ContractError {
     NotInitialized        = 17,
     /// Error code 19: subscription grace period has not elapsed.
     GracePeriodNotElapsed = 19,
+    /// Error code 20: configuration parameters violate global invariants.
+    InvalidConfig         = 20,
+    /// Error code 21: protocol fee basis points exceeds maximum allowed threshold (500 bps).
+    FeeBpsTooHigh         = 21,
 }

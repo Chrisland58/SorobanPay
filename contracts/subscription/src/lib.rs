@@ -4,14 +4,19 @@ mod error;
 mod events;
 mod storage;
 
+#[cfg(test)]
+mod config_invariants_tests;
+
 use soroban_sdk::{contract, contractimpl, symbol_short, token, Address, BytesN, Env, Vec};
 
 use crate::error::ContractError;
 use crate::storage::{
     get_protocol_fee_config, has_execution_marker, set_protocol_fee_config, subscription_key,
-    write_execution_marker, DataKey, ProtocolFeeConfig, SubscriptionData, CONTRACT_VERSION,
+    write_execution_marker, AdminConfig, DataKey, ProtocolFeeConfig, SubscriptionData, CONTRACT_VERSION,
     CURRENT_SCHEMA_VERSION, MAX_AMOUNT, MAX_FEE_BPS, MAX_TTL_LEDGERS, MIN_TTL_LEDGERS,
 };
+
+pub use crate::storage::{AdminConfig, ProtocolFeeConfig};
 
 /// Maximum number of subscribers allowed in a single `batch_execute_payment` call.
 pub const BATCH_MAX_SIZE: u32 = 50;
@@ -185,6 +190,45 @@ fn roster_remove(env: &Env, merchant: &Address, subscriber: &Address) {
 
 // ─── Contract ─────────────────────────────────────────────────────────────────
 
+/// Validate protocol configuration invariants centrally before any configuration state is written.
+///
+/// Invariants enforced:
+/// 1. `admin`: must not be the contract's own address (`InvalidConfig`).
+/// 2. `max_amount`: if specified, must satisfy `0 < max_amount <= MAX_AMOUNT` (`AmountMustBePositive` / `AmountTooLarge`).
+/// 3. `fee_config`: if specified:
+///    - `fee_bps <= MAX_FEE_BPS` (`FeeBpsTooHigh`).
+///    - `fee_collector`: must not be the contract's own address (`InvalidConfig`).
+pub fn validate_protocol_config_invariants(
+    env: &Env,
+    admin: &Address,
+    max_amount: Option<i128>,
+    fee_config: Option<&ProtocolFeeConfig>,
+) -> Result<(), ContractError> {
+    if admin == &env.current_contract_address() {
+        return Err(ContractError::InvalidConfig);
+    }
+
+    if let Some(amt) = max_amount {
+        if amt <= 0 {
+            return Err(ContractError::AmountMustBePositive);
+        }
+        if amt > MAX_AMOUNT {
+            return Err(ContractError::AmountTooLarge);
+        }
+    }
+
+    if let Some(fee) = fee_config {
+        if fee.fee_bps > MAX_FEE_BPS {
+            return Err(ContractError::FeeBpsTooHigh);
+        }
+        if fee.fee_collector == env.current_contract_address() {
+            return Err(ContractError::InvalidConfig);
+        }
+    }
+
+    Ok(())
+}
+
 #[contract]
 pub struct SubscriptionProtocol;
 
@@ -207,6 +251,9 @@ impl SubscriptionProtocol {
     pub fn initialize(env: Env, admin: Address) {
         if env.storage().instance().has(&DataKey::Admin) {
             panic!("already initialized");
+        }
+        if validate_protocol_config_invariants(&env, &admin, Some(MAX_AMOUNT), None).is_err() {
+            panic!("invalid configuration");
         }
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage()
@@ -251,15 +298,88 @@ impl SubscriptionProtocol {
     ///
     /// # Errors
     /// - `ContractError::AmountTooLarge` — `new_max` is outside the valid range.
+    /// - `ContractError::AmountMustBePositive` — `new_max <= 0`.
     /// - `ContractError::NotInitialized` — configuration has not been stored.
     /// - `ContractError::NotAdmin` — `admin` is not the stored administrator.
     pub fn set_max_amount(env: Env, admin: Address, new_max: i128) -> Result<(), ContractError> {
         admin.require_auth();
-        if new_max <= 0 || new_max > MAX_AMOUNT { return Err(ContractError::AmountTooLarge); }
-        let mut config: AdminConfig = Self::get_config(env.clone())?;
+        let config: AdminConfig = Self::get_config(env.clone())?;
         if config.admin != admin { return Err(ContractError::NotAdmin); }
-        config.max_amount = new_max;
+
+        // Centralized invariant validation applies atomically before writing state
+        validate_protocol_config_invariants(&env, &admin, Some(new_max), None)?;
+
+        let mut updated = config;
+        updated.max_amount = new_max;
+        env.storage().instance().set(&DataKey::AdminConfig, &updated);
+        Ok(())
+    }
+
+    /// Update the administrator address, enforcing non-contract invariants.
+    pub fn set_admin(env: Env, admin: Address, new_admin: Address) -> Result<(), ContractError> {
+        admin.require_auth();
+
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(ContractError::NotInitialized)?;
+
+        if admin != stored_admin {
+            return Err(ContractError::NotAdmin);
+        }
+
+        validate_protocol_config_invariants(&env, &new_admin, None, None)?;
+
+        let mut config: AdminConfig = Self::get_config(env.clone())?;
+        config.admin = new_admin.clone();
+        env.storage().instance().set(&DataKey::Admin, &new_admin);
         env.storage().instance().set(&DataKey::AdminConfig, &config);
+        Ok(())
+    }
+
+    /// Atomically update protocol configuration parameters, enforcing all invariants.
+    pub fn update_protocol_config(
+        env: Env,
+        admin: Address,
+        new_admin: Option<Address>,
+        new_max_amount: Option<i128>,
+        new_fee_config: Option<ProtocolFeeConfig>,
+    ) -> Result<(), ContractError> {
+        admin.require_auth();
+
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(ContractError::NotInitialized)?;
+
+        if admin != stored_admin {
+            return Err(ContractError::NotAdmin);
+        }
+
+        let target_admin = new_admin.as_ref().unwrap_or(&admin);
+        validate_protocol_config_invariants(
+            &env,
+            target_admin,
+            new_max_amount,
+            new_fee_config.as_ref(),
+        )?;
+
+        let mut config: AdminConfig = Self::get_config(env.clone())?;
+        if let Some(na) = new_admin {
+            config.admin = na.clone();
+            env.storage().instance().set(&DataKey::Admin, &na);
+        }
+        if let Some(nma) = new_max_amount {
+            config.max_amount = nma;
+        }
+        env.storage().instance().set(&DataKey::AdminConfig, &config);
+
+        if let Some(fc) = new_fee_config {
+            set_protocol_fee_config(&env, fc);
+        }
+
         Ok(())
     }
 
@@ -369,11 +489,10 @@ impl SubscriptionProtocol {
             return Err(ContractError::NotAdmin);
         }
 
-        if fee_bps > MAX_FEE_BPS {
-            return Err(ContractError::FeeBpsTooHigh);
-        }
+        let fee_cfg = ProtocolFeeConfig { fee_bps, fee_collector };
+        validate_protocol_config_invariants(&env, &admin, None, Some(&fee_cfg))?;
 
-        set_protocol_fee_config(&env, ProtocolFeeConfig { fee_bps, fee_collector });
+        set_protocol_fee_config(&env, fee_cfg);
 
         Ok(())
     }
