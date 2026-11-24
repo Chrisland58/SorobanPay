@@ -17,7 +17,7 @@
  *    preventing multiple React renders and act() warnings in tests
  */
 
-import { useReducer, useEffect } from 'react';
+import { useReducer, useEffect, useState, useCallback } from 'react';
 import {
   Contract,
   TransactionBuilder,
@@ -73,6 +73,8 @@ export interface UseSimulateFeeResult {
   breakdown: SimulateFeeBreakdown | null;
   /** Simulation error message. Null when status !== 'error'. */
   error: string | null;
+  /** Trigger a fresh re-simulation retry. */
+  retry: () => void;
 }
 
 // ── Constants ──────────────────────────────────────────────────────────────────
@@ -143,6 +145,11 @@ export function useSimulateFee(
   networkPassphrase = NETWORK_PASSPHRASE,
 ): UseSimulateFeeResult {
   const [state, dispatch] = useReducer(reducer, initialState);
+  const [retryNonce, setRetryNonce] = useState(0);
+
+  const retry = useCallback(() => {
+    setRetryNonce((prev) => prev + 1);
+  }, []);
 
   const {
     subscriber,
@@ -249,7 +256,11 @@ export function useSimulateFee(
     rpcUrl,
     contractId,
     networkPassphrase,
+    retryNonce,
   ]);
 
-  return state;
+  return {
+    ...state,
+    retry,
+  };
 }
