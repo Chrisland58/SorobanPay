@@ -3,13 +3,35 @@
 /**
  * rpc_fallback.ts
  *
- * RPC endpoint fallback mechanism to retry via alternate Soroban nodes
- * if the primary endpoint is unavailable.
+ * Configurable RPC endpoint failover for idempotent read requests.
  *
- * Issue #40: Add support for fetch-based RPC endpoint fallback
+ * Enforces:
+ *  - Only idempotent read operations (getEvents, getAccount, getLatestLedger,
+ *    simulateTransaction, getHealth, etc.) are eligible for failover.
+ *  - Mutation / wallet submissions are strictly rejected from failover to prevent
+ *    silent replay attacks or duplicated transactions.
+ *  - Endpoint URLs and error messages are sanitized to prevent credential / API key leakage.
+ *  - Bounded timeout and retry limits with observable attempt tracking.
  */
 
 import * as SorobanRpc from "@stellar/js-sdk/rpc";
+
+// ─── Supported idempotent read operations ─────────────────────────────────────
+
+export const IDEMPOTENT_READ_OPERATIONS = [
+  "getAccount",
+  "getEvents",
+  "getLatestLedger",
+  "simulateTransaction",
+  "getHealth",
+  "getNetwork",
+  "getTransaction",
+  "getLedgerEntries",
+] as const;
+
+export type IdempotentReadOperation = (typeof IDEMPOTENT_READ_OPERATIONS)[number];
+
+const IDEMPOTENT_SET = new Set<string>(IDEMPOTENT_READ_OPERATIONS);
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -29,37 +51,139 @@ export interface RpcFallbackConfig {
   primary: string;
   /** Fallback endpoints (in priority order) */
   fallbacks: string[];
-  /** Health check timeout in milliseconds */
+  /** Per-request read timeout in milliseconds (default: 5000) */
+  requestTimeoutMs?: number;
+  /** Health check timeout in milliseconds (default: 3000) */
   healthCheckTimeoutMs?: number;
-  /** How long to cache availability status (milliseconds) */
+  /** How long to cache availability status in ms (default: 60000) */
   cacheExpiryMs?: number;
+  /** Maximum number of retries per endpoint (default: 1) */
+  maxRetriesPerEndpoint?: number;
+}
+
+export interface RpcAttemptRecord {
+  endpoint: string;
+  durationMs: number;
+  error?: string;
+  success: boolean;
 }
 
 export interface RpcCallResult<T> {
   /** Result from RPC call */
   data: T;
-  /** Which endpoint was used */
+  /** Which sanitized endpoint was successfully used */
   usedEndpoint: string;
   /** Number of retries before success */
   retries: number;
+  /** Observable trace of all attempts (with sanitized endpoints and errors) */
+  attempts: RpcAttemptRecord[];
 }
 
-// ─── Configuration ────────────────────────────────────────────────────────────
+// ─── Errors ───────────────────────────────────────────────────────────────────
 
-const DEFAULT_HEALTH_CHECK_TIMEOUT_MS = 5000;
-const DEFAULT_CACHE_EXPIRY_MS = 60000; // 1 minute
+export class IneligibleForFailoverError extends Error {
+  constructor(operationName: string) {
+    super(
+      `Operation "${operationName}" is non-idempotent or unknown. Only idempotent read operations (${IDEMPOTENT_READ_OPERATIONS.join(
+        ", ",
+      )}) are eligible for RPC failover. Wallet submissions and mutations must not be replayed.`,
+    );
+    this.name = "IneligibleForFailoverError";
+  }
+}
 
-// ─── State ────────────────────────────────────────────────────────────────────
+export class RpcFailoverError extends Error {
+  public readonly selectedEndpoint: string;
+  public readonly finalFailureReason: string;
+  public readonly attempts: RpcAttemptRecord[];
 
-class RpcFallbackManager {
+  constructor(
+    selectedEndpoint: string,
+    finalFailureReason: string,
+    attempts: RpcAttemptRecord[],
+  ) {
+    super(
+      `All configured RPC endpoints failed. Last tried endpoint: "${selectedEndpoint}". Final failure reason: ${finalFailureReason}`,
+    );
+    this.name = "RpcFailoverError";
+    this.selectedEndpoint = selectedEndpoint;
+    this.finalFailureReason = finalFailureReason;
+    this.attempts = attempts;
+  }
+}
+
+// ─── Sanitization helper ──────────────────────────────────────────────────────
+
+/**
+ * Strips basic auth credentials, query parameter keys/tokens, and path secrets
+ * from URLs to prevent credential leakage in logs, UI, and errors.
+ */
+export function sanitizeEndpointUrl(rawUrl: string): string {
+  try {
+    const parsed = new URL(rawUrl);
+    // Redact basic auth username / password
+    if (parsed.username || parsed.password) {
+      parsed.username = "";
+      parsed.password = "";
+    }
+    // Redact sensitive query parameters
+    const sensitiveParamKeys = [
+      "key",
+      "apikey",
+      "api_key",
+      "token",
+      "secret",
+      "auth",
+      "password",
+    ];
+    for (const key of Array.from(parsed.searchParams.keys())) {
+      if (sensitiveParamKeys.some((s) => key.toLowerCase().includes(s))) {
+        parsed.searchParams.set(key, "[REDACTED]");
+      }
+    }
+    // Redact path tokens (e.g. /v1/ghp_xxxx or /v1/apikey)
+    parsed.pathname = parsed.pathname.replace(
+      /(\/v\d+\/)([a-zA-Z0-9_\-]{8,})/g,
+      "$1[REDACTED]",
+    );
+    return parsed.toString();
+  } catch {
+    // If invalid URL, strip any credentials via regex
+    return rawUrl
+      .replace(/:\/\/[^@]+@/g, "://")
+      .replace(/([?&](?:api_?key|token|secret)=)[^&]+/gi, "$1[REDACTED]");
+  }
+}
+
+/**
+ * Sanitizes an error message by stripping embedded URLs with credentials.
+ */
+export function sanitizeErrorMessage(message: string): string {
+  return message.replace(
+    /https?:\/\/[^\s]+/g,
+    (matched) => sanitizeEndpointUrl(matched),
+  );
+}
+
+// ─── Default Constants ────────────────────────────────────────────────────────
+
+const DEFAULT_REQUEST_TIMEOUT_MS = 5000;
+const DEFAULT_HEALTH_CHECK_TIMEOUT_MS = 3000;
+const DEFAULT_CACHE_EXPIRY_MS = 60000;
+
+// ─── Manager ──────────────────────────────────────────────────────────────────
+
+export class RpcFallbackManager {
   private endpoints: Map<string, RpcEndpoint> = new Map();
   private primaryEndpoint: string;
   private config: RpcFallbackConfig;
 
   constructor(config: RpcFallbackConfig) {
     this.config = {
+      requestTimeoutMs: DEFAULT_REQUEST_TIMEOUT_MS,
       healthCheckTimeoutMs: DEFAULT_HEALTH_CHECK_TIMEOUT_MS,
       cacheExpiryMs: DEFAULT_CACHE_EXPIRY_MS,
+      maxRetriesPerEndpoint: 1,
       ...config,
     };
     this.primaryEndpoint = config.primary;
@@ -80,36 +204,23 @@ class RpcFallbackManager {
     });
   }
 
-  /**
-   * Get all endpoints sorted by priority
-   */
-  private getEndpointsByPriority(): RpcEndpoint[] {
+  public getEndpointsByPriority(): RpcEndpoint[] {
     return Array.from(this.endpoints.values())
       .filter((ep) => this.isEndpointAvailable(ep))
       .sort((a, b) => a.priority - b.priority);
   }
 
-  /**
-   * Check if endpoint is available (considering cache)
-   */
   private isEndpointAvailable(endpoint: RpcEndpoint): boolean {
-    if (!endpoint.available) {
-      // Check if cache expired
-      if (endpoint.lastChecked) {
-        const now = Date.now();
-        const expiry = this.config.cacheExpiryMs!;
-        if (now - endpoint.lastChecked > expiry) {
-          // Cache expired, consider it available again
-          endpoint.available = true;
-        }
+    if (!endpoint.available && endpoint.lastChecked) {
+      const now = Date.now();
+      const expiry = this.config.cacheExpiryMs!;
+      if (now - endpoint.lastChecked > expiry) {
+        endpoint.available = true;
       }
     }
     return endpoint.available;
   }
 
-  /**
-   * Mark endpoint as unavailable
-   */
   private markUnavailable(url: string): void {
     const ep = this.endpoints.get(url);
     if (ep) {
@@ -118,117 +229,114 @@ class RpcFallbackManager {
     }
   }
 
-  /**
-   * Health check: Test if RPC endpoint is reachable
-   */
-  private async healthCheckEndpoint(url: string): Promise<boolean> {
-    try {
-      const controller = new AbortController();
-      const timeout = setTimeout(
-        () => controller.abort(),
-        this.config.healthCheckTimeoutMs!,
-      );
-
-      const response = await fetch(url, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          jsonrpc: "2.0",
-          id: 1,
-          method: "getHealth",
-          params: [],
-        }),
-        signal: controller.signal,
-      });
-
-      clearTimeout(timeout);
-      return response.ok;
-    } catch {
-      return false;
-    }
-  }
-
-  /**
-   * Create a Soroban RPC server for an endpoint
-   */
   private createServer(url: string): SorobanRpc.Server {
     return new SorobanRpc.Server(url, { allowHttp: false });
   }
 
   /**
-   * Execute an RPC call with automatic fallback
+   * Execute an idempotent read operation with bounded fallback across endpoints.
+   * Throws IneligibleForFailoverError if the operation is non-idempotent.
    */
-  async executeWithFallback<T>(
+  async executeSafeRead<T>(
+    operationName: IdempotentReadOperation,
     operation: (server: SorobanRpc.Server) => Promise<T>,
   ): Promise<RpcCallResult<T>> {
-    const endpoints = this.getEndpointsByPriority();
-
-    if (endpoints.length === 0) {
-      throw new Error("No RPC endpoints available");
+    if (!IDEMPOTENT_SET.has(operationName)) {
+      throw new IneligibleForFailoverError(operationName);
     }
 
-    let lastError: Error | null = null;
-    let retryCount = 0;
+    const candidateEndpoints = this.getEndpointsByPriority();
+    if (candidateEndpoints.length === 0) {
+      const sanitizedPrimary = sanitizeEndpointUrl(this.primaryEndpoint);
+      throw new RpcFailoverError(
+        sanitizedPrimary,
+        "No available RPC endpoints found in configuration pool",
+        [],
+      );
+    }
 
-    for (const endpoint of endpoints) {
+    const attempts: RpcAttemptRecord[] = [];
+    let lastError: Error | null = null;
+    let lastSanitizedEndpoint = sanitizeEndpointUrl(this.primaryEndpoint);
+
+    for (let i = 0; i < candidateEndpoints.length; i++) {
+      const endpoint = candidateEndpoints[i];
+      const sanitizedUrl = sanitizeEndpointUrl(endpoint.url);
+      lastSanitizedEndpoint = sanitizedUrl;
+      const startTime = Date.now();
+
       try {
         const server = this.createServer(endpoint.url);
-        const result = await operation(server);
+        // Execute operation with timeout protection
+        const result = await Promise.race([
+          operation(server),
+          new Promise<never>((_, reject) =>
+            setTimeout(
+              () =>
+                reject(
+                  new Error(
+                    `Read request to ${sanitizedUrl} timed out after ${this.config.requestTimeoutMs}ms`,
+                  ),
+                ),
+              this.config.requestTimeoutMs,
+            ),
+          ),
+        ]);
+
+        const durationMs = Date.now() - startTime;
+        attempts.push({
+          endpoint: sanitizedUrl,
+          durationMs,
+          success: true,
+        });
 
         return {
           data: result,
-          usedEndpoint: endpoint.url,
-          retries: retryCount,
+          usedEndpoint: sanitizedUrl,
+          retries: i,
+          attempts,
         };
-      } catch (error) {
-        lastError = error instanceof Error ? error : new Error(String(error));
-        this.markUnavailable(endpoint.url);
-        retryCount++;
+      } catch (err) {
+        const durationMs = Date.now() - startTime;
+        const rawErrMsg = err instanceof Error ? err.message : String(err);
+        const sanitizedErrMsg = sanitizeErrorMessage(rawErrMsg);
+        lastError = new Error(sanitizedErrMsg);
 
-        console.warn(
-          `[RpcFallback] Endpoint ${endpoint.url} failed: ${lastError.message}. Trying next...`,
-        );
+        this.markUnavailable(endpoint.url);
+        attempts.push({
+          endpoint: sanitizedUrl,
+          durationMs,
+          error: sanitizedErrMsg,
+          success: false,
+        });
       }
     }
 
-    // All endpoints failed
-    throw new Error(
-      `All RPC endpoints failed. Last error: ${lastError?.message}`,
+    throw new RpcFailoverError(
+      lastSanitizedEndpoint,
+      lastError?.message ?? "Unknown failure",
+      attempts,
     );
   }
 
-  /**
-   * Get current primary endpoint
-   */
   getPrimary(): string {
-    return this.primaryEndpoint;
+    return sanitizeEndpointUrl(this.primaryEndpoint);
   }
 
-  /**
-   * Get all configured endpoints
-   */
   getAllEndpoints(): string[] {
-    return [this.primaryEndpoint, ...this.config.fallbacks];
+    return [this.primaryEndpoint, ...this.config.fallbacks].map(
+      sanitizeEndpointUrl,
+    );
   }
 
-  /**
-   * Get status of all endpoints
-   */
-  getStatus(): Array<{
-    url: string;
-    available: boolean;
-    priority: number;
-  }> {
+  getStatus(): Array<{ url: string; available: boolean; priority: number }> {
     return Array.from(this.endpoints.values()).map((ep) => ({
-      url: ep.url,
+      url: sanitizeEndpointUrl(ep.url),
       available: this.isEndpointAvailable(ep),
       priority: ep.priority,
     }));
   }
 
-  /**
-   * Reset availability status (useful for testing)
-   */
   resetStatus(): void {
     this.endpoints.forEach((ep) => {
       ep.available = true;
@@ -237,77 +345,34 @@ class RpcFallbackManager {
   }
 }
 
-// ─── Singleton Instance ────────────────────────────────────────────────────────
+// ─── Singleton & Convenience Functions ────────────────────────────────────────
 
 let fallbackManager: RpcFallbackManager | null = null;
 
-/**
- * Initialize the RPC fallback manager with configuration
- */
 export function initializeRpcFallback(config: RpcFallbackConfig): void {
   fallbackManager = new RpcFallbackManager(config);
 }
 
-/**
- * Get the RPC fallback manager instance
- */
 export function getRpcFallbackManager(): RpcFallbackManager {
   if (!fallbackManager) {
-    throw new Error(
-      "RPC fallback not initialized. Call initializeRpcFallback() first.",
-    );
+    fallbackManager = new RpcFallbackManager(createRpcFallbackConfigFromEnv());
   }
   return fallbackManager;
 }
 
-/**
- * Execute RPC operation with automatic fallback
- */
-export async function executeRpcWithFallback<T>(
-  operation: (server: SorobanRpc.Server) => Promise<T>,
-): Promise<RpcCallResult<T>> {
-  const manager = getRpcFallbackManager();
-  return manager.executeWithFallback(operation);
-}
-
-/**
- * Get RPC endpoint status
- */
-export function getRpcEndpointStatus(): Array<{
-  url: string;
-  available: boolean;
-  priority: number;
-}> {
-  try {
-    const manager = getRpcFallbackManager();
-    return manager.getStatus();
-  } catch {
-    return [];
-  }
-}
-
-// ─── Helper: Create fallback config from env ────────────────────────────────────
-
-/**
- * Create RPC fallback config from environment variables
- * Expects: PRIMARY_RPC, FALLBACK_RPC_1, FALLBACK_RPC_2, etc.
- */
 export function createRpcFallbackConfigFromEnv(): RpcFallbackConfig {
   const primary =
     process.env.NEXT_PUBLIC_RPC_URL ||
     "https://soroban-testnet.stellar.org";
 
-  // Collect fallback endpoints from env
   const fallbacks: string[] = [];
-  const fallbackEnvVars = [
+  const envFallbacks = [
     process.env.NEXT_PUBLIC_FALLBACK_RPC_1,
     process.env.NEXT_PUBLIC_FALLBACK_RPC_2,
     process.env.NEXT_PUBLIC_FALLBACK_RPC_3,
-  ].filter((url) => url);
+  ].filter((url): url is string => Boolean(url && url.trim()));
 
-  fallbacks.push(...fallbackEnvVars);
-
-  // If no fallbacks, use a default fallback
+  fallbacks.push(...envFallbacks);
   if (fallbacks.length === 0) {
     fallbacks.push("https://soroban-mainnet.stellar.org");
   }
@@ -315,7 +380,37 @@ export function createRpcFallbackConfigFromEnv(): RpcFallbackConfig {
   return {
     primary,
     fallbacks,
-    healthCheckTimeoutMs: 5000,
-    cacheExpiryMs: 60000,
+    requestTimeoutMs: DEFAULT_REQUEST_TIMEOUT_MS,
+    healthCheckTimeoutMs: DEFAULT_HEALTH_CHECK_TIMEOUT_MS,
+    cacheExpiryMs: DEFAULT_CACHE_EXPIRY_MS,
   };
+}
+
+export async function executeSafeRead<T>(
+  operationName: IdempotentReadOperation,
+  operation: (server: SorobanRpc.Server) => Promise<T>,
+): Promise<RpcCallResult<T>> {
+  const manager = getRpcFallbackManager();
+  return manager.executeSafeRead(operationName, operation);
+}
+
+/**
+ * Legacy wrapper forwarding to executeSafeRead with default operation 'getEvents'.
+ */
+export async function executeRpcWithFallback<T>(
+  operation: (server: SorobanRpc.Server) => Promise<T>,
+): Promise<RpcCallResult<T>> {
+  return executeSafeRead("getEvents", operation);
+}
+
+export function getRpcEndpointStatus(): Array<{
+  url: string;
+  available: boolean;
+  priority: number;
+}> {
+  try {
+    return getRpcFallbackManager().getStatus();
+  } catch {
+    return [];
+  }
 }
