@@ -53,6 +53,42 @@ pub enum DataKey {
 
     /// Optional maximum subscription amount for this deployment.
     MaxAmount,
+
+    /// Stored admin configuration.
+    AdminConfig,
+
+    /// Stored protocol fee configuration.
+    ProtocolFeeConfig,
+
+    /// Active subscriber count per merchant.
+    MerchantSubscriberCount(Address),
+
+    /// Pending transfer proposal keyed by sha256(subscriber ++ old_merchant).
+    TransferProposal(BytesN<32>),
+}
+
+/// Global admin configuration.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AdminConfig {
+    pub admin: Address,
+    pub max_amount: i128,
+}
+
+/// Global protocol fee configuration.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProtocolFeeConfig {
+    pub fee_bps: u32,
+    pub fee_collector: Address,
+}
+
+/// Pending proposal to transfer a subscription to a new merchant.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TransferProposal {
+    pub new_merchant: Address,
+    pub expires_at:   u64,
 }
 
 /// Persistent on-chain record for a subscription.
