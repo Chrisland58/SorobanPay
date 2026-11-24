@@ -14,6 +14,7 @@
  */
 
 import { CONTRACT_ID, NETWORK_NAME } from '@/constants/network';
+import { CopyButton } from './CopyButton';
 
 /** Returns the Stellar Expert explorer URL for a contract address. */
 function explorerUrl(contractId: string, network: string): string {
@@ -69,6 +70,7 @@ export default function ContractFooter() {
           >
             {shortAddress(CONTRACT_ID)}
           </span>
+          <CopyButton text={CONTRACT_ID} label="Copy contract address" />
         </div>
 
         {/* Explorer link */}

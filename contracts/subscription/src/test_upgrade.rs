@@ -25,7 +25,8 @@ use soroban_sdk::{
 };
 
 use crate::{
-    storage::{DataKey, SubscriptionData},
+    error::ContractError,
+    storage::{subscription_key, DataKey, LegacySubscriptionData, SubscriptionData},
     SubscriptionProtocol, SubscriptionProtocolClient,
 };
 
@@ -52,6 +53,7 @@ struct UpgradeFixture {
     subscriber: Address,
     merchant:   Address,
     token:      Address,
+    admin:      Address,
     contract_id: Address,
 }
 
@@ -71,6 +73,7 @@ impl UpgradeFixture {
 
         let contract_id = env.register(SubscriptionProtocol, ());
         let client      = SubscriptionProtocolClient::new(&env, &contract_id);
+        client.initialize(&admin);
 
         token::Client::new(&env, &token).approve(
             &subscriber,
@@ -84,8 +87,54 @@ impl UpgradeFixture {
             .subscribe(&subscriber, &merchant, &token, &100_000_i128, &86_400_u64)
             .unwrap();
 
-        Self { env, subscriber, merchant, token, contract_id }
+        Self { env, subscriber, merchant, token, admin, contract_id }
     }
+}
+
+#[test]
+fn test_migrate_rewrites_legacy_entries_and_is_idempotent() {
+    let f = UpgradeFixture::new();
+    let hash = subscription_key(&f.env, &f.subscriber, &f.merchant);
+    let key = DataKey::Subscription(hash);
+    let current: SubscriptionData = f.env.storage().persistent().get(&key).unwrap();
+    let legacy = LegacySubscriptionData {
+        token: current.token,
+        amount: current.amount,
+        interval: current.interval,
+        next_payment: current.next_payment,
+        is_paused: current.is_paused,
+    };
+    f.env.storage().persistent().set(&key, &legacy);
+    f.env.storage().instance().set(&DataKey::SchemaVersion, &1_u32);
+    let subscribers = soroban_sdk::Vec::from_array(
+        &f.env,
+        [(f.subscriber.clone(), f.merchant.clone())],
+    );
+    let client = SubscriptionProtocolClient::new(&f.env, &f.contract_id);
+
+    client.migrate(&f.admin, &subscribers).unwrap();
+
+    assert_eq!(client.get_schema_version(), crate::storage::CURRENT_SCHEMA_VERSION);
+    let migrated = client.get_subscription(&f.subscriber, &f.merchant).unwrap();
+    assert_eq!(migrated.amount, 100_000_i128);
+    assert_eq!(migrated.grace_period, None);
+    assert_eq!(migrated.paused_until, None);
+    assert_eq!(migrated.overdue_since, None);
+
+    client.migrate(&f.admin, &subscribers).unwrap();
+    assert_eq!(client.get_schema_version(), crate::storage::CURRENT_SCHEMA_VERSION);
+}
+
+#[test]
+fn test_migrate_rejects_non_admin_with_unauthorized_code() {
+    let f = UpgradeFixture::new();
+    let unauthorized = Address::generate(&f.env);
+    let client = SubscriptionProtocolClient::new(&f.env, &f.contract_id);
+    let subscribers = soroban_sdk::Vec::new(&f.env);
+
+    let result = client.try_migrate(&unauthorized, &subscribers);
+    assert!(matches!(result, Err(Ok(ContractError::Unauthorized))));
+    assert_eq!(ContractError::Unauthorized as u32, 6);
 }
 
 // ─── Test 1: Optional field addition — read succeeds, defaults to None ───────
@@ -102,7 +151,7 @@ fn test_upgrade_optional_field_backward_compatible() {
     // Soroban's XDR contracttype encoding is positional — an entry serialized
     // without the trailing `memo` field will decode to `None` when the schema
     // expects `Option<u32>`.
-    let key = DataKey::Subscription(f.subscriber.clone(), f.merchant.clone());
+    let key = DataKey::Subscription(subscription_key(&f.env, &f.subscriber, &f.merchant));
 
     // Read raw v1 bytes and re-interpret as v2 schema.
     // In a real upgrade the contract WASM would be swapped; here we simulate by
@@ -145,7 +194,7 @@ fn test_upgrade_new_entrypoint_does_not_corrupt_storage() {
 
     // Simulate a v2 upgrade that adds a new `pause` entry point.
     // The existing subscription must still be readable and functional.
-    let key = DataKey::Subscription(f.subscriber.clone(), f.merchant.clone());
+    let key = DataKey::Subscription(subscription_key(&f.env, &f.subscriber, &f.merchant));
 
     let entry: SubscriptionData = f
         .env

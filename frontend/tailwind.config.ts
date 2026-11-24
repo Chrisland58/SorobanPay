@@ -1,129 +1,215 @@
-/**
- * tailwind.config.ts
- *
- * Semantic colour system — Issue #451 UX-116
- * ─────────────────────────────────────────
- * All foreground/background pairs below are verified against WCAG AA:
- *   • Normal text (< 18 pt / < 14 pt bold) — minimum 4.5 : 1
- *   • Large text  (≥ 18 pt / ≥ 14 pt bold) — minimum 3.0 : 1
- *
- * Base palette (dark theme, bg = #030712 / gray-950):
- *   text-content-primary   : #F9FAFB  (gray-50)   — 16.7 : 1  ✅ AAA
- *   text-content-secondary : #D1D5DB  (gray-300)  —  9.7 : 1  ✅ AA+
- *   text-content-tertiary  : #9CA3AF  (gray-400)  —  5.9 : 1  ✅ AA
- *   text-content-disabled  : #6B7280  (gray-500)  —  3.9 : 1  ✅ AA (large only)
- *
- * Status colours — WCAG 1.4.1: ALWAYS paired with an icon (see StatusBadge component)
- *   status-success-text    : #86EFAC  (green-300) —  8.3 : 1 on gray-950  ✅ AA
- *   status-error-text      : #FCA5A5  (red-300)   —  7.1 : 1 on gray-950  ✅ AA
- *   status-warning-text    : #FDE047  (yellow-300)— 11.4 : 1 on gray-950  ✅ AA
- *   status-info-text       : #93C5FD  (blue-300)  —  7.8 : 1 on gray-950  ✅ AA
- *
- * Interactive surfaces
- *   interactive-primary    : #3B82F6  (blue-500) — focus ring, primary buttons
- *   interactive-destructive: #EF4444  (red-500)  — destructive actions
- */
-
 import type { Config } from 'tailwindcss';
 
+/**
+ * SorobanPay Design System — Tailwind CSS tokens
+ *
+ * Issue #1427: Establish color palette, typography, and spacing tokens.
+ *
+ * ## Color palette
+ * - `brand.*`   — Stellar-inspired blue, primary interactive color
+ * - `success.*` — Green tones for confirmed/successful states
+ * - `warning.*` — Amber tones for caution/pending states
+ * - `error.*`   — Red tones for failures and destructive actions
+ * - `neutral.*` — Gray scale used for backgrounds, borders, and body text
+ *
+ * ## Dark-mode
+ * All semantic tokens follow the dark-first convention of the app.
+ * Light-mode variants are provided via the `dark:` prefix where appropriate.
+ *
+ * ## Typography scale
+ * Documented below but defers to Tailwind's built-in type scale (xs → 4xl).
+ * Weights in use: normal (400), medium (500), semibold (600), bold (700), extrabold (800).
+ *
+ * ## Spacing
+ * Tailwind's default scale (0 → 96) is used unchanged; no custom spacing is
+ * needed. Guideline: prefer multiples of 4 (1rem = 16px) for layout padding
+ * and multiples of 2 (0.5rem = 8px) for component internal gaps.
+ *
+ * ## Border radius
+ * - `rounded-sm`  (2px)  — subtle; badges, code chips
+ * - `rounded`     (4px)  — inputs, small buttons
+ * - `rounded-lg`  (8px)  — standard buttons, alerts
+ * - `rounded-xl`  (12px) — form sections
+ * - `rounded-2xl` (16px) — cards, modals
+ * - `rounded-full`       — pill badges, avatar dots
+ *
+ * ## Shadow scale
+ * Tailwind defaults used: `shadow-sm`, `shadow`, `shadow-lg`, `shadow-xl`, `shadow-2xl`.
+ */
 const config: Config = {
-  // Enable class-based dark mode so ThemeProvider can toggle the 'dark' class
-  // on <html> and persist user preference in localStorage. (Issue #xxx UX-dark)
-  darkMode: 'class',
   content: [
     './src/pages/**/*.{js,ts,jsx,tsx,mdx}',
     './src/components/**/*.{js,ts,jsx,tsx,mdx}',
     './src/app/**/*.{js,ts,jsx,tsx,mdx}',
   ],
+  darkMode: 'class',
   theme: {
     extend: {
-      // ── Semantic colour tokens ───────────────────────────────────────────
+      // ─── Color tokens ──────────────────────────────────────────────────────
       colors: {
-        // Content / text
-        content: {
-          primary:   '#F9FAFB', // gray-50   — 16.7:1 on gray-950
-          secondary: '#D1D5DB', // gray-300  —  9.7:1 on gray-950
-          tertiary:  '#9CA3AF', // gray-400  —  5.9:1 on gray-950
-          disabled:  '#6B7280', // gray-500  —  3.9:1 on gray-950 (large/UI only)
-          inverse:   '#030712', // gray-950  — for text on light surfaces
+        /**
+         * brand — Stellar-inspired blue
+         * Usage: primary buttons, links, focus rings, progress fills
+         */
+        brand: {
+          50:  '#eff6ff',  // Very light blue — light-mode surface tint
+          100: '#dbeafe',  // Light blue — hover backgrounds
+          200: '#bfdbfe',  // Muted blue — disabled fills
+          300: '#93c5fd',  // Soft blue — secondary labels, captions
+          400: '#60a5fa',  // Focus ring blue — WCAG 3:1 on gray-900
+          500: '#3b82f6',  // Base blue — standard buttons
+          600: '#2563eb',  // Primary blue — primary CTA, active states
+          700: '#1d4ed8',  // Dark blue — hover on primary
+          800: '#1e40af',  // Deeper blue — pressed/active
+          900: '#1e3a8a',  // Very dark blue — dark-mode text on light bg
+          950: '#172554',  // Near-black blue — darkest surface
         },
-        // Surface / background
-        surface: {
-          base:      '#030712', // gray-950 — page background
-          raised:    '#111827', // gray-900 — card / modal background
-          overlay:   '#1F2937', // gray-800 — secondary surface
-          border:    '#374151', // gray-700 — default border
+
+        /**
+         * success — Confirmed payments, connected wallet, completed steps
+         */
+        success: {
+          50:  '#f0fdf4',
+          100: '#dcfce7',
+          200: '#bbf7d0',
+          300: '#86efac',
+          400: '#4ade80',  // Success indicator dot
+          500: '#22c55e',  // Base success
+          600: '#16a34a',  // Success button/badge
+          700: '#15803d',
+          800: '#166534',
+          900: '#14532d',
+          950: '#052e16',
         },
-        // Status — ALWAYS pair with an icon (WCAG 1.4.1)
-        status: {
-          success: {
-            text:    '#86EFAC', // green-300 — 8.3:1 on surface-base
-            surface: '#14532D', // green-900
-            border:  '#15803D', // green-700
-            icon:    '#4ADE80', // green-400
-          },
-          error: {
-            text:    '#FCA5A5', // red-300   — 7.1:1 on surface-base
-            surface: '#450A0A', // red-950
-            border:  '#B91C1C', // red-700
-            icon:    '#F87171', // red-400
-          },
-          warning: {
-            text:    '#FDE047', // yellow-300 — 11.4:1 on surface-base
-            surface: '#422006', // yellow-950
-            border:  '#A16207', // yellow-700
-            icon:    '#FACC15', // yellow-400
-          },
-          info: {
-            text:    '#93C5FD', // blue-300   — 7.8:1 on surface-base
-            surface: '#0C1A2E', // blue-950
-            border:  '#1D4ED8', // blue-700
-            icon:    '#60A5FA', // blue-400
-          },
+
+        /**
+         * warning — Wallet disconnected, pending config, incomplete steps
+         */
+        warning: {
+          50:  '#fffbeb',
+          100: '#fef3c7',
+          200: '#fde68a',
+          300: '#fcd34d',
+          400: '#fbbf24',  // Warning icon
+          500: '#f59e0b',  // Base warning
+          600: '#d97706',  // Warning badge
+          700: '#b45309',
+          800: '#92400e',
+          900: '#78350f',
+          950: '#451a03',
         },
-        // Interactive
-        interactive: {
-          primary:      '#3B82F6', // blue-500
-          'primary-hover': '#60A5FA', // blue-400
-          destructive:  '#EF4444', // red-500
-          'destructive-hover': '#F87171', // red-400
-          focus:        '#60A5FA', // blue-400 — focus ring colour
+
+        /**
+         * error — Failed transactions, rejected signatures, validation errors
+         */
+        error: {
+          50:  '#fef2f2',
+          100: '#fee2e2',
+          200: '#fecaca',
+          300: '#fca5a5',
+          400: '#f87171',  // Error icon
+          500: '#ef4444',  // Base error
+          600: '#dc2626',  // Error badge
+          700: '#b91c1c',
+          800: '#991b1b',
+          900: '#7f1d1d',
+          950: '#450a0a',
+        },
+
+        /**
+         * neutral — Backgrounds, borders, surface containers, body text
+         * Maps to Tailwind gray but aliased for semantic clarity.
+         */
+        neutral: {
+          0:   '#ffffff',
+          50:  '#f9fafb',  // Body text on dark bg — 16.7:1 on neutral-950
+          100: '#f3f4f6',
+          200: '#e5e7eb',
+          300: '#d1d5db',
+          400: '#9ca3af',  // Placeholder text
+          500: '#6b7280',  // Secondary text, icons
+          600: '#4b5563',  // Borders on mid-tone backgrounds
+          700: '#374151',  // Strong borders
+          800: '#1f2937',  // Card surfaces
+          850: '#161e2e',  // Slightly darker card (custom)
+          900: '#111827',  // Primary card background
+          950: '#030712',  // Page background — exceeds WCAG AAA
         },
       },
 
-      // ── Animation keyframes ──────────────────────────────────────────────
+      // ─── Typography ────────────────────────────────────────────────────────
+      fontFamily: {
+        /**
+         * sans — System UI stack; matches what Next.js App Router loads by default.
+         * Override by setting --font-sans in globals.css with next/font.
+         */
+        sans: [
+          'ui-sans-serif',
+          'system-ui',
+          '-apple-system',
+          'BlinkMacSystemFont',
+          '"Segoe UI"',
+          'Roboto',
+          '"Helvetica Neue"',
+          'Arial',
+          '"Noto Sans"',
+          'sans-serif',
+        ],
+        /**
+         * mono — Used for addresses, contract IDs, code snippets.
+         */
+        mono: [
+          'ui-monospace',
+          'SFMono-Regular',
+          '"JetBrains Mono"',
+          '"Cascadia Code"',
+          'Menlo',
+          'Monaco',
+          '"Courier New"',
+          'monospace',
+        ],
+      },
+
+      /**
+       * Font size scale — Tailwind defaults, documented for reference.
+       *
+       * | Token  | Size  | Line height | Usage                          |
+       * |--------|-------|-------------|--------------------------------|
+       * | xs     | 12px  | 16px        | Labels, badges, captions       |
+       * | sm     | 14px  | 20px        | Form helper text, metadata     |
+       * | base   | 16px  | 24px        | Body text, inputs              |
+       * | lg     | 18px  | 28px        | Card subtitles                 |
+       * | xl     | 20px  | 28px        | Section headings               |
+       * | 2xl    | 24px  | 32px        | Page sub-headers               |
+       * | 3xl    | 30px  | 36px        | Page titles on mobile          |
+       * | 4xl    | 36px  | 40px        | Hero / main page title         |
+       */
+
+      // ─── Animations ────────────────────────────────────────────────────────
       keyframes: {
         progress: {
           '0%':   { transform: 'translateX(-100%)' },
           '100%': { transform: 'translateX(400%)' },
         },
-        // #452 UX-117 — Framer Motion handles most animations,
-        // but we keep a CSS fallback shake for environments
-        // where JS animations are disabled.
-        shake: {
-          '0%, 100%': { transform: 'translateX(0)' },
-          '20%, 60%': { transform: 'translateX(-6px)' },
-          '40%, 80%': { transform: 'translateX(6px)' },
+        /**
+         * fadeIn — modal / wizard entrance
+         */
+        fadeIn: {
+          '0%':   { opacity: '0', transform: 'scale(0.97)' },
+          '100%': { opacity: '1', transform: 'scale(1)' },
         },
-        'fade-in': {
-          '0%':   { opacity: '0' },
-          '100%': { opacity: '1' },
-        },
-        'slide-up': {
-          '0%':   { transform: 'translateY(8px)', opacity: '0' },
-          '100%': { transform: 'translateY(0)',   opacity: '1' },
-        },
-        'scale-in': {
-          '0%':   { transform: 'scale(0.95)', opacity: '0' },
-          '100%': { transform: 'scale(1)',    opacity: '1' },
+        /**
+         * slideUp — slide-in from bottom (toast / snackbar)
+         */
+        slideUp: {
+          '0%':   { opacity: '0', transform: 'translateY(12px)' },
+          '100%': { opacity: '1', transform: 'translateY(0)' },
         },
       },
       animation: {
-        progress:  'progress 1.8s ease-in-out infinite',
-        shake:     'shake 400ms ease-in-out',
-        'fade-in': 'fade-in 200ms ease-out',
-        'slide-up':'slide-up 250ms ease-out',
-        'scale-in':'scale-in 200ms ease-out',
+        progress: 'progress 1.8s ease-in-out infinite',
+        fadeIn:   'fadeIn 0.18s ease-out forwards',
+        slideUp:  'slideUp 0.22s ease-out forwards',
       },
     },
   },

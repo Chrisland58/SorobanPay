@@ -18,6 +18,44 @@ export function buildHealthRouter(rpcUrl: string, contractId: string): Router {
   const router = Router();
   const server = new rpc.Server(rpcUrl);
 
+  /**
+   * @openapi
+   * /health:
+   *   get:
+   *     operationId: getHealth
+   *     summary: Service health check
+   *     description: Verifies Soroban RPC reachability and contract resolvability.
+   *     tags: [Health]
+   *     responses:
+   *       "200":
+   *         description: Service is healthy
+   *         content:
+   *           application/json:
+   *             schema:
+   *               type: object
+   *               properties:
+   *                 status:
+   *                   type: string
+   *                   example: ok
+   *                 apiVersion:
+   *                   type: string
+   *                   example: v1
+   *                 checks:
+   *                   type: object
+   *                   properties:
+   *                     rpc:
+   *                       type: string
+   *                       example: ok
+   *                     contract:
+   *                       type: string
+   *                       example: ok
+   *       "503":
+   *         description: Service is degraded
+   *         content:
+   *           application/json:
+   *             schema:
+   *               $ref: "#/components/schemas/Error"
+   */
   router.get('/', async (_req: Request, res: Response) => {
     const checks: Record<string, string> = {};
     let healthy = true;

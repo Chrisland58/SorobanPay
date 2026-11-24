@@ -24,10 +24,46 @@ rules, and step-by-step checklist — see [docs/release-process.md](docs/release
 
 ### Added
 
+- **[Docs]** Complete the Keep a Changelog release history, architecture guide,
+  and Rust contract API documentation. (Closes #1405, Closes #1406, Closes #1407)
 - **[Docs]** Document all `deploy/deploy.sh` environment variables (`STELLAR_NETWORK`, `STELLAR_IDENTITY`) and derived values (`RPC_URL`, `PASSPHRASE`) in the script header and `docs/deployment.md`. (Closes #77)
 - **[Docs]** Add issue naming conventions (`Bug:`, `Feature:`, `Docs:`, `Chore:` prefixes) to `CONTRIBUTING.md`. (Closes #78)
 - **[Docs]** Expand README security model section with full sub-sections: non-custodial design, per-invocation auth table, allowance emergency stop, time-lock enforcement, storage TTL, input validation, and read-only backend. (Closes #79)
 - **[Docs]** Add `docs/release-process.md` with versioning rules, changelog hygiene guide, release note template, step-by-step release checklist, and component-specific notes for contract, frontend, and deploy releases. (Closes #80)
+- Kubernetes NetworkPolicy resources in `deploy/k8s/` restricting pod-to-pod
+  communication: default deny-all, API ingress from ingress controller only,
+  indexer pull-only egress to RPC and DB, webhook worker egress to DB and
+  external HTTPS, and PostgreSQL ingress limited to the three app pods.
+  Kustomize manifest and `deploy/k8s/README.md` with minikube + Calico test
+  instructions. Closes #1441.
+
+- GitHub Actions workflow `.github/workflows/testnet-deploy.yml` for
+  automated testnet deployment on push to `main`: builds contract WASM,
+  deploys to testnet using the alice identity, saves the contract ID as a
+  workflow artifact, builds and deploys the frontend to Vercel with the
+  updated contract ID, and runs smoke tests against the deployed frontend.
+  Closes #1443.
+- Redis StatefulSet in `deploy/k8s/` with PVC, resource limits (256Mi / 0.25
+  CPU), and liveness/readiness/startup health probes. Includes ClusterIP and
+  headless Services, a ConfigMap with `redis.conf` tuned for caching (LRU
+  eviction, no persistence), and a `kustomization.yaml` manifest. Closes #1444.
+
+- Redis-backed distributed rate limiting in the backend using `ioredis` +
+  `rate-limiter-flexible`, replacing the previous `rate-limit-redis` peer
+  dependency. Falls back to in-memory when `REDIS_URL` is unset.
+
+- Redis cache client (`backend/src/lib/redisCache.ts`) for MRR analytics
+  caching. Payout summary queries (`/api/v1/summaries`) are cached with a
+  60-second TTL, reducing database load during report generation.
+
+- Redis health check in the `/health` endpoint — reports `ok`, `disabled`
+  (when `REDIS_URL` is unset), or `error` with the failure message.
+
+- `ioredis` and `rate-limiter-flexible` dependencies added to
+  `backend/package.json`.
+
+- Redis configuration documented in `backend/.env.example` (`REDIS_URL`,
+  `RATE_LIMIT_REDIS_PREFIX`, `REDIS_CACHE_PREFIX`).
 
 ### Changed
 
@@ -36,6 +72,7 @@ rules, and step-by-step checklist — see [docs/release-process.md](docs/release
 ### Removed
 
 ### Fixed
+- **[Docs]** Resolve batched issue updates. (Closes #1405, Closes #1406, Closes #1407, Closes #1408)
 
 ### Security
 

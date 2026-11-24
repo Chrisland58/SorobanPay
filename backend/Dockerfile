@@ -1,32 +1,59 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Stage 1: builder
+#   - Installs all dependencies (including dev)
+#   - Generates Prisma client
+#   - Compiles TypeScript to dist/
+# ─────────────────────────────────────────────────────────────────────────────
 FROM node:20-alpine AS builder
 
 WORKDIR /app
 
 # Copy dependency manifests first for layer caching
 COPY package*.json ./
+
+# Install all deps (dev included — needed for tsc)
 RUN npm ci
 
-# Copy source
-COPY . .
+# Copy source files
+COPY tsconfig.json ./
+COPY prisma ./prisma
+COPY src ./src
 
-# Generate Prisma client
+# Generate Prisma client into src/generated/prisma
 RUN npx prisma generate
 
-# ── Runtime image ────────────────────────────────────────────────────────────
+# Compile TypeScript → dist/
+RUN npx tsc --build
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Stage 2: runtime
+#   - Starts from a clean node:20-alpine image
+#   - Installs only production dependencies
+#   - Copies compiled output from builder
+#   - Runs as non-root user
+# ─────────────────────────────────────────────────────────────────────────────
 FROM node:20-alpine AS runtime
 
+# dumb-init handles PID 1 duties and forwards signals (e.g. SIGTERM) correctly
 RUN apk add --no-cache dumb-init
 
 WORKDIR /app
 
-# Copy built node_modules and source from builder
-COPY --from=builder /app/node_modules ./node_modules
-COPY --from=builder /app/src ./src
-COPY --from=builder /app/prisma ./prisma
+# Install production dependencies only (no devDependencies)
 COPY package*.json ./
-COPY tsconfig.json ./
+RUN npm ci --omit=dev
+
+# Copy compiled application from builder
+COPY --from=builder /app/dist ./dist
+
+# Copy Prisma schema and generated client (needed at runtime for query engine)
+COPY --from=builder /app/prisma ./prisma
+COPY --from=builder /app/src/generated ./dist/generated
+
+# Run as non-root for security
+USER node
 
 EXPOSE 3001
 
-# Use dumb-init for correct signal handling (SIGTERM → graceful shutdown)
-CMD ["dumb-init", "node", "--require", "ts-node/register/transpile-only", "src/index.ts"]
+# Use dumb-init so SIGTERM is forwarded to the Node process → graceful shutdown
+CMD ["dumb-init", "node", "dist/index.js"]

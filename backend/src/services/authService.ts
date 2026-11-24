@@ -26,7 +26,7 @@ import {
   BASE_FEE,
   Networks,
 } from '@stellar/stellar-sdk';
-import { createHmac, randomBytes } from 'crypto';
+import { createHmac, randomBytes, randomUUID } from 'crypto';
 import { getRedisClient } from '../lib/redis';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -361,5 +361,210 @@ export async function _clearChallengesForTesting(): Promise<void> {
   const keys = await client.keys('sep10:challenge:*');
   if (keys.length > 0) {
     await client.del(...keys);
+  }
+}
+
+// ─── Refresh Token Rotation (Issue #1062) ────────────────────────────────────
+//
+// Design:
+//   - Each refresh token is a 32-byte random hex string, unique per issuance.
+//   - Tokens belong to a "family" (shared `familyId`).  Every rotation stays
+//     within the same family.
+//   - When a token is used it is atomically deleted from Redis and a new token
+//     in the same family is issued.
+//   - To detect replay: after deletion the used token's key is stored in a
+//     short-lived "used" sentinel so a second presentation of the old token
+//     can be recognised as a replay.
+//   - On replay: the entire family is revoked (a revocation sentinel is set).
+//     Any subsequent attempt to rotate any token in that family fails, even
+//     if the new token was legitimately issued.
+//   - All error messages exposed to callers are identical and non-disclosing,
+//     so replay vs. expiry vs. revocation cannot be distinguished externally.
+
+/** Refresh token TTL: 30 days. */
+export const REFRESH_TOKEN_TTL_SECONDS = 30 * 24 * 60 * 60;
+
+/** A refresh token record stored in Redis and returned to callers. */
+export interface RefreshTokenRecord {
+  /** UUID v4 — unique per token issuance. */
+  tokenId: string;
+  /** UUID v4 — constant across all rotations within a family. */
+  familyId: string;
+  /** Merchant Stellar public key. */
+  address: string;
+  /** 32-byte random hex — the opaque bearer value presented by the client. */
+  token: string;
+  /** Unix timestamp (seconds) when this token expires. */
+  expiresAt: number;
+}
+
+/** Thrown for all refresh-token errors. Message is always non-disclosing. */
+export class RefreshTokenError extends Error {
+  constructor(message = 'Invalid or expired refresh token') {
+    super(message);
+    this.name = 'RefreshTokenError';
+  }
+}
+
+// Redis key helpers
+function rtTokenKey(token: string): string {
+  return `refresh:token:${token}`;
+}
+function rtUsedKey(token: string): string {
+  return `refresh:used:${token}`;
+}
+function rtFamilyRevokedKey(familyId: string): string {
+  return `refresh:family:revoked:${familyId}`;
+}
+
+/**
+ * Issue a new refresh token for `address`.
+ *
+ * Stores the token record in Redis with a TTL of REFRESH_TOKEN_TTL_SECONDS.
+ * The `familyId` is freshly generated (starts a new family).
+ *
+ * @throws Error if the Redis store is unavailable.
+ */
+export async function issueRefreshToken(address: string): Promise<RefreshTokenRecord> {
+  const client = requireRedis();
+
+  const tokenId = randomUUID();
+  const familyId = randomUUID();
+  const token = randomBytes(32).toString('hex');
+  const now = Math.floor(Date.now() / 1000);
+  const expiresAt = now + REFRESH_TOKEN_TTL_SECONDS;
+
+  const record: RefreshTokenRecord = { tokenId, familyId, address, token, expiresAt };
+
+  await client.set(
+    rtTokenKey(token),
+    JSON.stringify(record),
+    'EX',
+    REFRESH_TOKEN_TTL_SECONDS,
+  );
+
+  return record;
+}
+
+/**
+ * Rotate a refresh token.
+ *
+ * Steps:
+ *  1. Check if the family is already revoked → fail (non-disclosing).
+ *  2. Atomically fetch-and-delete the current token from Redis.
+ *  3. If not found:
+ *     a. If a "used" sentinel exists for this token → replay detected.
+ *        → Revoke the family; fail (non-disclosing).
+ *     b. Otherwise (truly unknown / expired) → fail (non-disclosing).
+ *  4. Mark the old token as "used" (replay detection sentinel).
+ *  5. Issue a new token in the same family.
+ *  6. Return the new record.
+ *
+ * All failure paths return `RefreshTokenError` with the same message so the
+ * caller cannot distinguish replay, revocation, or expiry.
+ *
+ * @throws RefreshTokenError on any validation failure (non-disclosing).
+ * @throws Error if the Redis store is unavailable.
+ */
+export async function rotateRefreshToken(token: string): Promise<RefreshTokenRecord> {
+  const client = requireRedis();
+
+  // Step 1: Attempt to atomically consume the token (fetch + delete in one round-trip)
+  const rawRecord = await client.getdel(rtTokenKey(token));
+
+  if (!rawRecord) {
+    // Token not found — check if it was already used (replay) or simply expired/unknown
+    const usedSentinel = await client.get(rtUsedKey(token));
+    if (usedSentinel) {
+      // Replay detected: this token was already rotated.  Parse the family from
+      // the sentinel so we can revoke it.
+      let familyId: string | undefined;
+      try {
+        const sentinelData = JSON.parse(usedSentinel) as { familyId?: string };
+        familyId = sentinelData.familyId;
+      } catch {
+        // Sentinel value is just the familyId string directly
+        familyId = usedSentinel;
+      }
+
+      if (familyId) {
+        // Revoke the entire family so all future rotations fail
+        await client.set(
+          rtFamilyRevokedKey(familyId),
+          '1',
+          'EX',
+          REFRESH_TOKEN_TTL_SECONDS * 2,
+        );
+        console.warn(
+          `[authService] Refresh token replay detected for family ${familyId} — family revoked`,
+        );
+      }
+    }
+    // Non-disclosing: same message for replay, expiry, and unknown token
+    throw new RefreshTokenError();
+  }
+
+  // We have the record — parse it
+  let record: RefreshTokenRecord;
+  try {
+    record = JSON.parse(rawRecord) as RefreshTokenRecord;
+  } catch {
+    throw new RefreshTokenError();
+  }
+
+  // Step 2: Check if the family has been revoked (could happen if a sibling was replayed)
+  const revoked = await client.get(rtFamilyRevokedKey(record.familyId));
+  if (revoked) {
+    console.warn(
+      `[authService] Refresh token presented for revoked family ${record.familyId}`,
+    );
+    throw new RefreshTokenError();
+  }
+
+  // Step 3: Store a used sentinel so a re-presentation of this token triggers replay detection
+  await client.set(
+    rtUsedKey(token),
+    JSON.stringify({ familyId: record.familyId }),
+    'EX',
+    REFRESH_TOKEN_TTL_SECONDS * 2,
+  );
+
+  // Step 4: Issue the replacement token in the same family
+  const newTokenId = randomUUID();
+  const newToken = randomBytes(32).toString('hex');
+  const now = Math.floor(Date.now() / 1000);
+  const expiresAt = now + REFRESH_TOKEN_TTL_SECONDS;
+
+  const newRecord: RefreshTokenRecord = {
+    tokenId: newTokenId,
+    familyId: record.familyId,
+    address: record.address,
+    token: newToken,
+    expiresAt,
+  };
+
+  await client.set(
+    rtTokenKey(newToken),
+    JSON.stringify(newRecord),
+    'EX',
+    REFRESH_TOKEN_TTL_SECONDS,
+  );
+
+  return newRecord;
+}
+
+/**
+ * Clear all refresh token keys. Only intended for test teardown.
+ * @internal
+ */
+export async function _clearRefreshTokensForTesting(): Promise<void> {
+  const client = getRedisClient();
+  if (!client) return;
+  const patterns = ['refresh:token:*', 'refresh:used:*', 'refresh:family:revoked:*'];
+  for (const pattern of patterns) {
+    const keys = await client.keys(pattern);
+    if (keys.length > 0) {
+      await client.del(...keys);
+    }
   }
 }

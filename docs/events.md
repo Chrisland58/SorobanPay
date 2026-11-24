@@ -23,7 +23,9 @@ This document provides comprehensive documentation for all events emitted by the
 | Event | Emitted by | Topics | Data | Condition |
 |-------|-----------|--------|------|-----------|
 | `subscribe` | `subscribe()` | `(sym, subscriber, merchant, token)` | `i128` amount | Always on success |
+| `updated` | `update_subscription()` | `(sym, subscriber, merchant, token)` | `(i128 old_amount, u64 old_interval, i128 new_amount, u64 new_interval)` | Successful update |
 | `executed` | `execute_payment()`, `batch_execute_payment()` | `(sym, subscriber, merchant, token)` | `(i128 amount, u64 nonce)` | Successful transfer |
+| `fee_collected` | `execute_payment()`, `batch_execute_payment()` | `(sym, subscriber, merchant, fee_collector)` | `i128` fee amount | Successful nonzero fee transfer |
 | `expired` | `expire_subscription()` | `(sym, subscriber, merchant)` | `()` | Grace period elapsed |
 | `payment_transfer_failure` | `execute_payment()`, `batch_execute_payment()` | `(sym, subscriber, merchant)` | `i128` amount attempted | Insufficient subscriber balance |
 | `payment_transfer_success` | `batch_execute_payment()` | `(sym, subscriber, merchant)` | `i128` amount | Batch payment succeeded |
@@ -178,6 +180,25 @@ function decodeSubscribeEvent(event) {
 }
 ```
 
+### `updated`
+
+Emitted after `update_subscription()` successfully changes an active subscription's
+amount and/or billing interval.
+
+**Topics**:
+- `Symbol("updated")`
+- `Address` - Subscriber address
+- `Address` - Merchant address
+- `Address` - Token contract address
+
+**Data**:
+- `i128` - Previous payment amount
+- `u64` - Previous interval in seconds
+- `i128` - New payment amount
+- `u64` - New interval in seconds
+
+**When Emitted**: After the updated subscription has been stored successfully.
+
 ### 3. executed
 
 **Purpose**: Records successful payment execution.
@@ -220,7 +241,31 @@ events::emit_executed(
 }
 ```
 
-### 4. payment_transfer_success
+### 4. fee_collected
+
+Emitted after a nonzero protocol fee has been successfully transferred to the fee collector during `execute_payment()` or `batch_execute_payment()`. No event is emitted when the calculated fee is zero.
+
+**Topics**:
+- `Symbol("fee_collected")`
+- `Address` - Subscriber address
+- `Address` - Merchant address
+- `Address` - Fee collector address
+
+**Data**:
+- `i128` - Fee amount transferred
+
+**Rust Example**:
+```rust
+events::emit_fee_collected(
+    &env,
+    &subscriber,
+    &merchant,
+    &fee_collector,
+    fee_amount,
+);
+```
+
+### 5. payment_transfer_success
 
 **Purpose**: Provides dedicated telemetry for successful payment transfers, enabling improved backend reconciliation.
 
@@ -244,7 +289,7 @@ events::emit_payment_transfer_success(
 );
 ```
 
-### 5. payment_transfer_failure
+### 6. payment_transfer_failure
 
 **Purpose**: Tracks failed payment attempts for reconciliation and retry logic.
 
@@ -268,7 +313,7 @@ events::emit_payment_transfer_failure(
 );
 ```
 
-### 6. cancel
+### 7. cancel
 
 **Purpose**: Records subscription cancellation.
 
@@ -302,7 +347,7 @@ events::emit_cancel(&env, &subscriber, &merchant);
 }
 ```
 
-### 7. batch_execute_initiated
+### 8. batch_execute_initiated
 
 **Purpose**: Provides telemetry for batch payment execution operations.
 
@@ -320,7 +365,7 @@ events::emit_cancel(&env, &subscriber, &merchant);
 events::emit_batch_execute_initiated(&env, &merchant, 25u32);
 ```
 
-### 8. contract_migrated
+### 9. contract_migrated
 
 **Purpose**: Records successful schema migrations.
 
@@ -338,7 +383,7 @@ events::emit_batch_execute_initiated(&env, &merchant, 25u32);
 events::emit_contract_migrated(&env, &admin, 2u32);
 ```
 
-### 9. low_allowance
+### 10. low_allowance
 
 **Purpose**: Warning when subscriber's token allowance is below subscription amount.
 
@@ -365,7 +410,7 @@ events::emit_low_allowance(
 );
 ```
 
-### 10. pause
+### 11. pause
 
 **Purpose**: Records subscription pause operations.
 
@@ -388,7 +433,7 @@ events::emit_pause(&env, &subscriber, &merchant, None);
 events::emit_pause(&env, &subscriber, &merchant, Some(1698768000u64));
 ```
 
-### 11. resume
+### 12. resume
 
 **Purpose**: Records subscription resume operations.
 

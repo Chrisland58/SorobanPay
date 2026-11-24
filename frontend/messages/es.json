@@ -81,6 +81,8 @@
   "languageSelector": {
     "label": "Idioma",
     "en": "English",
-    "es": "Español"
+    "es": "Español",
+    "fr": "Français",
+    "ar": "العربية"
   }
 }

@@ -14,6 +14,7 @@ const mockIsAllowed = jest.fn();
 const mockSetAllowed = jest.fn();
 const mockRequestAccess = jest.fn();
 const mockGetAddress = jest.fn();
+const mockGetNetwork = jest.fn();
 const mockSignTransaction = jest.fn();
 
 jest.mock('@stellar/freighter-api', () => ({
@@ -22,11 +23,17 @@ jest.mock('@stellar/freighter-api', () => ({
   setAllowed: (...args: unknown[]) => mockSetAllowed(...args),
   requestAccess: (...args: unknown[]) => mockRequestAccess(...args),
   getAddress: (...args: unknown[]) => mockGetAddress(...args),
+  getNetwork: (...args: unknown[]) => mockGetNetwork(...args),
   signTransaction: (...args: unknown[]) => mockSignTransaction(...args),
   WatchWalletChanges: jest.fn(),
 }));
 
-import { detectFreighter, connectWallet, signTx } from '@/lib/wallet_manager';
+import {
+  detectFreighter,
+  connectWallet,
+  restoreWalletSession,
+  signTx,
+} from '@/lib/wallet_manager';
 
 // ── detectFreighter ────────────────────────────────────────────────────────
 
@@ -99,6 +106,38 @@ describe('connectWallet', () => {
   });
 });
 
+// ── restoreWalletSession ───────────────────────────────────────────────────
+
+describe('restoreWalletSession', () => {
+  const PUBLIC_KEY = 'G' + 'A'.repeat(55);
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockGetAddress.mockResolvedValue({ address: PUBLIC_KEY, error: null });
+  });
+
+  it('returns the active public key without prompting for access', async () => {
+    expect(await restoreWalletSession()).toBe(PUBLIC_KEY);
+    expect(mockSetAllowed).not.toHaveBeenCalled();
+    expect(mockRequestAccess).not.toHaveBeenCalled();
+  });
+
+  it('returns null when Freighter returns an error', async () => {
+    mockGetAddress.mockResolvedValueOnce({ address: '', error: 'not allowed' });
+    expect(await restoreWalletSession()).toBeNull();
+  });
+
+  it('returns null when Freighter returns an empty address', async () => {
+    mockGetAddress.mockResolvedValueOnce({ address: '', error: null });
+    expect(await restoreWalletSession()).toBeNull();
+  });
+
+  it('returns null when getAddress throws', async () => {
+    mockGetAddress.mockRejectedValueOnce(new Error('extension unavailable'));
+    expect(await restoreWalletSession()).toBeNull();
+  });
+});
+
 // ── signTx ─────────────────────────────────────────────────────────────────
 
 describe('signTx', () => {
@@ -109,7 +148,8 @@ describe('signTx', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
-    mockGetAddress.mockResolvedValue({ address: PUBLIC_KEY, error: null });
+    mockGetAddress.mockResolvedValue({ address: 'G' + 'A'.repeat(55), error: null });
+    mockGetNetwork.mockResolvedValue({ networkPassphrase: PASSPHRASE, error: null });
   });
 
   it('returns the signed XDR on success', async () => {
@@ -132,22 +172,36 @@ describe('signTx', () => {
     });
   });
 
-  it('does not request a signature from a newly selected account', async () => {
-    mockGetAddress.mockResolvedValueOnce({ address: 'G' + 'B'.repeat(55) });
-    await expect(signTx(UNSIGNED_XDR, PASSPHRASE, PUBLIC_KEY)).rejects.toThrow(
-      /account changed.*restart/i,
-    );
+  it('verifies the active account and network before signing when an expected account is supplied', async () => {
+    mockSignTransaction.mockResolvedValueOnce({ signedTxXdr: SIGNED_XDR });
+    await signTx(UNSIGNED_XDR, PASSPHRASE, 'G' + 'A'.repeat(55));
+    expect(mockGetAddress).toHaveBeenCalled();
+    expect(mockGetNetwork).toHaveBeenCalled();
+    expect(mockSignTransaction).toHaveBeenCalled();
+  });
+
+  it('does not sign when the Freighter account changed', async () => {
+    mockGetAddress.mockResolvedValueOnce({ address: 'G' + 'B'.repeat(55), error: null });
+    await expect(signTx(UNSIGNED_XDR, PASSPHRASE, 'G' + 'A'.repeat(55))).rejects.toThrow(/account changed/i);
     expect(mockSignTransaction).not.toHaveBeenCalled();
   });
 
-  it('rejects a signature returned for a different account', async () => {
-    mockSignTransaction.mockResolvedValueOnce({
-      signedTxXdr: SIGNED_XDR,
-      signerAddress: 'G' + 'B'.repeat(55),
-    });
-    await expect(signTx(UNSIGNED_XDR, PASSPHRASE, PUBLIC_KEY)).rejects.toThrow(
-      /different account/i,
-    );
+  it('does not sign when the Freighter network changed', async () => {
+    mockGetNetwork.mockResolvedValueOnce({ networkPassphrase: 'unexpected network', error: null });
+    await expect(signTx(UNSIGNED_XDR, PASSPHRASE, 'G' + 'A'.repeat(55))).rejects.toThrow(/network changed/i);
+    expect(mockSignTransaction).not.toHaveBeenCalled();
+  });
+
+  it('returns a generic error when Freighter cannot verify the account', async () => {
+    mockGetAddress.mockResolvedValueOnce({ address: '', error: 'sensitive provider detail' });
+    try {
+      await signTx(UNSIGNED_XDR, PASSPHRASE, 'G' + 'A'.repeat(55));
+      throw new Error('Expected stale wallet verification to fail');
+    } catch (error) {
+      expect((error as Error).message).toMatch(/unable to verify the current freighter account/i);
+      expect((error as Error).message).not.toContain('sensitive provider detail');
+    }
+    expect(mockSignTransaction).not.toHaveBeenCalled();
   });
 
   it('throws when signTransaction returns an error field', async () => {

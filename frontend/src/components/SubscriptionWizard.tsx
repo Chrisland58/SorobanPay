@@ -30,7 +30,9 @@ import {
   type KeyboardEvent,
 } from 'react';
 import { useWallet } from '@/hooks/useWallet';
+import { useAddressBook } from '@/hooks/useAddressBook';
 import { ErrorBoundary } from '@/components/ErrorBoundary';
+import { MerchantAddressInput } from '@/components/MerchantAddressInput';
 import { buildAndSubmitSubscribe } from '@/lib/transaction_builder';
 import {
   isValidGAddress,
@@ -152,12 +154,12 @@ function StepMerchant({
   value,
   onChange,
   onNext,
-  subscriber,
+  addressBook,
 }: {
   value: string;
   onChange: (v: string) => void;
   onNext: () => void;
-  subscriber: string;
+  addressBook: import('@/hooks/useAddressBook').UseAddressBookReturn;
 }) {
   const [error, setError] = useState('');
   const inputRef = useRef<HTMLInputElement>(null);
@@ -168,10 +170,6 @@ function StepMerchant({
     if (!value.trim()) { setError('Merchant address is required.'); return false; }
     if (!isValidGAddress(value)) {
       setError('Must be a valid Stellar G-address (56 characters, starts with G).');
-      return false;
-    }
-    if (subscriber && value.trim() === subscriber.trim()) {
-      setError('Merchant address cannot be the same as your subscriber address. A subscription to yourself is not allowed.');
       return false;
     }
     setError('');
@@ -189,31 +187,27 @@ function StepMerchant({
         Choose a merchant
       </h3>
       <p className="text-sm text-gray-400 mb-5 leading-relaxed">
-        Enter the Stellar public key of the merchant you want to subscribe to.
+        Enter the Stellar public key of the merchant you want to subscribe to,
+        or pick one from your address book.
       </p>
 
       <div className="space-y-2">
         <label htmlFor="wiz-merchant" className="block text-sm font-semibold text-gray-200">
           Merchant address <span className="text-red-400" aria-hidden="true">*</span>
         </label>
-        <input
-          ref={inputRef}
+        <MerchantAddressInput
           id="wiz-merchant"
-          type="text"
-          placeholder="GABC…WXYZ"
-          autoComplete="off"
           value={value}
-          onChange={(e) => { onChange(e.target.value); if (error) setError(''); }}
-          onBlur={validate}
-          aria-required="true"
-          aria-invalid={!!error}
-          aria-describedby={error ? 'wiz-merchant-err' : 'wiz-merchant-hint'}
-          className={`${inputCls} ${error ? errorInputCls : ''}`}
+          onChange={(v) => { onChange(v); if (error) setError(''); }}
+          addressBook={addressBook}
+          hasError={!!error}
+          ariaDescribedBy={error ? 'wiz-merchant-err' : 'wiz-merchant-hint'}
         />
         {error
           ? <p id="wiz-merchant-err" role="alert" className="text-xs text-red-400 font-medium">{error}</p>
           : <p id="wiz-merchant-hint" className="text-xs text-gray-400">
               Starts with <code className="bg-gray-800 px-1 rounded text-gray-200">G</code>, 56 characters long.
+              Use the <span aria-hidden="true">📒</span> button to manage saved addresses.
             </p>
         }
       </div>
@@ -520,10 +514,6 @@ function StepReview({
   const days = Math.round(Number(form.intervalSeconds) / 86400);
   const nextPayment = new Date(Date.now() + Number(form.intervalSeconds) * 1000);
 
-  // Guard: should not be reachable, but block confirm if addresses are identical
-  const isSelfSubscription =
-    subscriber.trim() !== '' && form.merchantAddress.trim() === subscriber.trim();
-
   const rows: [string, string][] = [
     ['Subscriber', `${subscriber.slice(0, 8)}…${subscriber.slice(-6)}`],
     ['Merchant',   `${form.merchantAddress.slice(0, 8)}…${form.merchantAddress.slice(-6)}`],
@@ -554,25 +544,13 @@ function StepReview({
         To stop payments, you must call <code className="bg-yellow-900/40 px-1 rounded">cancel()</code> or revoke the token allowance.
       </div>
 
-      {isSelfSubscription && (
-        <div role="alert" className="rounded-lg bg-red-900/40 border border-red-600/60 px-4 py-3 mb-4 text-xs text-red-300 leading-relaxed">
-          <strong>Self-subscription not allowed.</strong> The merchant address matches your subscriber address.
-          Go back and enter a different merchant address.
-        </div>
-      )}
-
       <div className="flex gap-3">
         <button type="button" onClick={onBack}
           className="flex-1 rounded-lg border border-gray-600 bg-gray-800/60 text-gray-300 hover:bg-gray-700 py-3 text-sm font-semibold min-h-[48px] transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-500">
           ← Back
         </button>
-        <button
-          type="button"
-          onClick={onConfirm}
-          disabled={isSelfSubscription}
-          aria-disabled={isSelfSubscription}
-          className="flex-1 rounded-lg bg-green-600 hover:bg-green-500 active:bg-green-700 py-3 text-sm font-semibold text-white min-h-[48px] transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-green-400 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-green-600"
-        >
+        <button type="button" onClick={onConfirm}
+          className="flex-1 rounded-lg bg-green-600 hover:bg-green-500 active:bg-green-700 py-3 text-sm font-semibold text-white min-h-[48px] transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-green-400">
           Confirm &amp; Sign →
         </button>
       </div>
@@ -605,12 +583,6 @@ function StepSigning({
     setErrorMsg('');
     setRequiresWalletRestart(false);
     try {
-      // Guard: belt-and-suspenders check before any network call
-      if (subscriber.trim() === form.merchantAddress.trim()) {
-        throw new Error(
-          'SelfSubscription: subscriber and merchant cannot be the same address.',
-        );
-      }
       const result = await buildAndSubmitSubscribe(
         {
           subscriber,
@@ -759,6 +731,7 @@ function WizardSuccess({
 
 function WizardShell() {
   const { publicKey } = useWallet();
+  const addressBook = useAddressBook(publicKey);
 
   const [step, setStep] = useState(1);
   const [form, setForm] = useState<WizardFormState>({
@@ -846,7 +819,7 @@ function WizardShell() {
           value={form.merchantAddress}
           onChange={(v) => update('merchantAddress', v)}
           onNext={goNext}
-          subscriber={publicKey ?? ''}
+          addressBook={addressBook}
         />
       ) : step === 2 ? (
         <StepTokenAmount

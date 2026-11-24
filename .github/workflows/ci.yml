@@ -227,6 +227,39 @@ jobs:
         run: npm run test:integration
         working-directory: backend
 
+  # Issue #1389 – Validate OpenAPI spec
+  backend-openapi-validate:
+    name: Validate OpenAPI spec
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+        working-directory: backend
+
+      - name: Validate OpenAPI spec is valid YAML
+        run: |
+          node -e "
+            const yaml = require('js-yaml');
+            const fs = require('fs');
+            try {
+              yaml.load(fs.readFileSync('api/openapi.yaml', 'utf8'));
+              console.log('OpenAPI spec is valid YAML');
+            } catch(e) {
+              console.error('Invalid YAML:', e.message);
+              process.exit(1);
+            }
+          "
+        working-directory: backend
+
   # Issue #433 – Frontend unit tests + coverage (>80%)
   frontend:
     name: Frontend type check, unit tests & coverage

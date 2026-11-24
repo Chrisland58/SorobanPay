@@ -15,6 +15,7 @@
 import { useState, useCallback } from 'react';
 import { truncateAddress, formatInterval, stroopsToTokens } from '@/lib/utils';
 import { buildAndSubmitCancel } from '@/lib/cancel_builder';
+import { CopyButton } from './CopyButton';
 import {
   CONTRACT_ID,
   NETWORK_PASSPHRASE,
@@ -144,12 +145,15 @@ export default function SubscriptionCard({
             <p className="text-xs text-gray-500 uppercase tracking-wide font-semibold mb-1">
               Merchant
             </p>
-            <p
-              className="font-mono text-white text-sm truncate"
-              title={merchant}
-            >
-              {truncateAddress(merchant, 8)}
-            </p>
+            <div className="flex items-center gap-1.5 min-w-0">
+              <p
+                className="font-mono text-white text-sm truncate"
+                title={merchant}
+              >
+                {truncateAddress(merchant, 8)}
+              </p>
+              <CopyButton text={merchant} label="Copy merchant address" />
+            </div>
           </div>
 
           {/* Status badge */}
@@ -167,8 +171,9 @@ export default function SubscriptionCard({
           {/* Token */}
           <div>
             <dt className="text-xs text-gray-500 mb-0.5">Token</dt>
-            <dd className="font-mono text-gray-200 text-xs truncate" title={token}>
-              {truncateAddress(token, 6)}
+            <dd className="flex items-center gap-1 font-mono text-gray-200 text-xs">
+              <span className="truncate" title={token}>{truncateAddress(token, 6)}</span>
+              <CopyButton text={token} label="Copy token address" />
             </dd>
           </div>
 

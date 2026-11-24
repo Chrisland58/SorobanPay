@@ -1,58 +1,64 @@
 ## Summary
 
-<!-- What does this PR do? A concise paragraph or a short bullet list. -->
+<!-- Describe what this PR does and why. Link the related issue. -->
 
-## Related Issues
-
-<!-- Link every issue this PR addresses. Use "Closes" so the issue auto-closes on merge. -->
-- Closes #
+Closes #
 
 ## Changes
 
-<!-- List the specific files or components modified. -->
-- `contracts/subscription/` —
-- `frontend/` —
-- `backend/` —
-- `docs/` —
-- `deploy/` —
+<!-- List the key changes made in this PR. -->
 
-## Testing Performed
+- 
+- 
 
-<!-- Describe what you ran and what you observed. -->
+## Type of Change
 
-### Contract
-- [ ] `make test` — all tests pass
-- [ ] Testnet deployment verified with `bash deploy/deploy.sh`
-- [ ] Manual `stellar contract invoke` smoke test
-
-### Frontend
-- [ ] `npm run type-check` passes
-- [ ] `next lint` — no new warnings
-- [ ] Tested in browser with Freighter on testnet
-- [ ] Responsive layout checked (mobile + desktop)
-
-### Backend
-- [ ] `npm test` (Jest) — all tests pass
-- [ ] Integration test against testnet RPC
-- [ ] Health endpoint (`GET /health`) returns `200`
-
-## Breaking Changes
-
-<!-- Does this PR change any public interface, storage layout, event schema, or API contract?
-     If yes, describe what downstream consumers must update. -->
-- [ ] No breaking changes
-- [ ] Yes — describe: 
-
-## Screenshots / Demo
-
-<!-- For UI changes, paste before/after screenshots or a short GIF. -->
+- [ ] Bug fix (non-breaking change that fixes an issue)
+- [ ] New feature (non-breaking change that adds functionality)
+- [ ] Breaking change (fix or feature that would cause existing functionality to change)
+- [ ] Documentation update
+- [ ] CI / tooling / infrastructure change
+- [ ] Refactor (no functional change)
 
 ## Checklist
 
-- [ ] Tests added or updated for new/changed behavior
-- [ ] `CHANGES.md` updated (if this is a user-facing change)
-- [ ] Relevant docs (`docs/`, `README.md`) updated
-- [ ] No secrets, API keys, or `.env` values committed
-- [ ] Branch is up-to-date with `main`
-- [ ] PR title is concise (≤ 70 characters)
-- [ ] Self-reviewed the diff before requesting review
+### Tests
+- [ ] I have added or updated unit tests for the changes
+- [ ] All existing tests pass locally (`make test` for contract, `npm test` for frontend/backend)
+- [ ] Integration tests updated if applicable
+
+### Documentation
+- [ ] Code is self-documenting or inline comments are added for complex logic
+- [ ] README or `docs/` updated if the change affects setup, usage, or architecture
+- [ ] CHANGELOG / `CHANGES.md` updated if this is a notable change
+
+### Breaking Changes
+- [ ] This PR introduces **no breaking changes**
+  - _If it does_, describe the migration path below:
+
+<!-- Breaking change migration notes (delete if not applicable):
+  - What breaks:
+  - How to migrate:
+-->
+
+### Smart Contract (if applicable)
+- [ ] Contract changes are backward compatible with existing on-chain subscriptions
+- [ ] New entry points / events are documented in `docs/contract-api.md` or `docs/events.md`
+- [ ] Fee / budget estimates updated in README if costs changed
+
+### Frontend (if applicable)
+- [ ] Type check passes: `npm run type-check`
+- [ ] Lint passes: `npm run lint`
+- [ ] Wallet connection states (Disconnected / Connected / Submitting / Success / Error) remain intact
+
+### Backend (if applicable)
+- [ ] No secrets committed (checked `.env.example`, not `.env`)
+- [ ] New environment variables added to `.env.example` with descriptions
+
+## Screenshots / Recordings (if UI changes)
+
+<!-- Attach screenshots or a short screen recording showing the change. -->
+
+## Additional Notes
+
+<!-- Anything else reviewers should know — edge cases, known issues, follow-up work. -->

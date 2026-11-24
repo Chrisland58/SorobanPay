@@ -21,7 +21,7 @@
  *   - Shows the transaction hash with a Stellar Expert explorer link on success.
  */
 
-import { useState, useCallback, useEffect, useRef, type FormEvent } from 'react';
+import { useState, useCallback, useEffect, type FormEvent } from 'react';
 import { useWallet } from '@/hooks/useWallet';
 import { buildExplorerUrl } from '@/hooks/useTransactionPoller';
 import { buildAndSubmitUpdateSubscription } from '@/lib/transaction_builder';
@@ -29,6 +29,7 @@ import { assertWalletAccount } from '@/lib/wallet_manager';
 import { isValidGAddress, MIN_INTERVAL_SECONDS, MAX_INTERVAL_SECONDS } from '@/lib/validation';
 import { CONTRACT_ID, NETWORK_PASSPHRASE, NETWORK_NAME, RPC_URL } from '@/constants/network';
 import { mapError } from '@/lib/errors';
+import { useToast } from '@/components/Toast';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -86,6 +87,16 @@ function ConfirmModal({
   onCancel: () => void;
 }) {
   const days = Math.round(Number(interval) / 86400);
+
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        onCancel();
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [onCancel]);
   return (
     <div
       role="dialog"
@@ -144,15 +155,8 @@ function ConfirmModal({
 export default function UpdateSubscriptionForm({
   initialValues,
 }: UpdateSubscriptionFormProps = {}) {
-  const {
-    publicKey,
-    isCheckingFreighter,
-    freighterInstalled,
-    accountChangeDetected,
-    connect,
-  } = useWallet();
-  const accountRef = useRef(publicKey);
-  accountRef.current = publicKey;
+  const { publicKey, isCheckingFreighter, freighterInstalled, connect } = useWallet();
+  const { showToast } = useToast();
 
   const [merchantAddress, setMerchantAddress] = useState(
     initialValues?.merchantAddress ?? '',
@@ -331,16 +335,11 @@ export default function UpdateSubscriptionForm({
         RPC_URL,
       );
       setSuccessTxHash(result.txHash);
+      showToast({ variant: 'success', message: 'Subscription updated' });
     } catch (err) {
       const mapped = mapError(err);
-      const rawMessage = err instanceof Error ? err.message : String(err);
-      setTxError(
-        /account changed|could not verify the freighter account|different account/i.test(
-          rawMessage,
-        )
-          ? rawMessage
-          : mapped.message,
-      );
+      setTxError(mapped.message);
+      showToast({ variant: 'error', message: mapped.message, action: mapped.action });
     } finally {
       setIsSubmitting(false);
     }

@@ -99,9 +99,9 @@ describe('PaymentHistoryTable', () => {
   // ── Empty state ──────────────────────────────────────────────────────────
 
   describe('empty state', () => {
-    it('renders "No payments found" when events are empty and not loading', () => {
+    it('renders the empty state when events are empty and not loading', () => {
       render(<PaymentHistoryTable {...defaultProps()} />);
-      expect(screen.getByText(/no payments found/i)).toBeInTheDocument();
+      expect(screen.getByText(/no subscription activity found/i)).toBeInTheDocument();
     });
 
     it('has an accessible status role for the empty state', () => {
@@ -183,20 +183,19 @@ describe('PaymentHistoryTable', () => {
     it('renders all column headers with scope="col"', () => {
       render(<PaymentHistoryTable {...defaultProps({ events })} />);
       const headers = screen.getAllByRole('columnheader');
-      expect(headers.length).toBe(6);
+      expect(headers.length).toBe(5);
       headers.forEach((th) => {
         expect(th).toHaveAttribute('scope', 'col');
       });
     });
 
-    it('displays column header labels: Date, Merchant, Token, Amount, Ledger, Transaction', () => {
+    it('displays the subscription activity column headers', () => {
       render(<PaymentHistoryTable {...defaultProps({ events })} />);
       expect(screen.getByRole('columnheader', { name: /date/i })).toBeInTheDocument();
+      expect(screen.getByRole('columnheader', { name: /type/i })).toBeInTheDocument();
       expect(screen.getByRole('columnheader', { name: /merchant/i })).toBeInTheDocument();
-      expect(screen.getByRole('columnheader', { name: /token/i })).toBeInTheDocument();
       expect(screen.getByRole('columnheader', { name: /amount/i })).toBeInTheDocument();
-      expect(screen.getByRole('columnheader', { name: /ledger/i })).toBeInTheDocument();
-      expect(screen.getByRole('columnheader', { name: /transaction/i })).toBeInTheDocument();
+      expect(screen.getByRole('columnheader', { name: /tx hash/i })).toBeInTheDocument();
     });
 
     it('renders the event amount in each row', () => {
@@ -295,6 +294,42 @@ describe('PaymentHistoryTable', () => {
       );
       expect(screen.getByRole('status', { name: /loading more/i })).toBeInTheDocument();
     });
+
+    it('renders accessible previous and next page controls in page mode', () => {
+      render(
+        <PaymentHistoryTable
+          {...defaultProps({ events, hasMore: true })}
+          currentPage={2}
+          canGoPrevious
+          canGoNext
+          onPreviousPage={jest.fn()}
+          onNextPage={jest.fn()}
+        />,
+      );
+      expect(screen.getByRole('navigation', { name: /payment history pagination/i })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: /previous payment history page/i })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: /next payment history page/i })).toBeInTheDocument();
+      expect(screen.getByText('Page 2')).toBeInTheDocument();
+    });
+
+    it('invokes the supplied page-change handlers', () => {
+      const onPreviousPage = jest.fn();
+      const onNextPage = jest.fn();
+      render(
+        <PaymentHistoryTable
+          {...defaultProps({ events, hasMore: true })}
+          currentPage={2}
+          canGoPrevious
+          canGoNext
+          onPreviousPage={onPreviousPage}
+          onNextPage={onNextPage}
+        />,
+      );
+      fireEvent.click(screen.getByRole('button', { name: /previous payment history page/i }));
+      fireEvent.click(screen.getByRole('button', { name: /next payment history page/i }));
+      expect(onPreviousPage).toHaveBeenCalledTimes(1);
+      expect(onNextPage).toHaveBeenCalledTimes(1);
+    });
   });
 
   // ── Refresh button ───────────────────────────────────────────────────────
@@ -338,6 +373,50 @@ describe('PaymentHistoryTable', () => {
       expect(
         screen.getByRole('region', { name: /payment history table/i }),
       ).toBeInTheDocument();
+    });
+  });
+
+  // ── Keyboard navigation ──────────────────────────────────────────────────
+
+  describe('keyboard navigation', () => {
+    it('supports arrow key and home/end navigation across rows', () => {
+      const event1 = makeEvent({ id: 'evt-001' });
+      const event2 = makeEvent({ id: 'evt-002' });
+      const event3 = makeEvent({ id: 'evt-003' });
+
+      render(
+        <PaymentHistoryTable
+          {...defaultProps({ events: [event1, event2, event3] })}
+        />,
+      );
+
+      const tbody = screen.getAllByRole('rowgroup')[1]; // the tbody
+      const rows = screen.getAllByRole('row').slice(1); // skip table head row
+      expect(rows).toHaveLength(3);
+
+      // Initial state: first row has tabIndex 0
+      expect(rows[0]).toHaveAttribute('tabIndex', '0');
+      expect(rows[1]).toHaveAttribute('tabIndex', '-1');
+
+      // ArrowDown
+      fireEvent.keyDown(tbody, { key: 'ArrowDown' });
+      expect(rows[1]).toHaveAttribute('tabIndex', '0');
+
+      // ArrowDown again
+      fireEvent.keyDown(tbody, { key: 'ArrowDown' });
+      expect(rows[2]).toHaveAttribute('tabIndex', '0');
+
+      // ArrowUp
+      fireEvent.keyDown(tbody, { key: 'ArrowUp' });
+      expect(rows[1]).toHaveAttribute('tabIndex', '0');
+
+      // Home
+      fireEvent.keyDown(tbody, { key: 'Home' });
+      expect(rows[0]).toHaveAttribute('tabIndex', '0');
+
+      // End
+      fireEvent.keyDown(tbody, { key: 'End' });
+      expect(rows[2]).toHaveAttribute('tabIndex', '0');
     });
   });
 });

@@ -400,15 +400,25 @@ export function AddressBookModal({
 }: AddressBookModalProps) {
   const dialogRef = useRef<HTMLDivElement>(null);
   const closeButtonRef = useRef<HTMLButtonElement>(null);
+  const previouslyFocusedRef = useRef<HTMLElement | null>(null);
   const [importError, setImportError] = useState<string | null>(null);
   const [importSuccess, setImportSuccess] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
 
-  // Focus the close button when modal opens
+  // Move focus into the dialog and return it to the opener when it closes.
   useEffect(() => {
-    if (isOpen) {
-      closeButtonRef.current?.focus();
-    }
+    if (!isOpen) return;
+
+    const activeElement = document.activeElement;
+    previouslyFocusedRef.current =
+      activeElement instanceof HTMLElement ? activeElement : null;
+    closeButtonRef.current?.focus();
+
+    return () => {
+      const previouslyFocused = previouslyFocusedRef.current;
+      previouslyFocusedRef.current = null;
+      if (previouslyFocused?.isConnected) previouslyFocused.focus();
+    };
   }, [isOpen]);
 
   // Trap focus inside the modal

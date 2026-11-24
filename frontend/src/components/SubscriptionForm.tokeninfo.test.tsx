@@ -33,7 +33,7 @@ jest.mock('@/constants/network', () => mockNetwork);
 
 // ── transaction_builder mock ──────────────────────────────────────────────────
 jest.mock('@/lib/transaction_builder', () => ({
-  buildAndSubmitSubscribe: jest.fn(),
+  buildSignAndSubmitSubscribe: jest.fn(),
 }));
 
 // ── useWallet mock ────────────────────────────────────────────────────────────

@@ -39,12 +39,12 @@ PROFILE       ?= release
 ARTIFACT_NAME ?= soroban_subscription_contract
 ARTIFACT_PATH  = $(TARGET_DIR)/$(TARGET_TRIPLE)/$(PROFILE)/$(ARTIFACT_NAME).wasm
 
-CARGO_FLAGS   = --manifest-path $(CONTRACT_DIR)/Cargo.toml --target $(TARGET_TRIPLE) --$(PROFILE)
+CARGO_FLAGS   = --locked --manifest-path $(CONTRACT_DIR)/Cargo.toml --target $(TARGET_TRIPLE) --$(PROFILE)
 
 # COVERAGE_THRESHOLD — minimum line-coverage % enforced by make coverage (issue #432)
 COVERAGE_THRESHOLD ?= 95
 
-.PHONY: help build test lint test-coverage coverage clean test-frontend test-frontend-coverage
+.PHONY: help build test test-upgrade lint test-coverage coverage clean test-frontend test-frontend-coverage
 
 help: ## Print all available targets with descriptions
 	@echo ""
@@ -65,12 +65,15 @@ build: ## Compile the contract to WASM (uses TARGET_TRIPLE and PROFILE)
 
 # Note: cargo test cannot execute WASM binaries; never set TARGET_TRIPLE here.
 test: ## Run contract unit and property tests on the native host (not WASM)
-	cargo test --manifest-path $(CONTRACT_DIR)/Cargo.toml
+	cargo test --locked --manifest-path $(CONTRACT_DIR)/Cargo.toml
+
+test-upgrade: ## Run contract upgrade compatibility tests
+	cargo test --manifest-path $(CONTRACT_DIR)/Cargo.toml --features upgrade-test --lib test_upgrade
 
 # Requires: rustfmt and clippy components (rustup component add rustfmt clippy)
 lint: ## Check formatting (rustfmt --check) and run Clippy on the contract
 	cargo fmt --manifest-path $(CONTRACT_DIR)/Cargo.toml -- --check
-	cargo clippy --manifest-path $(CONTRACT_DIR)/Cargo.toml --all-targets -- -D warnings
+	cargo clippy --locked --manifest-path $(CONTRACT_DIR)/Cargo.toml --all-targets -- -D warnings
 
 test-coverage: coverage ## Alias for coverage
 
@@ -81,10 +84,10 @@ test-coverage: coverage ## Alias for coverage
 # Requires: cargo install cargo-llvm-cov
 coverage: ## Run contract tests with llvm-cov; enforce COVERAGE_THRESHOLD
 	@echo "Running contract tests with coverage instrumentation…"
-	cargo llvm-cov \
+	cargo llvm-cov --locked \
 		--manifest-path $(CONTRACT_DIR)/Cargo.toml \
 		--lcov --output-path $(TARGET_DIR)/lcov.info
-	cargo llvm-cov \
+	cargo llvm-cov --locked \
 		--manifest-path $(CONTRACT_DIR)/Cargo.toml \
 		--html --output-dir $(TARGET_DIR)/coverage-html
 	@echo ""

@@ -1,0 +1,171 @@
+# deploy/k8s/rbac.yaml
+#
+# RBAC — least-privilege ServiceAccounts, Roles, and RoleBindings for every
+# SorobanPay backend workload in the sorobanpay namespace.
+#
+# Design principles:
+#   1. One ServiceAccount per workload (indexer, api, webhook-worker).
+#      This ensures audit logs clearly identify which component made a
+#      Kubernetes API call and allows per-workload policy adjustments.
+#
+#   2. A single shared Role with the minimum permissions all three services
+#      need: read Secrets and ConfigMaps.  No write access; no cluster-level
+#      access.  Additional per-workload Roles can be added if needed.
+#
+#   3. One RoleBinding per ServiceAccount → Role.  This keeps the binding
+#      graph explicit and easy to audit.
+#
+# All resources are scoped to the sorobanpay namespace — nothing here grants
+# cluster-scoped (ClusterRole / ClusterRoleBinding) permissions.
+#
+# Apply (automatically included via kustomization.yaml):
+#   kubectl apply -k deploy/k8s/
+#
+# Or standalone:
+#   kubectl apply -f deploy/k8s/rbac.yaml -n sorobanpay
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ServiceAccounts
+# ─────────────────────────────────────────────────────────────────────────────
+
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: sorobanpay-indexer
+  namespace: sorobanpay
+  labels:
+    app.kubernetes.io/name: sorobanpay
+    app.kubernetes.io/component: indexer
+    app.kubernetes.io/managed-by: kustomize
+  annotations:
+    # Human-readable description for kubectl describe output
+    kubernetes.io/description: "ServiceAccount for the SorobanPay event-indexer workload"
+automountServiceAccountToken: false   # explicitly opt in via projected volumes if needed
+
+---
+
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: sorobanpay-api
+  namespace: sorobanpay
+  labels:
+    app.kubernetes.io/name: sorobanpay
+    app.kubernetes.io/component: api
+    app.kubernetes.io/managed-by: kustomize
+  annotations:
+    kubernetes.io/description: "ServiceAccount for the SorobanPay REST API workload"
+automountServiceAccountToken: false
+
+---
+
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: sorobanpay-webhook-worker
+  namespace: sorobanpay
+  labels:
+    app.kubernetes.io/name: sorobanpay
+    app.kubernetes.io/component: webhook-worker
+    app.kubernetes.io/managed-by: kustomize
+  annotations:
+    kubernetes.io/description: "ServiceAccount for the SorobanPay webhook-worker workload"
+automountServiceAccountToken: false
+
+---
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Role — minimum permissions shared by all three workloads
+#
+# All three services need to read their own configuration at runtime:
+#   • get/list Secrets      — database credentials, JWT keys, webhook secrets
+#   • get/list ConfigMaps   — non-secret runtime config (RPC URL, CONTRACT_ID)
+#
+# No write permissions are granted anywhere.  Pod/Deployment management is
+# left entirely to the cluster control plane; the application process has no
+# need to query or modify other Kubernetes objects.
+# ─────────────────────────────────────────────────────────────────────────────
+
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: sorobanpay-runtime
+  namespace: sorobanpay
+  labels:
+    app.kubernetes.io/name: sorobanpay
+    app.kubernetes.io/managed-by: kustomize
+  annotations:
+    kubernetes.io/description: >
+      Least-privilege role for all SorobanPay backend workloads.
+      Grants read-only access to Secrets and ConfigMaps in the sorobanpay namespace.
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list"]
+
+---
+
+# ─────────────────────────────────────────────────────────────────────────────
+# RoleBindings — one per ServiceAccount
+# ─────────────────────────────────────────────────────────────────────────────
+
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: sorobanpay-indexer-runtime
+  namespace: sorobanpay
+  labels:
+    app.kubernetes.io/name: sorobanpay
+    app.kubernetes.io/component: indexer
+    app.kubernetes.io/managed-by: kustomize
+subjects:
+  - kind: ServiceAccount
+    name: sorobanpay-indexer
+    namespace: sorobanpay
+roleRef:
+  kind: Role
+  name: sorobanpay-runtime
+  apiGroup: rbac.authorization.k8s.io
+
+---
+
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: sorobanpay-api-runtime
+  namespace: sorobanpay
+  labels:
+    app.kubernetes.io/name: sorobanpay
+    app.kubernetes.io/component: api
+    app.kubernetes.io/managed-by: kustomize
+subjects:
+  - kind: ServiceAccount
+    name: sorobanpay-api
+    namespace: sorobanpay
+roleRef:
+  kind: Role
+  name: sorobanpay-runtime
+  apiGroup: rbac.authorization.k8s.io
+
+---
+
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: sorobanpay-webhook-worker-runtime
+  namespace: sorobanpay
+  labels:
+    app.kubernetes.io/name: sorobanpay
+    app.kubernetes.io/component: webhook-worker
+    app.kubernetes.io/managed-by: kustomize
+subjects:
+  - kind: ServiceAccount
+    name: sorobanpay-webhook-worker
+    namespace: sorobanpay
+roleRef:
+  kind: Role
+  name: sorobanpay-runtime
+  apiGroup: rbac.authorization.k8s.io

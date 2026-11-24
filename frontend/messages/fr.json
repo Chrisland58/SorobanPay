@@ -1,0 +1,58 @@
+{
+  "app": {
+    "title": "SorobanPay",
+    "tagline": "Paiements récurrents décentralisés sur Stellar"
+  },
+  "nav": {
+    "connectWallet": "Connecter le portefeuille Freighter",
+    "connecting": "Connexion en cours…",
+    "disconnect": "Déconnecter",
+    "connected": "Connecté",
+    "disconnected": "Déconnecté"
+  },
+  "wallet": {
+    "notInstalled": "Le portefeuille Freighter n'est pas installé.",
+    "installLink": "Installer Freighter",
+    "notInstalledSuffix": "pour continuer.",
+    "sessionLost": "Session du portefeuille perdue",
+    "sessionLostDescription": "Freighter n'est plus disponible. Déconnectez et reconnectez pour restaurer votre session.",
+    "disconnectAndReconnect": "Déconnecter et reconnecter"
+  },
+  "subscriptionForm": {
+    "title": "Créer un abonnement",
+    "description": "Autorisez un paiement récurrent sur la blockchain avec votre portefeuille Freighter.",
+    "requiredNote": "Les champs marqués d'un * sont obligatoires.",
+    "merchantAddress": "Adresse du commerçant",
+    "merchantAddressPlaceholder": "ex. GXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
+    "merchantAddressHint": "Clé publique du compte Stellar du commerçant — commence par G, 56 caractères.",
+    "tokenAddress": "Adresse du contrat du jeton",
+    "tokenAddressPlaceholder": "ex. CXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
+    "tokenAddressHint": "Adresse du contrat de jeton SEP-41 — commence par C, 56 caractères.",
+    "amount": "Montant",
+    "amountPlaceholder": "100",
+    "amountHint": "Obligatoire. Entrez le montant récurrent en unités de jetons.",
+    "interval": "Intervalle",
+    "intervalHint": "Obligatoire. La fréquence de récurrence du paiement. Valeur par défaut : 30 jours.",
+    "submit": "Autoriser l'abonnement",
+    "submitting": "Soumission en cours…",
+    "walletHint": "Connectez votre portefeuille Freighter pour activer la soumission.",
+    "contract": "Contrat"
+  },
+  "success": {
+    "title": "Abonnement créé avec succès !",
+    "txHash": "Hachage de transaction",
+    "amount": "Montant",
+    "interval": "Intervalle",
+    "merchant": "Commerçant",
+    "whatNext": "Que se passe-t-il ensuite ?",
+    "nextStep1": "Le commerçant peut percevoir le premier paiement immédiatement.",
+    "createAnother": "Créer un autre abonnement"
+  },
+  "languageSelector": {
+    "label": "Langue",
+    "en": "English",
+    "es": "Español",
+    "fr": "Français",
+    "ar": "العربية"
+  }
+}

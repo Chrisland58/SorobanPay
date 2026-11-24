@@ -114,3 +114,30 @@ export function formatInterval(seconds: number): string {
   }
   return `${seconds} seconds`;
 }
+
+// ── Stellar Expert deep link helper ──────────────────────────────────────────
+
+/**
+ * Generate a Stellar Expert explorer URL for accounts, contracts, or transactions.
+ *
+ * @param type     'tx' | 'account' | 'contract'
+ * @param id       Transaction hash, G-address, or C-address
+ * @param network  'testnet' | 'public' | 'mainnet' (defaults based on env config)
+ */
+export function stellarExpertUrl(
+  type: 'tx' | 'account' | 'contract',
+  id: string,
+  network?: string,
+): string {
+  let net = (network || '').toLowerCase();
+  if (!net) {
+    const passphrase =
+      typeof process !== 'undefined'
+        ? (process.env.NEXT_PUBLIC_NETWORK_PASSPHRASE ?? '')
+        : '';
+    net = passphrase.includes('Test SDF') ? 'testnet' : 'public';
+  } else if (net === 'mainnet') {
+    net = 'public';
+  }
+  return `https://stellar.expert/explorer/${net}/${type}/${id}`;
+}

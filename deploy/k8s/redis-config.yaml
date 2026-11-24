@@ -1,0 +1,47 @@
+# Redis ConfigMap — minimal redis.conf for SorobanPay.
+#
+# Tuned for:
+#  - Rate limiting (low-latency transient data with TTL)
+#  - MRR analytics caching (medium-lived, bounded memory)
+#
+# Settings of note:
+#  maxmemory         256mb  — hard cap; matches the 256Mi container limit
+#  maxmemory-policy  allkeys-lru — evict least-recently-used keys when full,
+#                                  safe for a pure-cache / ephemeral workload
+#  save ""           — disable RDB persistence; caching data is not durable
+#  appendonly no     — disable AOF for same reason
+#  protected-mode no — no TLS inside the cluster; network isolation via k8s NetworkPolicy
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: redis-config
+  namespace: sorobanpay
+  labels:
+    app: redis
+    app.kubernetes.io/part-of: sorobanpay
+    app.kubernetes.io/managed-by: kustomize
+data:
+  redis.conf: |
+    # Networking
+    bind 0.0.0.0
+    protected-mode no
+    port 6379
+
+    # Memory management
+    maxmemory 256mb
+    maxmemory-policy allkeys-lru
+
+    # Persistence — disabled; Redis is used as an ephemeral cache/rate-limiter
+    save ""
+    appendonly no
+
+    # TCP keepalive (send TCP ACKs to detect stale connections)
+    tcp-keepalive 300
+
+    # Slowlog — log commands that take longer than 10 ms
+    slowlog-log-slower-than 10000
+    slowlog-max-len 128
+
+    # Loglevel
+    loglevel notice

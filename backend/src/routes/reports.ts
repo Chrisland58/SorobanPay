@@ -170,6 +170,79 @@ function createDbReadable(
 // Route handler
 // ---------------------------------------------------------------------------
 
+/**
+ * @openapi
+ * /api/v1/reports/payments:
+ *   get:
+ *     operationId: exportPayments
+ *     summary: Export payment history as CSV or JSON (streaming)
+ *     description: |
+ *       Streams payment history row-by-row to avoid buffering large datasets.
+ *       CSV exports include columns: Date, Subscriber, Token, Amount (human), Amount (raw), Tx Hash, Status.
+ *       Rate limited to 1 request per minute per IP.
+ *     tags: [Reports]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - name: merchant
+ *         in: query
+ *         required: true
+ *         schema:
+ *           $ref: "#/components/schemas/Address"
+ *       - name: format
+ *         in: query
+ *         schema:
+ *           type: string
+ *           enum: [json, csv]
+ *           default: json
+ *       - name: from
+ *         in: query
+ *         schema:
+ *           $ref: "#/components/schemas/IsoDate"
+ *         description: Start date (inclusive)
+ *       - name: to
+ *         in: query
+ *         schema:
+ *           $ref: "#/components/schemas/IsoDate"
+ *         description: End date (inclusive)
+ *       - name: status
+ *         in: query
+ *         schema:
+ *           type: string
+ *           enum: [all, success, failed]
+ *           default: all
+ *       - name: limit
+ *         in: query
+ *         schema:
+ *           type: integer
+ *           default: 10000
+ *           maximum: 100000
+ *       - name: offset
+ *         in: query
+ *         schema:
+ *           type: integer
+ *           default: 0
+ *     responses:
+ *       "200":
+ *         description: Payment history (CSV or JSON)
+ *         content:
+ *           text/csv:
+ *             schema:
+ *               type: string
+ *           application/json:
+ *             schema:
+ *               type: array
+ *               items:
+ *                 $ref: "#/components/schemas/CsvExportRow"
+ *       "400":
+ *         description: Invalid parameters
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: "#/components/schemas/Error"
+ *       "429":
+ *         description: Rate limit exceeded
+ */
 router.get(
   '/',
   validateQuery(reportQuerySchema),

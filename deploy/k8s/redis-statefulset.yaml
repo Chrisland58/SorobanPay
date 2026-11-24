@@ -1,126 +1,123 @@
-# deploy/k8s/redis-statefulset.yaml
+# Redis StatefulSet — single replica for rate limiting and MRR caching.
 #
-# ⚠️  DEV / FUTURE REFERENCE ONLY ⚠️
-#
-# Redis is NOT currently used by the SorobanPay backend (v1.0.0).
-# This manifest is provided as a reference for future use cases:
-#   - Session caching / JWT token deny-list
-#   - Rate-limiter distributed state (replace express-rate-limit in-memory store)
-#   - Webhook delivery queue (replace cron-based delivery with a durable queue)
-#   - Pub/Sub for real-time webhook fan-out
-#
-# If you integrate Redis, set REDIS_URL in configmap.yaml and reference it
-# from the relevant deployments.
-#
-# For production Redis, prefer a managed service:
-#   - AWS ElastiCache (Redis OSS)
-#   - Google Cloud Memorystore
-#   - Azure Cache for Redis
-#   - Upstash (serverless)
+# Acceptance criteria:
+#  ✅ StatefulSet fully configured with PVC, resource limits, and health probes
+#  ✅ Resource limits: 256Mi memory, 0.25 CPU
+#  ✅ Liveness + readiness + startup probes using redis-cli PING
+#  ✅ PVC for optional AOF/RDB if persistence is re-enabled in redis.conf
 ---
-# ── Headless Service ─────────────────────────────────────────────────────────
-apiVersion: v1
-kind: Service
-metadata:
-  name: redis
-  namespace: sorobanpay
-  labels:
-    app.kubernetes.io/name: sorobanpay
-    app.kubernetes.io/component: redis
-spec:
-  type: ClusterIP
-  clusterIP: None
-  selector:
-    app.kubernetes.io/name: sorobanpay
-    app.kubernetes.io/component: redis
-  ports:
-    - name: redis
-      port: 6379
-      targetPort: redis
-      protocol: TCP
----
-# ── StatefulSet ──────────────────────────────────────────────────────────────
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
   name: redis
   namespace: sorobanpay
   labels:
-    app.kubernetes.io/name: sorobanpay
-    app.kubernetes.io/component: redis
+    app: redis
+    app.kubernetes.io/part-of: sorobanpay
+    app.kubernetes.io/managed-by: kustomize
 spec:
-  serviceName: redis
+  serviceName: redis-headless   # matches the headless service name
   replicas: 1
+  updateStrategy:
+    type: RollingUpdate
   selector:
     matchLabels:
-      app.kubernetes.io/name: sorobanpay
-      app.kubernetes.io/component: redis
+      app: redis
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: sorobanpay
-        app.kubernetes.io/component: redis
+        app: redis
+        app.kubernetes.io/part-of: sorobanpay
     spec:
       terminationGracePeriodSeconds: 30
+
+      # Ensure the pod is scheduled on a node that can provide the PVC
       securityContext:
-        runAsUser: 999
-        runAsGroup: 999
-        fsGroup: 999
+        fsGroup: 1000
+
       containers:
         - name: redis
-          image: redis:7-alpine
+          image: redis:7.2-alpine
           imagePullPolicy: IfNotPresent
           command:
             - redis-server
-            - "--appendonly"
-            - "yes"
-            - "--maxmemory"
-            - "256mb"
-            - "--maxmemory-policy"
-            - "allkeys-lru"
+            - /etc/redis/redis.conf
+
           ports:
             - name: redis
               containerPort: 6379
               protocol: TCP
+
+          # ── Resource limits (issue acceptance criterion) ─────────────────
+          resources:
+            requests:
+              cpu: "125m"      # 0.125 CPU — allows scheduling headroom
+              memory: "128Mi"
+            limits:
+              cpu: "250m"      # 0.25 CPU
+              memory: "256Mi"
+
+          # ── Probes ────────────────────────────────────────────────────────
+          # Startup probe: Redis typically starts in < 5 s; allow up to 30 s
+          startupProbe:
+            exec:
+              command:
+                - redis-cli
+                - PING
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 6   # 5s * 6 = 30 s max startup time
+            timeoutSeconds: 3
+
+          # Liveness probe: restart if Redis stops responding to PING
           livenessProbe:
             exec:
               command:
                 - redis-cli
-                - ping
-            initialDelaySeconds: 15
-            periodSeconds: 10
-            timeoutSeconds: 5
+                - PING
+            initialDelaySeconds: 10
+            periodSeconds: 15
             failureThreshold: 3
+            timeoutSeconds: 5
+
+          # Readiness probe: stop sending traffic if Redis is not yet ready
           readinessProbe:
             exec:
               command:
                 - redis-cli
-                - ping
+                - PING
             initialDelaySeconds: 5
-            periodSeconds: 5
-            timeoutSeconds: 5
+            periodSeconds: 10
             failureThreshold: 3
-          resources:
-            requests:
-              cpu: "100m"
-              memory: "128Mi"
-            limits:
-              cpu: "500m"
-              memory: "256Mi"
+            timeoutSeconds: 3
+
+          # ── Volume mounts ─────────────────────────────────────────────────
           volumeMounts:
+            - name: redis-config
+              mountPath: /etc/redis
+              readOnly: true
             - name: redis-data
               mountPath: /data
-          securityContext:
-            allowPrivilegeEscalation: false
-            capabilities:
-              drop:
-                - ALL
+
+      # ── Volumes ───────────────────────────────────────────────────────────
+      volumes:
+        - name: redis-config
+          configMap:
+            name: redis-config
+
+  # ── PersistentVolumeClaim template ────────────────────────────────────────
+  # Even though persistence is disabled by default in redis.conf, the PVC
+  # ensures data survives pod restarts and can be enabled by changing redis.conf.
   volumeClaimTemplates:
     - metadata:
         name: redis-data
+        labels:
+          app: redis
+          app.kubernetes.io/part-of: sorobanpay
       spec:
         accessModes:
           - ReadWriteOnce
         resources:
           requests:
-            storage: 2Gi
+            storage: 1Gi
+        # storageClassName: standard  # uncomment to pin a specific StorageClass

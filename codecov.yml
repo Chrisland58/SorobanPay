@@ -1,0 +1,48 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Codecov configuration — SorobanPay
+#
+# Hard gate: `make coverage` (Makefile, COVERAGE_THRESHOLD=95) runs `cargo llvm-cov`
+# on the contract and fails the build when line coverage drops below 95% (Issue
+# #432). The CI `contract-coverage` job runs this on every push/PR. This file adds
+# a Codecov-side status check as a SECOND layer, so a coverage regression is
+# surfaced on the PR and can be made a required check via GitHub branch protection.
+#
+# Flags match the `flags:` set by codecov-action in .github/workflows/ci.yml:
+#   contract  : Rust contract   (contracts/target/lcov.info) — target 95% (Issue #432)
+#   frontend  : Next.js frontend (frontend/coverage/lcov.info) — target 80% (Issue #433)
+# ─────────────────────────────────────────────────────────────────────────────
+
+codecov:
+  require_ci_to_pass: true
+  notify:
+    wait_for_ci: true
+
+coverage:
+  status:
+    project:
+      # Disable the catch-all default status so only the flag-specific checks below run.
+      default: false
+      contract:
+        target: 95%          # Issue #432 — contract line coverage must stay ≥ 95%
+        threshold: 0%        # no slack below 95%
+        flags:
+          - contract
+      frontend:
+        target: 80%          # Issue #433 — frontend coverage > 80%
+        threshold: 0%
+        flags:
+          - frontend
+    patch:
+      # New/changed contract lines — e.g. new entry points and error paths — must
+      # be ≥ 95% covered. This is what keeps coverage above the threshold as the
+      # contract grows (acceptance criterion: all new entry points ≥ 95%).
+      default: false
+      contract:
+        target: 95%
+        threshold: 0%
+        flags:
+          - contract
+
+comment:
+  layout: "reach,diff,flags,tree"
+  require_changes: false

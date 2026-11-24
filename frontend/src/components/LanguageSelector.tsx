@@ -26,7 +26,7 @@ export function LanguageSelector() {
       // Strip the current locale prefix (if present) from the pathname so we
       // can rebuild it with the new locale. next-intl middleware with
       // localePrefix: 'as-needed' only adds a prefix for non-default locales.
-      const strippedPath = pathname.replace(/^\/(en|es)/, '') || '/';
+      const strippedPath = pathname.replace(new RegExp(`^/(${locales.join('|')})`), '') || '/';
       const nextPath =
         next === 'en' ? strippedPath : `/${next}${strippedPath}`;
       router.push(nextPath);

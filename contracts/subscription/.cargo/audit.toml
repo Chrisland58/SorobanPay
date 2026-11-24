@@ -3,8 +3,13 @@
 # Location: contracts/subscription/.cargo/audit.toml
 # cargo-audit reads this file from <project>/.cargo/audit.toml automatically.
 #
-# All five advisories below are TRANSITIVE dependencies locked in by
-# soroban-sdk = "20.0.0" (specifically soroban-env-host 20.3.0 and its
+# NOTE: This is the file cargo-audit actually loads for
+# `cd contracts/subscription && cargo audit` (it reads ./.cargo/audit.toml).
+# The package-root audit.toml mirrors this suppression list for tooling that
+# looks for a package-level config.
+#
+# All advisories below are TRANSITIVE dependencies locked in by
+# soroban-sdk = "20.5.0" (specifically soroban-env-host 20.3.0 and its
 # sub-dependencies). They cannot be resolved by a simple version bump because:
 #
 #   curve25519-dalek — soroban-env-host 20.3.0 pins ">=4.1.1, <=4.1.2";
@@ -12,13 +17,15 @@
 #   time             — time 0.3.47 requires serde_core =1.0.220, which
 #                      conflicts with soroban-env-common's hard pin of
 #                      serde =1.0.192.
-#   adler/paste/rand — compile-time-only or testing deps embedded in
-#                      soroban-sdk 20's dependency tree.
+#   adler/paste/rand — unmaintained/unsound helper crates embedded in
+#                      soroban-sdk 20's dependency tree; no fixed release is
+#                      compatible with the current pins.
 #
-# Migrating to soroban-sdk 21+ would resolve all five but introduces breaking
-# API changes requiring a full contract rewrite. Tracked as a planned upgrade.
+# Migrating to soroban-sdk 21+ would resolve all advisories but introduces
+# breaking API changes requiring a full contract rewrite. Tracked as a planned
+# upgrade.
 #
-# References: OPS-121 issues #600, #616, #618
+# References: OPS-121 issues #600, #616, #618, #1037, #1038
 # Review this file each time soroban-sdk is upgraded.
 
 [advisories]
@@ -61,3 +68,9 @@ ignore = [
     #          own deterministic RNG. The unsound path is not exercised.
     "RUSTSEC-2026-0097",
 ]
+
+# Vulnerabilities are always denied by cargo-audit. Keep unsound warnings fatal;
+# unmaintained and yanked crates remain warnings (cargo-audit's default).
+[output]
+deny = ["unsound"]
+quiet = false

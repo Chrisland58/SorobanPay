@@ -1,0 +1,47 @@
+# Dependencies
+node_modules
+
+# TypeScript source (compiled output is in dist/)
+src
+
+# Test files
+tests
+**/*.test.ts
+**/*.spec.ts
+**/*.integration.test.ts
+reconciler.test.ts
+
+# Documentation
+*.md
+docs
+audit-trail
+
+# Build artifacts (will be rebuilt inside Docker)
+dist
+coverage
+
+# Environment files — never bake secrets into the image
+.env
+.env.*
+!.env.example
+
+# Git and IDE
+.git
+.gitignore
+.vscode
+.idea
+
+# Misc
+*.log
+npm-debug.log*
+.DS_Store
+Thumbs.db
+
+# CI / local dev scripts
+Makefile
+jest.config.*
+tsconfig.test.json
+PR-*.md
+CHANGELOG.md
+prisma.config.ts
+reconciler.ts

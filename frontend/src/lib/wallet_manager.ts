@@ -14,6 +14,7 @@ import {
   setAllowed,
   requestAccess,
   getAddress,
+  getNetwork,
   signTransaction,
   WatchWalletChanges,
 } from '@stellar/freighter-api';
@@ -109,34 +110,19 @@ export async function connectWallet(): Promise<string> {
 }
 
 /**
- * Read the currently selected Freighter account.
+ * Silently retrieve the public key for an already-authorised session.
  *
- * @throws If Freighter cannot verify an active account.
+ * Unlike `connectWallet`, this never prompts the user: it only succeeds when
+ * Freighter already has an active allowance for the site. Returns `null` when
+ * the extension is unavailable, access was not granted, or the key is empty.
  */
-export async function getWalletAddress(): Promise<string> {
-  const result = await getAddress();
-  if (result.error) {
-    throw new Error(
-      'Could not verify the Freighter account. Reconnect your wallet and restart the operation.',
-    );
-  }
-  if (!result.address) {
-    throw new Error(
-      'No Freighter account is selected. Reconnect your wallet and restart the operation.',
-    );
-  }
-  return result.address;
-}
-
-/**
- * Verify that Freighter still has the account that started an operation selected.
- */
-export async function assertWalletAccount(expectedAddress: string): Promise<void> {
-  const currentAddress = await getWalletAddress();
-  if (currentAddress !== expectedAddress) {
-    throw new Error(
-      'Your Freighter account changed during this operation. Reconnect the original account and restart the operation.',
-    );
+export async function restoreWalletSession(): Promise<string | null> {
+  try {
+    const result = await getAddress();
+    if (result.error || !result.address) return null;
+    return result.address;
+  } catch {
+    return null;
   }
 }
 
@@ -154,13 +140,32 @@ export async function assertWalletAccount(expectedAddress: string): Promise<void
 export async function signTx(
   xdr: string,
   networkPassphrase: string,
-  expectedAddress: string,
+  expectedPublicKey?: string,
 ): Promise<string> {
-  await assertWalletAccount(expectedAddress);
-  const result = await signTransaction(xdr, {
-    networkPassphrase,
-    address: expectedAddress,
-  });
+  if (expectedPublicKey) {
+    let accountResult: Awaited<ReturnType<typeof getAddress>>;
+    let networkResult: Awaited<ReturnType<typeof getNetwork>>;
+    try {
+      [accountResult, networkResult] = await Promise.all([getAddress(), getNetwork()]);
+    } catch {
+      throw new Error('Unable to verify the current Freighter account and network. Reconnect your wallet and try again.');
+    }
+
+    if (accountResult.error || !accountResult.address) {
+      throw new Error('Unable to verify the current Freighter account. Reconnect your wallet and try again.');
+    }
+    if (accountResult.address !== expectedPublicKey) {
+      throw new Error('The Freighter account changed before signing. Review the transaction with your current wallet and try again.');
+    }
+    if (networkResult.error || !networkResult.networkPassphrase) {
+      throw new Error('Unable to verify the current Freighter network. Reconnect your wallet and try again.');
+    }
+    if (networkResult.networkPassphrase !== networkPassphrase) {
+      throw new Error('The Freighter network changed before signing. Switch back to the expected network and try again.');
+    }
+  }
+
+  const result = await signTransaction(xdr, { networkPassphrase });
 
   if ('error' in result && result.error) {
     throw new Error(`Transaction signing failed: ${result.error}`);

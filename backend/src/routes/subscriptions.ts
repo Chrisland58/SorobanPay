@@ -34,6 +34,63 @@ const router = Router();
 // Response 401: no authenticated merchant on the request
 const SUBSCRIPTION_STATUSES = ['ACTIVE', 'PAUSED', 'OVERDUE', 'CANCELLED'];
 
+/**
+ * @openapi
+ * /api/v1/subscriptions:
+ *   get:
+ *     operationId: listSubscriptions
+ *     summary: List subscriptions for the authenticated merchant
+ *     tags: [Subscriptions]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - name: status
+ *         in: query
+ *         required: false
+ *         schema:
+ *           type: string
+ *           enum: [ACTIVE, PAUSED, OVERDUE, CANCELLED]
+ *         description: Filter by subscription status
+ *       - name: page
+ *         in: query
+ *         schema:
+ *           type: integer
+ *           default: 1
+ *       - name: limit
+ *         in: query
+ *         schema:
+ *           type: integer
+ *           default: 20
+ *           maximum: 100
+ *     responses:
+ *       "200":
+ *         description: Paginated subscription list
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 data:
+ *                   type: array
+ *                   items:
+ *                     $ref: "#/components/schemas/Subscription"
+ *                 total:
+ *                   type: integer
+ *                 page:
+ *                   type: integer
+ *       "400":
+ *         description: Invalid status parameter
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: "#/components/schemas/Error"
+ *       "401":
+ *         description: Unauthorized
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: "#/components/schemas/Error"
+ */
 router.get('/', async (req: Request, res: Response) => {
   // Defensive check: this router is also mounted at the unauthenticated
   // legacy alias /api/subscriptions (see index.ts), which does not apply

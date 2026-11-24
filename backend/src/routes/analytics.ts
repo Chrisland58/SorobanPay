@@ -1,5 +1,12 @@
 import { Router, Request, Response } from 'express';
+import { z } from 'zod';
 import prisma from '../lib/prisma';
+import {
+  getPaginatedEvents,
+  getTenantAggregates,
+} from '../services/analyticsService';
+import { tenantAuthMiddleware, requireTenant, TenantRequest } from '../middleware/tenantAuth';
+import { validateQuery } from '../middleware/validation';
 
 /**
  * Analytics router — BE-52 / FE-50
@@ -21,6 +28,16 @@ import prisma from '../lib/prisma';
  *   failureCount: number,
  *   events: Event[]        // raw events for client-side computation
  * }
+ *
+ * GET /api/v1/analytics/events   (#1070)
+ *   Cursor-paginated list of analytics events for the authenticated tenant.
+ *   Query params: cursor, limit (1-200), direction ('forward'|'backward')
+ *   Requires tenant context (X-Tenant-ID header or JWT claim).
+ *
+ * GET /api/v1/analytics/aggregates   (#1070)
+ *   Tenant-scoped aggregate statistics.
+ *   Query params: startDate (ISO 8601), endDate (ISO 8601)
+ *   Requires tenant context.
  */
 
 const router = Router();
@@ -54,6 +71,50 @@ function monthKeyToLabel(key: string): string {
 }
 
 // GET /v1/analytics/revenue?merchant=...&period=30d|90d|all
+/**
+ * @openapi
+ * /api/v1/analytics/revenue:
+ *   get:
+ *     operationId: getRevenueAnalytics
+ *     summary: Get MRR and revenue metrics for a merchant
+ *     tags: [Analytics]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - name: merchant
+ *         in: query
+ *         required: true
+ *         schema:
+ *           $ref: "#/components/schemas/Address"
+ *         description: Merchant Stellar address
+ *       - name: period
+ *         in: query
+ *         required: false
+ *         schema:
+ *           type: string
+ *           enum: [30d, 90d, all]
+ *           default: 30d
+ *         description: Reporting period
+ *     responses:
+ *       "200":
+ *         description: Revenue analytics data
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: "#/components/schemas/RevenueAnalytics"
+ *       "400":
+ *         description: Invalid parameters
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: "#/components/schemas/Error"
+ *       "401":
+ *         description: Unauthorized
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: "#/components/schemas/Error"
+ */
 router.get('/revenue', async (req: Request, res: Response) => {
   const merchant = req.query.merchant as string | undefined;
   const period = (req.query.period as string) || '30d';
@@ -156,5 +217,104 @@ router.get('/revenue', async (req: Request, res: Response) => {
     return res.status(500).json({ error: 'Failed to compute analytics data' });
   }
 });
+
+// ─── Cursor pagination schemas (#1070) ───────────────────────────────────────
+
+const eventsQuerySchema = z.object({
+  cursor: z.string().optional(),
+  limit: z.coerce.number().int().min(1).max(200).default(50),
+  direction: z.enum(['forward', 'backward']).default('forward'),
+});
+
+const aggregatesQuerySchema = z.object({
+  startDate: z
+    .string()
+    .datetime({ offset: true })
+    .or(z.string().regex(/^\d{4}-\d{2}-\d{2}$/))
+    .optional(),
+  endDate: z
+    .string()
+    .datetime({ offset: true })
+    .or(z.string().regex(/^\d{4}-\d{2}-\d{2}$/))
+    .optional(),
+});
+
+// ─── GET /events ──────────────────────────────────────────────────────────────
+
+/**
+ * GET /api/v1/analytics/events
+ *
+ * Returns a cursor-paginated list of analytics events for the authenticated
+ * tenant (scoped by tenant ID).
+ *
+ * Query params:
+ *   cursor    — opaque continuation token from a previous response
+ *   limit     — items per page (1–200, default 50)
+ *   direction — 'forward' (default) or 'backward'
+ *
+ * Requires X-Tenant-ID header or JWT with tenant_id claim.
+ */
+router.get(
+  '/events',
+  tenantAuthMiddleware,
+  requireTenant,
+  validateQuery(eventsQuerySchema),
+  async (req: TenantRequest, res: Response) => {
+    const query = (req as any).validatedQuery as z.infer<typeof eventsQuerySchema>;
+
+    try {
+      const page = await getPaginatedEvents(req.tenantId!, {
+        cursor: query.cursor,
+        limit: query.limit,
+        direction: query.direction,
+      });
+
+      return res.json(page);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Unknown error';
+      if (message === 'Invalid cursor') {
+        return res.status(400).json({ error: 'Invalid cursor' });
+      }
+      console.error('[analytics] getPaginatedEvents error:', err);
+      return res.status(500).json({ error: 'Failed to retrieve events' });
+    }
+  },
+);
+
+// ─── GET /aggregates ──────────────────────────────────────────────────────────
+
+/**
+ * GET /api/v1/analytics/aggregates
+ *
+ * Returns tenant-scoped aggregate statistics.
+ *
+ * Query params:
+ *   startDate — optional ISO 8601 start (inclusive)
+ *   endDate   — optional ISO 8601 end (inclusive)
+ *
+ * Requires X-Tenant-ID header or JWT with tenant_id claim.
+ */
+router.get(
+  '/aggregates',
+  tenantAuthMiddleware,
+  requireTenant,
+  validateQuery(aggregatesQuerySchema),
+  async (req: TenantRequest, res: Response) => {
+    const query = (req as any).validatedQuery as z.infer<typeof aggregatesQuerySchema>;
+
+    try {
+      const aggregates = await getTenantAggregates(
+        req.tenantId!,
+        query.startDate ? new Date(query.startDate) : undefined,
+        query.endDate ? new Date(query.endDate) : undefined,
+      );
+
+      return res.json(aggregates);
+    } catch (err) {
+      console.error('[analytics] getTenantAggregates error:', err);
+      return res.status(500).json({ error: 'Failed to retrieve aggregates' });
+    }
+  },
+);
 
 export default router;

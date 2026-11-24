@@ -30,6 +30,7 @@ import versionRouter from './routes/version';
 import analyticsRouter from './routes/analytics';   // FE-50 / BE-52
 import reportsRouter from './routes/reports';        // BE-58: revenue reporting export
 import adminRouter from './routes/admin';
+import paymentsRouter from './routes/payments';       // #1390: CSV export endpoint
 import authRouter from './routes/auth';                        // BE-55: merchant auth
 import { buildHealthRouter } from './routes/health';
 import { requireMerchant } from './middleware/merchantAuth';  // BE-55: JWT guard
@@ -37,6 +38,7 @@ import { reconcile } from './services/reconciler';
 import { PrismaSubscriptionDB, fetchChainEventsFromDB } from './services/reconciler';
 import { getPrometheusMetrics } from './services/metricsService';
 import { startRetryWorker, shutdownRetryWorker } from './services/retryQueue';
+import { runTtlHealthCheck } from './services/ttlHealthMonitor'; // #1391
 
 // ─── Config ─────────────────────────────────────────────────────────────────
 const config = validateConfig();
@@ -98,6 +100,7 @@ app.use('/api/v1/notifications', notificationsRouter);  // BE-68
 app.use('/api/v1/admin',         adminRouter);          // BE-75: admin dashboard
 app.use('/api/v1/analytics',     requireMerchant, analyticsRouter);  // FE-50: revenue analytics
 app.use('/api/v1/reports',       requireMerchant, reportsRouter);    // BE-58 / #798: payment reports export
+app.use('/api/v1/payments',      paymentsRouter);                     // #1390: CSV export
 
 // ─── Prometheus metrics (unauthenticated — restrict to internal network) ─────
 app.get('/metrics', (_req, res) => {
@@ -157,6 +160,14 @@ cron.schedule('* * * * *', async () => {
 cron.schedule('0 1 * * *', async () => {
   console.log('[cron] Generating daily summaries...');
   await summaryGenerator.generateDailySummaries();
+});
+
+// #1391: TTL health check — runs every 24 hours at 03:00 UTC
+cron.schedule('0 3 * * *', async () => {
+  console.log('[cron] Running TTL health check...');
+  await runTtlHealthCheck().catch((err) =>
+    console.error('[cron] TTL health check error:', err),
+  );
 });
 
 cron.schedule('0 2 * * 0', async () => {

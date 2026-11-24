@@ -3,7 +3,7 @@
 /**
  * PaymentHistoryTable.tsx
  *
- * Accessible table component for displaying executed SorobanPay payment events.
+ * Accessible table component for displaying SorobanPay subscription events.
  *
  * Features:
  *  - WCAG 2.1 AA compliant: proper <table> semantics, th scope, aria-labels
@@ -11,7 +11,7 @@
  *  - Empty state: friendly message for zero events
  *  - Error state: accessible error alert
  *  - Disconnected state: prompt to connect wallet
- *  - "Load more" button for cursor-based pagination
+ *  - "Load more" button or page navigation for paginated event lists
  *  - Each tx hash links to Stellar Expert
  *
  * Usage:
@@ -27,6 +27,7 @@
  *   />
  */
 
+import { useState, useRef, type KeyboardEvent } from 'react';
 import { type PaymentEvent } from '@/hooks/usePaymentHistory';
 import { truncateAddress } from '@/lib/utils';
 import { AddressDisplay } from '@/components/AddressDisplay';
@@ -40,6 +41,14 @@ export interface PaymentHistoryTableProps {
   hasMore: boolean;
   onLoadMore: () => void;
   onRefresh: () => void;
+  /** Current visible page when page navigation is managed by the parent. */
+  currentPage?: number;
+  /** Whether a previous page is available in page-navigation mode. */
+  canGoPrevious?: boolean;
+  /** Whether a next page is available in page-navigation mode. */
+  canGoNext?: boolean;
+  onPreviousPage?: () => void;
+  onNextPage?: () => void;
   /** True when a wallet is connected — shows table vs. disconnected prompt */
   isConnected: boolean;
   /** "Testnet" or "Mainnet" — used for Stellar Expert links */
@@ -82,10 +91,10 @@ function formatTimestamp(iso: string): string {
 function SkeletonRow() {
   return (
     <tr aria-hidden="true" className="border-b border-gray-800">
-      {[60, 44, 36, 28, 28, 20].map((w, i) => (
+      {[60, 44, 36, 28, 28].map((w, i) => (
         <td key={i} className="px-4 py-3">
           <div
-            className={`h-3.5 w-${w} animate-pulse rounded bg-gray-700`}
+            className={`h-3.5 w-${w} motion-safe:animate-pulse rounded bg-gray-700`}
             style={{ width: `${w * 4}px` }}
           />
         </td>
@@ -106,7 +115,7 @@ function DisconnectedState() {
       <p className="text-3xl" aria-hidden="true">🔌</p>
       <p className="text-gray-300 font-semibold">Connect your wallet to view payment history</p>
       <p className="text-gray-500 text-sm leading-relaxed max-w-xs mx-auto">
-        Your executed payments will appear here once you connect a Freighter wallet.
+        Your subscription activity will appear here once you connect a Freighter wallet.
       </p>
     </div>
   );
@@ -122,10 +131,9 @@ function EmptyState({ onRefresh }: { onRefresh: () => void }) {
       className="rounded-2xl border border-dashed border-gray-700 bg-gray-900/30 p-10 text-center space-y-3"
     >
       <p className="text-3xl" aria-hidden="true">📭</p>
-      <p className="text-gray-300 font-semibold">No payments found</p>
+      <p className="text-gray-300 font-semibold">No subscription activity found</p>
       <p className="text-gray-500 text-sm leading-relaxed max-w-xs mx-auto">
-        Executed payments will appear here after a merchant collects a payment
-        from your subscription.
+        Created, executed, failed, and cancelled subscription events will appear here.
       </p>
       <button
         type="button"
@@ -177,10 +185,19 @@ export default function PaymentHistoryTable({
   hasMore,
   onLoadMore,
   onRefresh,
+  currentPage = 1,
+  canGoPrevious = false,
+  canGoNext,
+  onPreviousPage,
+  onNextPage,
   isConnected,
   networkName = 'Testnet',
   getLabel = () => null,
 }: PaymentHistoryTableProps) {
+  const [focusedRowIndex, setFocusedRowIndex] = useState<number>(0);
+  const rowRefs = useRef<(HTMLTableRowElement | null)[]>([]);
+  const nextPageAvailable = canGoNext ?? hasMore;
+
   // 1. Disconnected
   if (!isConnected) {
     return <DisconnectedState />;
@@ -222,12 +239,36 @@ export default function PaymentHistoryTable({
   }
 
   // 5. Table with events
+  const handleTableKeyDown = (e: KeyboardEvent<HTMLTableSectionElement>) => {
+    if (events.length === 0) return;
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      const next = Math.min(focusedRowIndex + 1, events.length - 1);
+      setFocusedRowIndex(next);
+      rowRefs.current[next]?.focus();
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      const prev = Math.max(focusedRowIndex - 1, 0);
+      setFocusedRowIndex(prev);
+      rowRefs.current[prev]?.focus();
+    } else if (e.key === 'Home') {
+      e.preventDefault();
+      setFocusedRowIndex(0);
+      rowRefs.current[0]?.focus();
+    } else if (e.key === 'End') {
+      e.preventDefault();
+      const last = events.length - 1;
+      setFocusedRowIndex(last);
+      rowRefs.current[last]?.focus();
+    }
+  };
+
   return (
     <div className="space-y-4">
       {/* Refresh / status row */}
       <div className="flex items-center justify-between gap-2">
         <p className="text-gray-500 text-xs">
-          {events.length} payment{events.length !== 1 ? 's' : ''} loaded
+          {events.length} event{events.length !== 1 ? 's' : ''} loaded
           {error && (
             <span className="ml-2 text-yellow-400">(partial load — some pages may have failed)</span>
           )}
@@ -249,6 +290,7 @@ export default function PaymentHistoryTable({
         className="overflow-x-auto rounded-2xl border border-gray-800"
         role="region"
         aria-label="Payment history table"
+        tabIndex={0}
       >
         <table
           className="w-full min-w-[640px] border-collapse text-sm"
@@ -259,7 +301,7 @@ export default function PaymentHistoryTable({
           <thead>
             <TableHead />
           </thead>
-          <tbody>
+          <tbody onKeyDown={handleTableKeyDown} role="rowgroup">
             {events.map((event, idx) => (
               <EventRow
                 key={event.id}
@@ -267,6 +309,11 @@ export default function PaymentHistoryTable({
                 rowIndex={idx + 1}
                 networkName={networkName}
                 getLabel={getLabel}
+                isFocused={focusedRowIndex === idx}
+                rowRef={(el) => {
+                  rowRefs.current[idx] = el;
+                }}
+                onRowFocus={() => setFocusedRowIndex(idx)}
               />
             ))}
 
@@ -278,28 +325,41 @@ export default function PaymentHistoryTable({
       </div>
 
       {/* Pagination */}
-      {hasMore && !isLoading && (
-        <div className="flex justify-center">
-          <button
-            type="button"
-            onClick={onLoadMore}
-            aria-label="Load more payment history events"
-            className="rounded-lg border border-gray-700 bg-gray-800 px-6 py-2.5 text-sm font-medium text-gray-300 hover:bg-gray-700 hover:text-white transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400"
-          >
-            Load more
-          </button>
-        </div>
+      {(canGoPrevious || nextPageAvailable) && !isLoading && (
+        <nav aria-label="Payment history pagination" className="flex items-center justify-center gap-4">
+          {canGoPrevious && onPreviousPage && (
+            <button
+              type="button"
+              onClick={onPreviousPage}
+              aria-label="Previous payment history page"
+              className="rounded-lg border border-gray-700 bg-gray-800 px-4 py-2.5 text-sm font-medium text-gray-300 hover:bg-gray-700 hover:text-white transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400"
+            >
+              Previous
+            </button>
+          )}
+          {onNextPage && <span aria-live="polite" className="text-xs text-gray-500">Page {currentPage}</span>}
+          {nextPageAvailable && (
+            <button
+              type="button"
+              onClick={onNextPage ?? onLoadMore}
+              aria-label={onNextPage ? 'Next payment history page' : 'Load more payment history events'}
+              className="rounded-lg border border-gray-700 bg-gray-800 px-6 py-2.5 text-sm font-medium text-gray-300 hover:bg-gray-700 hover:text-white transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400"
+            >
+              {onNextPage ? 'Next page' : 'Load more'}
+            </button>
+          )}
+        </nav>
       )}
 
       {isLoading && events.length > 0 && (
         <p role="status" aria-live="polite" className="text-center text-xs text-gray-500">
-          Loading more payments…
+          Loading subscription activity…
         </p>
       )}
 
-      {!hasMore && events.length > 0 && !isLoading && (
-        <p className="text-center text-xs text-gray-600" aria-label="All payments loaded">
-          All payments loaded
+      {!nextPageAvailable && events.length > 0 && !isLoading && (
+        <p className="text-center text-xs text-gray-600" aria-label="All subscription activity loaded">
+          All subscription activity loaded
         </p>
       )}
     </div>
@@ -321,13 +381,13 @@ function TableHead() {
         scope="col"
         className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-gray-400"
       >
-        Merchant
+        Type
       </th>
       <th
         scope="col"
         className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-gray-400"
       >
-        Token
+        Merchant
       </th>
       <th
         scope="col"
@@ -339,41 +399,50 @@ function TableHead() {
         scope="col"
         className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-gray-400"
       >
-        Ledger
-      </th>
-      <th
-        scope="col"
-        className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-gray-400"
-      >
-        Transaction
+        Tx Hash
       </th>
     </tr>
   );
 }
-
-// ── Event row ─────────────────────────────────────────────────────────────────
 
 function EventRow({
   event,
   rowIndex,
   networkName,
   getLabel,
+  isFocused = false,
+  rowRef,
+  onRowFocus,
 }: {
   event: PaymentEvent;
   rowIndex: number;
   networkName: string;
   getLabel: (address: string) => string | null;
+  isFocused?: boolean;
+  rowRef?: (el: HTMLTableRowElement | null) => void;
+  onRowFocus?: () => void;
 }) {
   const txUrl = stellarExpertTxUrl(event.txHash, networkName);
 
   return (
     <tr
+      ref={rowRef}
+      tabIndex={isFocused ? 0 : -1}
+      onFocus={onRowFocus}
       aria-rowindex={rowIndex}
-      className="border-b border-gray-800/60 hover:bg-gray-800/30 transition-colors"
+      aria-selected={isFocused}
+      className={`border-b border-gray-800/60 hover:bg-gray-800/30 transition-colors focus:outline-none focus-visible:bg-gray-800/60 focus-visible:ring-1 focus-visible:ring-blue-400 ${
+        isFocused ? 'bg-gray-800/20' : ''
+      }`}
     >
       {/* Date */}
       <td className="px-4 py-3 text-gray-300 text-xs whitespace-nowrap">
         <time dateTime={event.timestamp}>{formatTimestamp(event.timestamp)}</time>
+      </td>
+
+      {/* Event type */}
+      <td className="px-4 py-3 text-xs text-gray-300">
+        {(event.eventType ?? "executed").replace(/_/g, " ")}
       </td>
 
       {/* Merchant */}
@@ -385,26 +454,11 @@ function EventRow({
         />
       </td>
 
-      {/* Token */}
-      <td className="px-4 py-3 font-mono text-xs text-gray-400">
-        <span
-          title={event.token}
-          aria-label={`Token contract: ${event.token}`}
-        >
-          {truncateAddress(event.token, 6)}
-        </span>
-      </td>
-
       {/* Amount */}
       <td className="px-4 py-3 text-right font-mono text-xs text-green-400 whitespace-nowrap">
-        <span aria-label={`Amount: ${event.amount} tokens`}>
+        <span aria-label={event.amount === "—" ? "Amount unavailable" : `Amount: ${event.amount} tokens`}>
           {event.amount}
         </span>
-      </td>
-
-      {/* Ledger */}
-      <td className="px-4 py-3 text-gray-500 text-xs tabular-nums">
-        {event.ledger.toLocaleString()}
       </td>
 
       {/* Transaction hash */}

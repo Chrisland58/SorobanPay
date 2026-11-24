@@ -1,37 +1,33 @@
 ---
 name: Documentation
-about: Report missing, incorrect, or unclear documentation
-title: "[DOCS] "
+about: Report missing, unclear, or incorrect documentation
+title: "[Docs] "
 labels: documentation
 assignees: ""
 ---
 
-## What Is Missing or Incorrect?
+## Documentation Issue
 
-<!-- Point to the specific file, section, or URL.
-     e.g. "docs/contract-api.md §Error Codes — error code 11 is listed but not explained." -->
+<!-- Describe what is missing, incorrect, or unclear in the current documentation. -->
 
-**File / Section:**
+## Location
 
-**Current text (if applicable):**
+<!-- Where is the documentation that needs updating?
+     Provide a file path or URL. -->
 
-```
-<!-- paste the existing text here -->
-```
+- File / URL: <!-- e.g. docs/architecture.md, README.md#deployment -->
 
-## Why Is It a Problem?
+## Suggested Improvement
 
-<!-- Explain the impact: what confusion does it cause, or what information is a contributor unable to find? -->
+<!-- What should the documentation say or include?
+     If proposing new docs, describe the structure and key topics to cover. -->
 
-## Proposed Content
+## Why This Matters
 
-<!-- Paste the corrected or new text you would like to see. Use code blocks, tables, or diagrams as needed. -->
-
-## Acceptance Criteria
-
-- [ ]
-- [ ]
+<!-- Explain the impact: who is confused, what mistakes does this cause,
+     or what information is completely absent? -->
 
 ## Additional Context
 
-<!-- Links to relevant specs, GitHub issues, or external references that should be cited in the docs. -->
+<!-- Screenshots, links to related issues, or examples from other projects
+     that handle this documentation well. -->

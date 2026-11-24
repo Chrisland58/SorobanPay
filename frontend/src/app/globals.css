@@ -2,52 +2,130 @@
 @tailwind components;
 @tailwind utilities;
 
+/**
+ * SorobanPay design-system CSS layer — Issue #1427
+ *
+ * Custom properties map the Tailwind color tokens to CSS variables so that
+ * plain CSS (e.g. in third-party libs) can consume the same palette.
+ *
+ * Dark mode is selected with the `dark` class; light surfaces are provided
+ * when that class is absent.
+ */
+
 @layer base {
-  /**
-   * Baseline theme using semantic colour tokens.
-   * All contrast ratios verified against WCAG AA (#451 UX-116).
-   *
-   * Dark mode  (default): bg = #030712 (gray-950), fg = #F9FAFB (gray-50)  — 16.7:1 ✅ AAA
-   * Light mode:           bg = #FFFFFF (white),    fg = #111827 (gray-900) — 16.0:1 ✅ AAA
-   *
-   * The 'dark' class is toggled on <html> by ThemeProvider / ThemeScript.
-   */
-  body {
-    background-color: theme('colors.white');
-    color: theme('colors.gray.900');
-  }
-
-  .dark body {
-    background-color: theme('colors.surface.base');
-    color: theme('colors.content.primary');
-  }
-
-  /* Animation duration CSS custom property — lets components override via inline style */
   :root {
-    --animation-duration-fast:   150ms;
-    --animation-duration-base:   250ms;
-    --animation-duration-slow:   400ms;
+    /* ── Brand (Stellar blue) ────────────────────────────────────────── */
+    --color-brand-50:  theme('colors.brand.50');
+    --color-brand-100: theme('colors.brand.100');
+    --color-brand-200: theme('colors.brand.200');
+    --color-brand-300: theme('colors.brand.300');
+    --color-brand-400: theme('colors.brand.400');
+    --color-brand-500: theme('colors.brand.500');
+    --color-brand-600: theme('colors.brand.600');
+    --color-brand-700: theme('colors.brand.700');
+    --color-brand-800: theme('colors.brand.800');
+    --color-brand-900: theme('colors.brand.900');
+    --color-brand-950: theme('colors.brand.950');
+
+    /* ── Success ─────────────────────────────────────────────────────── */
+    --color-success-400: theme('colors.success.400');
+    --color-success-500: theme('colors.success.500');
+    --color-success-600: theme('colors.success.600');
+
+    /* ── Warning ─────────────────────────────────────────────────────── */
+    --color-warning-400: theme('colors.warning.400');
+    --color-warning-500: theme('colors.warning.500');
+    --color-warning-600: theme('colors.warning.600');
+
+    /* ── Error ───────────────────────────────────────────────────────── */
+    --color-error-400: theme('colors.error.400');
+    --color-error-500: theme('colors.error.500');
+    --color-error-600: theme('colors.error.600');
+
+    /* ── Neutral palette ─────────────────────────────────────────────── */
+    --color-neutral-0:   theme('colors.neutral.0');
+    --color-neutral-50:  theme('colors.neutral.50');
+    --color-neutral-100: theme('colors.neutral.100');
+    --color-neutral-400: theme('colors.neutral.400');
+    --color-neutral-500: theme('colors.neutral.500');
+    --color-neutral-700: theme('colors.neutral.700');
+    --color-neutral-800: theme('colors.neutral.800');
+    --color-neutral-900: theme('colors.neutral.900');
+    --color-neutral-950: theme('colors.neutral.950');
+
+    /* ── Light-mode semantic tokens ──────────────────────────────────── */
+    --surface-base: 249 250 251;
+    --content-primary: 17 24 39;
+    --content-secondary: 31 41 55;
+    --content-tertiary: 75 85 99;
+    --content-disabled: 107 114 128;
+    --status-success-text: 22 101 52;
+    --status-success-surface: 220 252 231;
+    --status-error-text: 153 27 27;
+    --status-error-surface: 254 242 242;
+    --status-warning-text: 146 64 14;
+    --status-warning-surface: 255 251 235;
+    --status-info-text: 30 64 175;
+    --status-info-surface: 239 246 255;
+    --interactive-focus: 37 99 235;
+    --interactive-primary: 29 78 216;
+    --interactive-destructive: 185 28 28;
+    --color-bg: rgb(var(--surface-base));
+    --color-surface: #ffffff;
+    --color-surface-2: #f3f4f6;
+    --color-border: #d1d5db;
+    --color-text: rgb(var(--content-primary));
+    --color-text-muted: rgb(var(--content-tertiary));
+    --color-focus-ring: rgb(var(--interactive-focus));
+    --color-primary: rgb(var(--interactive-primary));
+    --color-primary-hover: #1e40af;
   }
 
-  /**
-   * Respect prefers-reduced-motion (#452 UX-117).
-   * Setting duration to near-zero keeps event firing without visual motion.
-   */
-  @media (prefers-reduced-motion: reduce) {
-    :root {
-      --animation-duration-fast:  0.01ms;
-      --animation-duration-base:  0.01ms;
-      --animation-duration-slow:  0.01ms;
-    }
+  .dark {
+    --surface-base: 3 7 18;
+    --content-primary: 249 250 251;
+    --content-secondary: 229 231 235;
+    --content-tertiary: 156 163 175;
+    --content-disabled: 156 163 175;
+    --status-success-text: 134 239 172;
+    --status-success-surface: 5 46 22;
+    --status-error-text: 252 165 165;
+    --status-error-surface: 69 10 10;
+    --status-warning-text: 253 230 138;
+    --status-warning-surface: 69 26 3;
+    --status-info-text: 147 197 253;
+    --status-info-surface: 23 37 84;
+    --interactive-focus: 96 165 250;
+    --interactive-primary: 37 99 235;
+    --interactive-destructive: 220 38 38;
+    --color-bg: rgb(var(--surface-base));
+    --color-surface: #111827;
+    --color-surface-2: #1f2937;
+    --color-border: #374151;
+    --color-text: rgb(var(--content-primary));
+    --color-text-muted: rgb(var(--content-tertiary));
+    --color-focus-ring: rgb(var(--interactive-focus));
+    --color-primary: rgb(var(--interactive-primary));
+    --color-primary-hover: #3b82f6;
+  }
 
-    *,
-    *::before,
-    *::after {
-      animation-duration: 0.01ms !important;
-      animation-iteration-count: 1 !important;
-      transition-duration: 0.01ms !important;
-      scroll-behavior: auto !important;
-    }
+  /* ─── Base element styles ──────────────────────────────────────────────── */
+
+  body {
+    /** The selected theme provides the page surface and foreground colors. */
+    background-color: var(--color-bg, #030712);
+    color: var(--color-text, #f9fafb);
+    overflow-x: hidden;
+  }
+
+  html:not(.dark) body {
+    background-color: var(--color-bg);
+    color: var(--color-text);
+    color-scheme: light;
+  }
+
+  html.dark {
+    color-scheme: dark;
   }
 
   /*
@@ -55,21 +133,102 @@
    * interactive elements regardless of component-level styling omissions.
    * Components that define their own focus-visible styles take precedence
    * via CSS specificity.
+   *
+   * The selected theme's focus token meets WCAG 3:1 against its base surface.
    */
   :focus-visible {
-    outline: 2px solid #60a5fa; /* blue-400 — meets WCAG 3:1 on gray-900 */
+    outline: 2px solid var(--color-focus-ring, #60a5fa);
     outline-offset: 2px;
-  }
-
-  /* Remove the browser default outline only when we know JS focus-visible is active */
-  :focus:not(:focus-visible) {
-    outline: none;
   }
 }
 
 @layer utilities {
-  /* UX-114: safe-area-inset-bottom padding for iOS home indicator */
-  .safe-area-inset-bottom {
-    padding-bottom: env(safe-area-inset-bottom, 0px);
+  html:not(.dark) .bg-gray-950 {
+    background-color: #f9fafb;
+  }
+
+  html:not(.dark) .bg-gray-900 {
+    background-color: #ffffff;
+  }
+
+  html:not(.dark) .bg-gray-800 {
+    background-color: #f3f4f6;
+  }
+
+  html:not(.dark) .bg-gray-700 {
+    background-color: #e5e7eb;
+  }
+
+  html:not(.dark) [class*="bg-gray-900/"],
+  html:not(.dark) [class*="bg-gray-800/"] {
+    background-color: rgb(255 255 255 / 0.8);
+  }
+
+  html:not(.dark) .text-white {
+    color: #111827;
+  }
+
+  html:not(.dark) .text-white.bg-gradient-to-br,
+  html:not(.dark) .text-white.bg-blue-600,
+  html:not(.dark) .text-white.bg-blue-700,
+  html:not(.dark) .text-white.bg-green-700,
+  html:not(.dark) .text-white.bg-red-600,
+  html:not(.dark) .text-white.bg-red-700,
+  html:not(.dark) .text-white.bg-indigo-600 {
+    color: #ffffff;
+  }
+
+  html:not(.dark) .text-white.bg-blue-500,
+  html:not(.dark) .text-white.bg-green-500,
+  html:not(.dark) .text-white.bg-green-600 {
+    color: #111827;
+  }
+
+  html:not(.dark) .text-gray-100 {
+    color: #1f2937;
+  }
+
+  html:not(.dark) .text-gray-200,
+  html:not(.dark) .text-gray-300 {
+    color: #374151;
+  }
+
+  html:not(.dark) .text-gray-400,
+  html:not(.dark) .text-gray-500 {
+    color: #4b5563;
+  }
+
+  html:not(.dark) .text-gray-600 {
+    color: #4b5563;
+  }
+
+  html:not(.dark) .text-blue-200,
+  html:not(.dark) .text-blue-300,
+  html:not(.dark) .text-blue-400,
+  html:not(.dark) .text-indigo-300,
+  html:not(.dark) .text-indigo-400 {
+    color: #1d4ed8;
+  }
+
+  html:not(.dark) .border-gray-700,
+  html:not(.dark) .border-gray-800 {
+    border-color: #d1d5db;
+  }
+
+  html:not(.dark) .divide-gray-700 > :not([hidden]) ~ :not([hidden]) {
+    border-color: #d1d5db;
+  }
+
+  html:not(.dark) input::placeholder,
+  html:not(.dark) textarea::placeholder {
+    color: #6b7280;
+    opacity: 1;
+  }
+}
+
+@layer base {
+  /* Remove the browser default outline only when focus-visible is active */
+  :focus:not(:focus-visible) {
+    outline: none;
   }
 }

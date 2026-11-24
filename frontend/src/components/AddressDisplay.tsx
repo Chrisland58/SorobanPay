@@ -12,6 +12,7 @@
  */
 
 import { truncateAddress } from '@/lib/utils';
+import { CopyButton } from './CopyButton';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -66,14 +67,13 @@ export function AddressDisplay({
     );
   }
 
-  // No label: just show the truncated address
+  // No label: just show the truncated address with copy button
   return (
-    <span
-      className={`font-mono ${className}`}
-      title={address}
-      aria-label={`Address: ${address}`}
-    >
-      {truncated}
+    <span className={`inline-flex items-center gap-1.5 font-mono ${className}`}>
+      <span title={address} aria-label={`Address: ${address}`}>
+        {truncated}
+      </span>
+      <CopyButton text={address} label="Copy address" />
     </span>
   );
 }

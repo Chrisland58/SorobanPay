@@ -20,6 +20,7 @@ import { useState, useEffect, useCallback } from "react";
 import { Address } from "@stellar/stellar-sdk";
 import { AddressDisplay } from "@/components/AddressDisplay";
 import { formatTokenWithSymbol } from "@/lib/token_decimals";
+import { SkeletonSubscriptionList, useMinLoadingDuration } from "@/components/Skeleton";
 
 // ─── Types ─────────────────────────────────────────────────────────────────────
 
@@ -311,6 +312,8 @@ export function SubscriptionHistory({
   error = null,
 }: SubscriptionHistoryProps) {
   const [currentTime, setCurrentTime] = useState<number>(Math.floor(Date.now() / 1000));
+  // Enforce minimum 200 ms skeleton display to prevent flash
+  const showSkeleton = useMinLoadingDuration(isLoading);
 
   // Update current time every 10 seconds for real-time countdown
   useEffect(() => {
@@ -333,17 +336,8 @@ export function SubscriptionHistory({
     return a.subscription.data.next_payment - b.subscription.data.next_payment;
   });
 
-  if (isLoading) {
-    return (
-      <div className="w-full space-y-3">
-        {[1, 2, 3].map((i) => (
-          <div
-            key={i}
-            className="h-32 rounded-lg border border-gray-700 bg-gray-900/50 animate-pulse"
-          />
-        ))}
-      </div>
-    );
+  if (showSkeleton) {
+    return <SkeletonSubscriptionList cards={3} />;
   }
 
   if (error) {

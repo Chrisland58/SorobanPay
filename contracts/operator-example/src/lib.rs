@@ -115,6 +115,7 @@ pub enum OperatorError {
 // ─── Contract ─────────────────────────────────────────────────────────────────
 
 #[contract]
+/// Contract that relays subscriber-authorized calls to `SubscriptionProtocol`.
 pub struct OperatorContract;
 
 #[contractimpl]
@@ -131,6 +132,9 @@ impl OperatorContract {
     ///
     /// # Errors
     /// - `OperatorError::AlreadyInitialized` — if called more than once.
+    ///
+    /// # Returns
+    /// `Ok(())` after storing the admin and unpaused state.
     pub fn initialize(env: Env, admin: Address) -> Result<(), OperatorError> {
         if env.storage().persistent().has(&DataKey::Admin) {
             return Err(OperatorError::AlreadyInitialized);
@@ -152,6 +156,9 @@ impl OperatorContract {
     ///
     /// # Errors
     /// - `OperatorError::NotInitialized` — if the contract is not yet initialized.
+    ///
+    /// # Returns
+    /// `Ok(())` after pausing the operator and emitting its event.
     pub fn pause(env: Env) -> Result<(), OperatorError> {
         let admin: Address = env
             .storage()
@@ -176,6 +183,9 @@ impl OperatorContract {
     ///
     /// # Errors
     /// - `OperatorError::NotInitialized` — if the contract is not yet initialized.
+    ///
+    /// # Returns
+    /// `Ok(())` after resuming the operator and emitting its event.
     pub fn unpause(env: Env) -> Result<(), OperatorError> {
         let admin: Address = env
             .storage()
@@ -224,6 +234,9 @@ impl OperatorContract {
     /// ## Errors
     /// - `OperatorError::OperatorPaused`    — if the operator has been paused by admin.
     /// - `OperatorError::NotInitialized`    — if initialize() was never called.
+    ///
+    /// ## Returns
+    /// `Ok(())` after the protocol accepts the delegated subscription.
     pub fn delegate_subscribe(
         env: Env,
         protocol_id: Address,
@@ -273,6 +286,10 @@ impl OperatorContract {
     // ── View helpers ─────────────────────────────────────────────────────────
 
     /// Return whether the operator is currently paused.
+    ///
+    /// # Returns
+    /// `true` if paused; otherwise `false` (including before initialization).
+    /// No authorization is required.
     pub fn is_paused(env: Env) -> bool {
         env.storage()
             .persistent()
@@ -284,6 +301,10 @@ impl OperatorContract {
     ///
     /// # Errors
     /// - `OperatorError::NotInitialized` — if the contract is not yet initialized.
+    ///
+    /// # Returns
+    /// The stored administrator address.
+    /// No authorization is required.
     pub fn admin(env: Env) -> Result<Address, OperatorError> {
         env.storage()
             .persistent()

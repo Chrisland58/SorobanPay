@@ -12,6 +12,7 @@
  */
 
 import { type FieldErrors } from "@/lib/validation";
+import { useEffect, useRef } from "react";
 import { TokenCombobox } from "@/components/TokenCombobox";
 import { HelpTooltip } from "@/components/HelpTooltip";
 import { NETWORK_NAME } from "@/constants/network";
@@ -45,7 +46,67 @@ export interface SubscriptionFormInputsProps {
   onIntervalChange: (value: string) => void;
   onMerchantBlur?: () => void;
   onTokenBlur?: () => void;
+  focusErrorSummaryRequest?: number;
 }
+
+export interface SubscriptionFormErrorSummaryProps {
+  fieldErrors: FieldErrors;
+  focusRequest?: number;
+}
+
+export function SubscriptionFormErrorSummary({
+  fieldErrors,
+  focusRequest = 0,
+}: SubscriptionFormErrorSummaryProps) {
+  const errorSummaryRef = useRef<HTMLDivElement>(null);
+  const errorItems = [
+    { id: "merchantAddress", label: "Merchant address", message: fieldErrors.merchantAddress },
+    { id: "tokenAddress", label: "Token contract address", message: fieldErrors.tokenAddress },
+    { id: "amount", label: "Amount", message: fieldErrors.amount },
+    { id: "interval", label: "Interval", message: fieldErrors.interval },
+  ].filter((item): item is typeof item & { message: string } => Boolean(item.message));
+
+  useEffect(() => {
+    if (focusRequest > 0 && errorItems.length > 0) {
+      errorSummaryRef.current?.focus();
+    }
+  }, [focusRequest, errorItems.length]);
+
+  if (errorItems.length === 0) return null;
+
+  return (
+    <div
+      ref={errorSummaryRef}
+      role="alert"
+      aria-labelledby="form-error-summary-title"
+      tabIndex={-1}
+      className="rounded-lg border border-red-700 bg-red-900/30 p-4 text-red-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-red-400"
+    >
+      <h2 id="form-error-summary-title" className="font-semibold">
+        There is a problem
+      </h2>
+      <p className="mt-1 text-sm">Review the following fields:</p>
+      <ul className="mt-2 list-disc pl-5 text-sm">
+        {errorItems.map(({ id, label, message }) => (
+          <li key={id}>
+            <a className="underline underline-offset-2" href={`#${id}`}>
+              {label}: {message}
+            </a>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+export const INTERVAL_PRESETS = [
+  { label: 'Daily (1 day)', seconds: '86400', phrase: 'every day' },
+  { label: 'Weekly (7 days)', seconds: '604800', phrase: 'every week' },
+  { label: 'Monthly (30 days)', seconds: '2592000', phrase: 'every month' },
+  { label: 'Quarterly (90 days)', seconds: '7776000', phrase: 'every quarter' },
+  { label: 'Annual (365 days)', seconds: '31536000', phrase: 'every year' },
+  { label: 'Custom', seconds: 'custom', phrase: '' },
+];
 
 /**
  * Form inputs for subscription creation.
@@ -68,9 +129,25 @@ export function SubscriptionFormInputs({
   onIntervalChange,
   onMerchantBlur,
   onTokenBlur,
+  focusErrorSummaryRequest,
 }: SubscriptionFormInputsProps) {
+  const matchedPreset = INTERVAL_PRESETS.find((p) => p.seconds === interval);
+  const [isCustomMode, setIsCustomMode] = useState<boolean>(!matchedPreset);
+
+  const selectedPresetValue = isCustomMode ? 'custom' : matchedPreset ? matchedPreset.seconds : 'custom';
+
+  const summaryPhrase = matchedPreset && !isCustomMode
+    ? matchedPreset.phrase
+    : interval && Number(interval) > 0
+      ? `every ${interval} seconds`
+      : 'each billing cycle';
   return (
     <div className="space-y-4">
+      <SubscriptionFormErrorSummary
+        fieldErrors={fieldErrors}
+        focusRequest={focusErrorSummaryRequest}
+      />
+
       {/* Merchant address */}
       <div>
         <label htmlFor="merchantAddress" className={labelCls}>
@@ -108,7 +185,6 @@ export function SubscriptionFormInputs({
         {fieldErrors.merchantAddress && (
           <p
             id="err-merchant"
-            role="alert"
             className="mt-2 text-xs text-red-400 font-medium"
           >
             {fieldErrors.merchantAddress}
@@ -147,7 +223,6 @@ export function SubscriptionFormInputs({
         {fieldErrors.tokenAddress && (
           <p
             id="err-token"
-            role="alert"
             className="mt-2 text-xs text-red-400 font-medium"
           >
             {fieldErrors.tokenAddress}
@@ -190,51 +265,82 @@ export function SubscriptionFormInputs({
           decimals).
         </p>
         {fieldErrors.amount && (
-          <p id="err-amount" role="alert" className="mt-2 text-xs text-red-400 font-medium">
+          <p id="err-amount" className="mt-2 text-xs text-red-400 font-medium">
             {fieldErrors.amount}
           </p>
         )}
       </div>
 
-      {/* Interval */}
+      {/* Interval preset selector and custom input */}
       <div>
-        <label htmlFor="interval" className={labelCls}>
-          Interval{requiredMark}
+        <label htmlFor="interval-preset" className={labelCls}>
+          Billing cycle preset{requiredMark}
           <span className="sr-only">(required)</span>
           {" "}
           <HelpTooltip
-            content="Number of seconds between payment collections. Useful intervals: 86400 (1 day), 604800 (1 week), 2592000 (30 days)."
+            content="Choose a standard recurring payment interval or specify a custom duration in seconds."
             articleId="create-subscription"
           />
         </label>
-        <input
-          id="interval"
-          type="number"
-          inputMode="numeric"
-          pattern="[0-9]*"
-          min="86400"
-          step="1"
-          placeholder="86400"
-          autoComplete="off"
-          value={interval}
-          onChange={(e) => onIntervalChange(e.target.value)}
+        <select
+          id="interval-preset"
+          value={selectedPresetValue}
+          onChange={(e) => {
+            const val = e.target.value;
+            if (val === 'custom') {
+              setIsCustomMode(true);
+            } else {
+              setIsCustomMode(false);
+              onIntervalChange(val);
+            }
+          }}
           disabled={isDisabled}
-          required
-          aria-required="true"
-          aria-describedby={`help-interval${fieldErrors.interval ? " err-interval" : ""}`}
-          aria-invalid={!!fieldErrors.interval}
-          className={fieldClass(!!fieldErrors.interval)}
-        />
-        <p id="help-interval" className={hintCls}>
-          Seconds between payments. Minimum: 1 day (86400 seconds). Common intervals:{" "}
-          <code className="bg-gray-800 px-1 rounded text-gray-200 text-xs">86400</code> (daily),{" "}
-          <code className="bg-gray-800 px-1 rounded text-gray-200 text-xs">604800</code> (weekly),{" "}
-          <code className="bg-gray-800 px-1 rounded text-gray-200 text-xs">2592000</code> (monthly).
+          className={`${fieldClass(!!fieldErrors.interval)} mb-2`}
+          aria-label="Billing cycle preset selector"
+        >
+          {INTERVAL_PRESETS.map((preset) => (
+            <option key={preset.seconds} value={preset.seconds}>
+              {preset.label}
+            </option>
+          ))}
+        </select>
+
+        {isCustomMode && (
+          <div className="mt-2">
+            <label htmlFor="interval" className="block text-xs text-gray-400 mb-1">
+              Custom interval (in seconds, min 86,400)
+            </label>
+            <input
+              id="interval"
+              type="number"
+              inputMode="numeric"
+              pattern="[0-9]*"
+              min="86400"
+              step="1"
+              placeholder="86400"
+              autoComplete="off"
+              value={interval}
+              onChange={(e) => onIntervalChange(e.target.value)}
+              disabled={isDisabled}
+              required
+              aria-required="true"
+              aria-describedby={`help-interval${fieldErrors.interval ? " err-interval" : ""}`}
+              aria-invalid={!!fieldErrors.interval}
+              className={fieldClass(!!fieldErrors.interval)}
+            />
+          </div>
+        )}
+
+        {/* Dynamic Human-readable summary */}
+        <p className="mt-2 rounded-lg bg-blue-950/40 border border-blue-800/60 p-2.5 text-xs text-blue-200">
+          💡 <strong>Summary:</strong> You will be charged{' '}
+          <span className="text-white font-semibold">{amount ? `${amount} tokens` : 'tokens'}</span>{' '}
+          <span>{summaryPhrase}</span>.
         </p>
+
         {fieldErrors.interval && (
           <p
             id="err-interval"
-            role="alert"
             className="mt-2 text-xs text-red-400 font-medium"
           >
             {fieldErrors.interval}
