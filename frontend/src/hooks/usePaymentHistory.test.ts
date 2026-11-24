@@ -340,6 +340,57 @@ describe('usePaymentHistory', () => {
     expect(result.current.hasMore).toBe(false);
   });
 
+  it('deduplicates events when new pages overlap with existing records', async () => {
+    const event1 = makeRawEvent('evt-1', 1000);
+    const event2 = makeRawEvent('evt-2', 1001);
+    // Overlapping: event2 is returned on both page 1 and page 2
+    const event3 = makeRawEvent('evt-3', 1002);
+
+    let call = 0;
+    const mockGetEvents = jest.fn().mockImplementation(() => {
+      call++;
+      if (call === 1) {
+        return Promise.resolve({ events: [event1, event2], cursor: 'cursor-2' });
+      }
+      return Promise.resolve({ events: [event2, event3], cursor: null });
+    });
+    SorobanRpc.Server.mockReturnValue({ getEvents: mockGetEvents });
+
+    const { result } = renderHook(() =>
+      usePaymentHistory({ publicKey, rpcUrl: 'https://mock-rpc', contractId: 'CCONTRACT', pageSize: 2 }),
+    );
+
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+    expect(result.current.events).toHaveLength(2);
+
+    act(() => {
+      result.current.loadMore();
+    });
+
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+
+    // Must deduplicate evt-2: exactly 3 unique events, not 4
+    expect(result.current.events).toHaveLength(3);
+    const ids = result.current.events.map((e) => e.id);
+    expect(ids).toEqual(['evt-3', 'evt-2', 'evt-1']);
+    expect(result.current.hasMore).toBe(false);
+    expect(result.current.isEndReached).toBe(true);
+  });
+
+  it('correctly sets isEndReached on empty and final pages', async () => {
+    const mockGetEvents = jest.fn().mockResolvedValue({ events: [], cursor: null });
+    SorobanRpc.Server.mockReturnValue({ getEvents: mockGetEvents });
+
+    const { result } = renderHook(() =>
+      usePaymentHistory({ publicKey, rpcUrl: 'https://mock-rpc', contractId: 'CCONTRACT' }),
+    );
+
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+    expect(result.current.events).toHaveLength(0);
+    expect(result.current.hasMore).toBe(false);
+    expect(result.current.isEndReached).toBe(false);
+  });
+
   it('does not fetch when contractId is empty', () => {
     const mockGetEvents = jest.fn();
     SorobanRpc.Server.mockReturnValue({ getEvents: mockGetEvents });

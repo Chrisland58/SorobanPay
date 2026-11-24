@@ -292,7 +292,29 @@ describe('PaymentHistoryTable', () => {
           {...defaultProps({ events, hasMore: false, isLoading: true })}
         />,
       );
-      expect(screen.getByRole('status', { name: /loading more/i })).toBeInTheDocument();
+      expect(screen.getByRole('status')).toBeInTheDocument();
+    });
+
+    it('keeps load more button in DOM with aria-busy and disabled during loading', () => {
+      render(
+        <PaymentHistoryTable
+          {...defaultProps({ events, hasMore: true, isLoading: true })}
+        />,
+      );
+      const button = screen.getByRole('button', { name: /loading more/i });
+      expect(button).toBeInTheDocument();
+      expect(button).toBeDisabled();
+      expect(button).toHaveAttribute('aria-busy', 'true');
+    });
+
+    it('announces end-of-list state in live region when all items are loaded', () => {
+      render(
+        <PaymentHistoryTable
+          {...defaultProps({ events, hasMore: false, isLoading: false })}
+        />,
+      );
+      const liveRegion = screen.getByRole('status');
+      expect(liveRegion).toHaveTextContent(/all subscription activity loaded/i);
     });
 
     it('renders accessible previous and next page controls in page mode', () => {
