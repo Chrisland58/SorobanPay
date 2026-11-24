@@ -18,7 +18,14 @@
  *   - Re-export from transaction_builder
  */
 
-import { normalizeRpcError, NormalizedRpcError, RpcErrorCategory } from './rpc_error_normalizer';
+import {
+  normalizeRpcError,
+  mapFrontendError,
+  sanitizeSensitiveDetails,
+  NormalizedRpcError,
+  RpcErrorCategory,
+  FrontendErrorCategory,
+} from './rpc_error_normalizer';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -521,5 +528,143 @@ describe('NormalizedRpcError structure', () => {
         expect(r[field]).toBeDefined();
       }
     }
+  });
+});
+
+// ─── Typed frontend error mapping (#1567) ────────────────────────────────────
+
+describe('mapFrontendError – Typed frontend error mapping (#1567)', () => {
+  it('maps wallet rejection errors to stable wallet_rejection UI state', () => {
+    const errs = [
+      new Error('User declined'),
+      new Error('User rejected the signing prompt'),
+      new Error('Signing failed in freighter popup'),
+      'wallet rejection: cancelled by user',
+    ];
+
+    for (const e of errs) {
+      const result = mapFrontendError(e);
+      expect(result.category).toBe('wallet_rejection');
+      expect(result.title).toBe('Wallet Signature Declined');
+      expect(result.message).toMatch(/declined or dismissed/i);
+      expect(result.nextSteps).toMatch(/approve the transaction/i);
+      expect(result.retryable).toBe(true);
+      expect(result.diagnosticContext.category).toBe('wallet_rejection');
+      expect(result.diagnosticContext.recoveryPath).toBe('Re-prompt wallet signing');
+    }
+  });
+
+  it('maps network/RPC failures to stable unavailable_rpc UI state', () => {
+    const errs = [
+      new Error('Failed to fetch'),
+      new Error('Network request failed'),
+      new Error('RPC node is unavailable'),
+      new Error('Transaction confirmation timeout after 60 seconds'),
+      'unavailable rpc endpoint 503',
+    ];
+
+    for (const e of errs) {
+      const result = mapFrontendError(e);
+      expect(result.category).toBe('unavailable_rpc');
+      expect(result.title).toBe('RPC Service Unavailable');
+      expect(result.message).toMatch(/could not be reached|timed out/i);
+      expect(result.nextSteps).toMatch(/connection|failover|endpoint/i);
+      expect(result.retryable).toBe(true);
+      expect(result.diagnosticContext.category).toBe('unavailable_rpc');
+      expect(result.diagnosticContext.recoveryPath).toMatch(/connectivity|failover/i);
+    }
+  });
+
+  it('maps simulation failures to stable simulation_failure UI state', () => {
+    const errs = [
+      new Error('Transaction preparation failed: host error trap'),
+      new Error('Simulation failed — see contract requirements'),
+      'simulation failure: wasm out of gas',
+    ];
+
+    for (const e of errs) {
+      const result = mapFrontendError(e);
+      expect(result.category).toBe('simulation_failure');
+      expect(result.title).toBe('Transaction Simulation Failed');
+      expect(result.message).toMatch(/pre-flight verification/i);
+      expect(result.nextSteps).toMatch(/verify subscription inputs|allowance/i);
+      expect(result.retryable).toBe(true);
+      expect(result.diagnosticContext.category).toBe('simulation_failure');
+      expect(result.diagnosticContext.recoveryPath).toMatch(/inputs|allowance/i);
+    }
+  });
+
+  it('maps contract and on-chain revert failures to stable ledger_execution_failure UI state', () => {
+    const errs = [
+      new Error('error(contract, #1) AmountMustBePositive'),
+      new Error('Transaction failed on-chain: meta XDR reverted'),
+      new Error('Transaction submission failed: tx bad seq'),
+      'ledger execution failure: host error #4',
+    ];
+
+    for (const e of errs) {
+      const result = mapFrontendError(e);
+      expect(result.category).toBe('ledger_execution_failure');
+      expect(result.title).toBe('Ledger Execution Failed');
+      expect(result.message).toMatch(/rejected by the smart contract|reached the ledger/i);
+      expect(result.nextSteps).toMatch(/inspect contract error|resubmit/i);
+      expect(result.retryable).toBe(false);
+      expect(result.diagnosticContext.category).toBe('ledger_execution_failure');
+      expect(result.diagnosticContext.recoveryPath).toMatch(/ledger meta|inputs/i);
+    }
+  });
+
+  it('maps unknown errors to stable fallback state without leaking sensitive internals', () => {
+    const result = mapFrontendError(new Error('completely unexpected internal failure #9999'));
+    expect(result.category).toBe('unknown');
+    expect(result.title).toBe('Transaction Encountered An Error');
+    expect(result.message).toBe('An unexpected error occurred while processing your transaction.');
+    expect(result.nextSteps).toMatch(/try again|contact support/i);
+    expect(result.retryable).toBe(true);
+    expect(result.diagnosticContext.category).toBe('unknown');
+    expect(result.diagnosticContext.recoveryPath).toBe('Safe fallback retry');
+  });
+});
+
+// ─── Sensitive payload and raw provider redaction (#1567) ────────────────────
+
+describe('sanitizeSensitiveDetails – Sensitive payloads and provider detail redaction (#1567)', () => {
+  it('redacts basic auth credentials in RPC URLs', () => {
+    const raw = 'Failed to connect to https://alice:secretPassword123@rpc-node.soroban.org/soroban/rpc';
+    const sanitized = sanitizeSensitiveDetails(raw);
+    expect(sanitized).toBe('Failed to connect to https://***:***@rpc-node.soroban.org/soroban/rpc');
+    expect(sanitized).not.toContain('secretPassword123');
+  });
+
+  it('redacts sensitive query params like api_key, token, and secret', () => {
+    const raw = 'Error from https://rpc.example.com/api?api_key=sk_live_9988776655&token=tok_abc123';
+    const sanitized = sanitizeSensitiveDetails(raw);
+    expect(sanitized).toContain('api_key=[REDACTED]');
+    expect(sanitized).toContain('token=[REDACTED]');
+    expect(sanitized).not.toContain('sk_live_9988776655');
+    expect(sanitized).not.toContain('tok_abc123');
+  });
+
+  it('redacts Bearer authorization tokens', () => {
+    const raw = 'Request header was Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.payload.sig';
+    const sanitized = sanitizeSensitiveDetails(raw);
+    expect(sanitized).toBe('Request header was Authorization: Bearer [REDACTED]');
+    expect(sanitized).not.toContain('eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9');
+  });
+
+  it('redacts 56-character Stellar secret seed keys (S...)', () => {
+    const secretKey = 'SAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
+    const raw = `Transaction failed for signer ${secretKey}`;
+    const sanitized = sanitizeSensitiveDetails(raw);
+    expect(sanitized).toBe('Transaction failed for signer [SECRET_KEY_REDACTED]');
+    expect(sanitized).not.toContain(secretKey);
+  });
+
+  it('sanitizes diagnostic detail inside mapFrontendError', () => {
+    const sensitiveErr = new Error('RPC at https://admin:p@ssword@rpc.private.net?token=supersecret failed');
+    const state = mapFrontendError(sensitiveErr);
+    expect(state.diagnosticContext.sanitizedDetail).not.toContain('p@ssword');
+    expect(state.diagnosticContext.sanitizedDetail).not.toContain('supersecret');
+    expect(state.diagnosticContext.sanitizedDetail).toContain('https://***:***@rpc.private.net?token=[REDACTED]');
   });
 });
