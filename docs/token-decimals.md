@@ -8,8 +8,23 @@ indivisible unit of the token, with no decimal interpretation applied on-chain.
 This matches the SEP-41 (Stellar Asset Contract) interface:
 `transfer(from, to, amount)` where `amount` is an `i128` in the token's base unit.
 
-The contract never reads, stores, or enforces a decimal configuration. All decimal
-handling is an **off-chain responsibility**.
+The contract never reads, stores, or enforces an arbitrary floating-point decimal configuration. All decimal
+handling is strictly governed across architectural boundaries.
+
+---
+
+## Architectural Layer Matrix
+
+Token amounts cross multiple operational layers. Each layer has an explicit unit requirement, representation format, and conversion responsibility:
+
+| System Layer | Unit Accepted / Handled | Representation Format | Decimal-Aware? | Primary Responsibility |
+|---|---|---|---|---|
+| **User & Wallet Interface** (UI, Freighter, Invoices) | **Display amounts** (e.g. `5.00 USDC`, `100.5 XLM`) | Formatted string / UI decimal input | Yes (token symbol & metadata) | Presents human-readable figures; validates format and prevents excess precision input. |
+| **Client SDK / Translation** (`frontend/src/lib/token_decimals.ts`) | **Bridges Display ↔ Base Units** | `string` input ↔ `bigint` output | Yes (queries on-chain `decimals()`) | Parses user input into base units using strict BigInt math; formats base units for UI display without floats. |
+| **Backend REST & GraphQL API** (`/api/*`) | **Base units** (e.g. `"50000000"`) | String-encoded integer (`string` / `BigInt`) | Optional (passes through base units; stores token address) | Rejects IEEE-754 JSON floating-point numbers to prevent 64-bit precision truncation; validates string integers. |
+| **Contract Invocations & Storage** (Soroban / SEP-41) | **Base units** only | `i128` integer | No (passes `amount` directly to `token.transfer`) | Enforces invariants (`amount > 0`, `amount <= MAX_AMOUNT`); executes atomic transfers without rounding. |
+| **Events & Webhooks** (`executed`, `webhookQueue`) | **Base units** | Numeric string / integer field | No | Publishes immutable on-chain base-unit quantities; guarantees zero rounding or conversion artifacts in raw payloads. |
+| **Indexers, Accounting & Reporting** | **Base units** (stored & aggregated), **Display units** (rendered) | SQL `NUMERIC` / `VARCHAR` for storage; formatted string for reports | Yes (resolves token contract decimals at presentation time) | Aggregates balances with exact integer arithmetic; converts to display units only when rendering invoices or financial statements. |
 
 ---
 
@@ -30,18 +45,19 @@ base units  = 5.00 × 10^7 = 50_000_000
 The contract always receives and emits **base units**. The frontend, backend, and CLI
 scripts are responsible for converting in both directions.
 
-### 1.2 Common token scales
+### 1.2 Multi-Precision Token Scales & Examples
 
-| Token | Decimals | 1 "whole" unit = | Example: 5.00 tokens |
-|-------|----------|------------------|----------------------|
-| USDC (Circle) | 7 | `10_000_000` base units | `50_000_000` |
-| Stellar native XLM (SAC) | 7 | `10_000_000` stroops | `50_000_000` |
-| Most SAC-wrapped assets | 7 | `10_000_000` base units | `50_000_000` |
-| Custom tokens | varies | depends on token contract | query `decimals()` |
+| Token Class | Typical Decimals | 1 Whole Unit in Base Units | Example Display Amount | Equivalent Base Units (`i128`) |
+|---|---|---|---|---|
+| **Zero-Decimal Tokens** (NFT shares, event passes, voting credits) | `0` | `1` | `"100"` | `100` |
+| **Cent-Based / Micro Currencies** (Fiat wraps, BRL/Centavos) | `2` | `100` | `"12.50"` | `1250` |
+| **Standard Stablecoins (EVM / Solana style)** (USDC / USDT) | `6` | `1_000_000` | `"5.50"` | `5_500_000` |
+| **Stellar Native & Circle SAC** (XLM, Stellar USDC, EURC) | `7` | `10_000_000` | `"5.00"` | `50_000_000` |
+| **EVM Wrapped / High-Precision Tokens** (wETH, wBTC, ERC-20 wraps) | `18` | `1_000_000_000_000_000_000` | `"1.50"` | `1_500_000_000_000_000_000` |
 
 **Always query the token contract's `decimals()` view function before constructing an
-`amount`.** Never assume 7. A custom token may use 0, 2, 6, 8, 18, or any other
-value.
+`amount`.** Never assume 7. A custom token may use 0, 2, 6, 7, 18, or any other
+supported value up to 18.
 
 ---
 
@@ -147,28 +163,32 @@ Math.round(0.3 * 10 ** 7)  // 2999999  (should be 3_000_000 — wrong by 1)
 toBaseUnits("0.3", 7)  // → 3_000_000n
 ```
 
-### 3.3 Display rounding: round to display precision
+### 3.4 Fee and Beneficiary Split Rounding
 
-When converting base units back to a user-facing string, choose a display precision
-appropriate for the token and context. Use standard half-up rounding for display only
-— never for the on-chain value.
+When calculating protocol fees or merchant beneficiary splits:
+- All percentage and basis point calculations (`amount * fee_bps / 10_000`) use **integer division with truncation (`div_floor`)**.
+- The floor division ensures that the total deduction never exceeds the authorized payment amount.
+- Any fractional remainder ("dust") remains with the subscriber or principal merchant balance, preserving the strict conservation-of-value invariant:
+  $$\sum \text{splits} + \text{protocol\_fee} \le \text{gross\_amount}$$
 
-```typescript
-function toHumanAmount(baseUnits: bigint, decimals: number, displayDecimals = 2): string {
-  const scale = BigInt(10 ** decimals);
-  const whole = baseUnits / scale;
-  const frac = baseUnits % scale;
-  // Format fractional part with leading zeros, then round to displayDecimals
-  const fracStr = frac.toString().padStart(decimals, "0");
-  const displayFrac = fracStr.slice(0, displayDecimals);
-  return `${whole}.${displayFrac}`;
-}
+---
 
-// Examples (USDC, 7 decimals, display 2 decimals)
-toHumanAmount(50_000_000n, 7, 2)  // "5.00"
-toHumanAmount(51_234_567n, 7, 2)  // "5.12"  (truncated for display)
-toHumanAmount(1n, 7, 2)           // "0.00"  (below display precision — warn user)
-```
+## 4. Bi-Directional Conversion Reference by Precision
+
+Below are exact bidirectional conversions showing human input, parsed base units, and rendered display strings across supported token precisions:
+
+| Token Precision | Input Display String | Base Units (`bigint`) | Formatted Display (`padZeros: true`) | Formatted Display (`trimTrailing: true`) |
+|---|---|---|---|---|
+| **0 Decimals** | `"100"` | `100n` | `"100"` | `"100"` |
+| **0 Decimals** | `"1"` | `1n` | `"1"` | `"1"` |
+| **2 Decimals** | `"12.50"` | `1250n` | `"12.50"` | `"12.5"` |
+| **2 Decimals** | `"0.05"` | `5n` | `"0.05"` | `"0.05"` |
+| **6 Decimals** | `"5.50"` | `5_500_000n` | `"5.500000"` | `"5.5"` |
+| **6 Decimals** | `"0.000001"` | `1n` | `"0.000001"` | `"0.000001"` |
+| **7 Decimals** | `"5.00"` | `50_000_000n` | `"5.0000000"` | `"5"` |
+| **7 Decimals** | `"5.1234567"` | `51_234_567n` | `"5.1234567"` | `"5.1234567"` |
+| **18 Decimals** | `"1.5"` | `1_500_000_000_000_000_000n` | `"1.500000000000000000"` | `"1.5"` |
+| **18 Decimals** | `"0.000000000000000001"` | `1n` | `"0.000000000000000001"` | `"0.000000000000000001"` |
 
 ---
 

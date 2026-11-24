@@ -168,9 +168,13 @@ const tokenContract = new Contract(USDC_TESTNET_ADDRESS);
 const decimalsResult = await server.simulateTransaction(/* decimals() call */);
 const decimals = 7; // USDC is always 7; or parse from simulateTransaction result
 
-// 2. Convert human amount → base units
-const humanAmount = 5.0;          // 5 USDC per month
-const baseUnits = BigInt(Math.round(humanAmount * 10 ** decimals));
+// 2. Convert human amount → base units without floating-point arithmetic (see docs/token-decimals.md)
+function toBaseUnits(humanAmount: string, decimals: number): bigint {
+  const [whole, frac = ""] = humanAmount.trim().split(".");
+  const fracPadded = frac.slice(0, decimals).padEnd(decimals, "0");
+  return BigInt(whole || "0") * (10n ** BigInt(decimals)) + BigInt(fracPadded || "0");
+}
+const baseUnits = toBaseUnits("5.00", decimals);
 // baseUnits = 50_000_000n
 
 // 3. Set monthly interval (30 days in seconds)
@@ -195,8 +199,17 @@ When reading a subscription amount back from the chain, always fetch `decimals()
 const data = await contract.call("get_subscription", subscriber, merchant);
 const decimals = await fetchDecimals(data.token); // call token.decimals()
 
-const humanAmount = Number(data.amount) / 10 ** decimals;
-console.log(`${humanAmount.toFixed(2)} per interval`);
+function toHumanAmount(baseUnits: bigint, decimals: number, displayDecimals = 2): string {
+  const scale = 10n ** BigInt(decimals);
+  const whole = baseUnits / scale;
+  const frac = baseUnits % scale;
+  const fracStr = frac.toString().padStart(decimals, "0");
+  const displayFrac = fracStr.slice(0, displayDecimals);
+  return `${whole}.${displayFrac}`;
+}
+
+const humanAmount = toHumanAmount(BigInt(data.amount), decimals, 2);
+console.log(`${humanAmount} per interval`);
 ```
 
 ---
