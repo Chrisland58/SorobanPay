@@ -2,6 +2,9 @@
 
 Complete reference for SorobanPay's build, test, and deployment workflows. Start here if you are setting up a local development environment or contributing code.
 
+> [!TIP]
+> For a focused, step-by-step testnet guide from clean checkout through browser transaction signing and state reset, see the dedicated [Local Testnet Workflow Guide](local-testnet-workflow.md).
+
 ---
 
 ## Table of Contents
