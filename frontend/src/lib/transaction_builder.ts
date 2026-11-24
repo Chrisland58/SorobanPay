@@ -288,7 +288,7 @@ export async function buildSignAndSubmitSubscribe(
   }
 
   // 4. Sign with Freighter (user action, no retry — if rejected, fail immediately)
-  const signedXdr = await signTx(preparedTx.toXDR(), networkPassphrase);
+  const signedXdr = await signTx(preparedTx.toXDR(), networkPassphrase, publicKey);
 
   const parsedTx = TransactionBuilder.fromXDR(signedXdr, networkPassphrase);
 
@@ -362,7 +362,7 @@ export async function buildAndSubmitSubscribe(
   );
 
   // Legacy in-process polling (fixed 1 s interval)
-  const confirmedHash = await pollForConfirmation(server, txHash);
+  const confirmedHash = await pollForConfirmation(server, txHash, publicKey);
   return { txHash: confirmedHash };
 }
 
@@ -469,7 +469,7 @@ export async function buildSignAndSubmitCancel(
   }
 
   // 5. Sign with Freighter
-  const signedXdr = await signTx(preparedTx.toXDR(), networkPassphrase);
+  const signedXdr = await signTx(preparedTx.toXDR(), networkPassphrase, publicKey);
 
   // 6. Submit
   const parsedTx = TransactionBuilder.fromXDR(signedXdr, networkPassphrase);
@@ -493,7 +493,7 @@ export async function buildSignAndSubmitCancel(
   }
 
   // 7. Poll for confirmation
-  const txHash = await pollForConfirmation(server, sendResult.hash);
+  const txHash = await pollForConfirmation(server, sendResult.hash, publicKey);
 
   return { txHash, allowanceCheck };
 }
@@ -611,7 +611,7 @@ export async function buildAndSubmitExecutePayment(
   }
 
   // Sign with Freighter (user action, no retry — if rejected, fail immediately)
-  const signedXdr = await signTx(preparedTx.toXDR(), networkPassphrase);
+  const signedXdr = await signTx(preparedTx.toXDR(), networkPassphrase, publicKey);
 
   const parsedTx = TransactionBuilder.fromXDR(signedXdr, networkPassphrase);
 
@@ -645,7 +645,7 @@ export async function buildAndSubmitExecutePayment(
     );
   }
 
-  const txHash = await pollForConfirmation(server, sendResult.hash);
+  const txHash = await pollForConfirmation(server, sendResult.hash, publicKey);
   return { txHash };
 }
 
@@ -886,7 +886,7 @@ async function submitAtomicBatchPayment(
       }));
     }
 
-    const signedXdr = await signTx(preparedTx.toXDR(), networkPassphrase);
+    const signedXdr = await signTx(preparedTx.toXDR(), networkPassphrase, publicKey);
     const parsedTx = TransactionBuilder.fromXDR(signedXdr, networkPassphrase);
 
     let sendResult: SorobanRpc.Api.SendTransactionResponse;
@@ -921,7 +921,7 @@ async function submitAtomicBatchPayment(
       return entries.map((e) => ({ subscriber: e.subscriber, merchant, error: msg }));
     }
 
-    const txHash = await pollForConfirmation(server, sendResult.hash);
+    const txHash = await pollForConfirmation(server, sendResult.hash, publicKey);
 
     // 3. Map the on-chain booleans onto the input entries (contract preserves
     //    input order, but we fall back to matching by address defensively).
@@ -1056,7 +1056,7 @@ export async function buildAndSubmitUpdateSubscription(
     throw new Error(`Transaction preparation failed: ${msg}`);
   }
 
-  const signedXdr = await signTx(preparedTx.toXDR(), networkPassphrase);
+  const signedXdr = await signTx(preparedTx.toXDR(), networkPassphrase, publicKey);
   const parsedTx = TransactionBuilder.fromXDR(signedXdr, networkPassphrase);
   const sendResult = await server.sendTransaction(parsedTx);
 
@@ -1066,7 +1066,7 @@ export async function buildAndSubmitUpdateSubscription(
     );
   }
 
-  const txHash = await pollForConfirmation(server, sendResult.hash);
+  const txHash = await pollForConfirmation(server, sendResult.hash, publicKey);
   return { txHash };
 }
 
@@ -1158,7 +1158,7 @@ export async function buildAndSubmitUpdateSubscription(
     throw new Error(`Transaction preparation failed: ${msg}`);
   }
 
-  const signedXdr = await signTx(preparedTx.toXDR(), networkPassphrase);
+  const signedXdr = await signTx(preparedTx.toXDR(), networkPassphrase, publicKey);
   const parsedTx = TransactionBuilder.fromXDR(signedXdr, networkPassphrase);
   const sendResult = await server.sendTransaction(parsedTx);
 
@@ -1168,7 +1168,7 @@ export async function buildAndSubmitUpdateSubscription(
     );
   }
 
-  const txHash = await pollForConfirmation(server, sendResult.hash);
+  const txHash = await pollForConfirmation(server, sendResult.hash, publicKey);
   return { txHash };
 }
 
@@ -1255,7 +1255,7 @@ export async function buildAndSubmitTransferSubscription(
     throw new Error(`Transaction preparation failed: ${msg}`);
   }
 
-  const signedXdr = await signTx(preparedTx.toXDR(), networkPassphrase);
+  const signedXdr = await signTx(preparedTx.toXDR(), networkPassphrase, publicKey);
   const parsedTx = TransactionBuilder.fromXDR(signedXdr, networkPassphrase);
   const sendResult = await server.sendTransaction(parsedTx);
 
@@ -1265,6 +1265,6 @@ export async function buildAndSubmitTransferSubscription(
     );
   }
 
-  const txHash = await pollForConfirmation(server, sendResult.hash);
+  const txHash = await pollForConfirmation(server, sendResult.hash, publicKey);
   return { txHash };
 }

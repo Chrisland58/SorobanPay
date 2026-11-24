@@ -87,21 +87,24 @@ export interface UseAddressBookReturn {
 
 export function useAddressBook(walletPublicKey: string | null): UseAddressBookReturn {
   const [entries, setEntries] = useState<AddressBookMap>({});
+  const [entriesPublicKey, setEntriesPublicKey] = useState<string | null>(null);
 
   // Load from localStorage whenever the connected wallet changes
   useEffect(() => {
     if (!walletPublicKey) {
       setEntries({});
+      setEntriesPublicKey(null);
       return;
     }
     setEntries(loadFromStorage(walletPublicKey));
+    setEntriesPublicKey(walletPublicKey);
   }, [walletPublicKey]);
 
   // Persist whenever entries change (and we have a wallet key)
   useEffect(() => {
-    if (!walletPublicKey) return;
+    if (!walletPublicKey || entriesPublicKey !== walletPublicKey) return;
     saveToStorage(walletPublicKey, entries);
-  }, [walletPublicKey, entries]);
+  }, [walletPublicKey, entries, entriesPublicKey]);
 
   const addEntry = useCallback((address: string, label: string) => {
     const trimmedAddress = address.trim();
@@ -146,11 +149,14 @@ export function useAddressBook(walletPublicKey: string | null): UseAddressBookRe
     });
   }, []);
 
+  const currentEntries: AddressBookMap =
+    entriesPublicKey === walletPublicKey ? entries : {};
+
   const getLabel = useCallback(
     (address: string): string | null => {
-      return entries[address]?.label ?? null;
+      return currentEntries[address]?.label ?? null;
     },
-    [entries],
+    [currentEntries],
   );
 
   const importBook = useCallback((book: AddressBookMap) => {
@@ -158,15 +164,15 @@ export function useAddressBook(walletPublicKey: string | null): UseAddressBookRe
   }, []);
 
   const exportBook = useCallback((): string => {
-    return JSON.stringify(entries, null, 2);
-  }, [entries]);
+    return JSON.stringify(currentEntries, null, 2);
+  }, [currentEntries]);
 
-  const entryList = Object.values(entries).sort((a, b) =>
+  const entryList = Object.values(currentEntries).sort((a, b) =>
     a.label.localeCompare(b.label),
   );
 
   return {
-    entries,
+    entries: currentEntries,
     entryList,
     addEntry,
     updateEntry,

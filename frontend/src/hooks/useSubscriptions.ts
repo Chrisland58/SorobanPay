@@ -83,6 +83,9 @@ export function useSubscriptions(publicKey: string | null): UseSubscriptionsRetu
   const [subscriptions, setSubscriptions] = useState<Subscription[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [subscriptionsPublicKey, setSubscriptionsPublicKey] = useState<string | null>(null);
+  const [errorPublicKey, setErrorPublicKey] = useState<string | null>(null);
+  const [loadingPublicKey, setLoadingPublicKey] = useState<string | null>(null);
 
   // Ref to allow external refetch trigger
   const fetchCounterRef = useRef(0);
@@ -94,7 +97,15 @@ export function useSubscriptions(publicKey: string | null): UseSubscriptionsRetu
   }, []);
 
   useEffect(() => {
-    if (!publicKey || !CONTRACT_ID) return;
+    if (!publicKey || !CONTRACT_ID) {
+      setSubscriptions([]);
+      setSubscriptionsPublicKey(null);
+      setError(null);
+      setErrorPublicKey(null);
+      setIsLoading(false);
+      setLoadingPublicKey(null);
+      return;
+    }
 
     let cancelled = false;
 
@@ -102,7 +113,9 @@ export function useSubscriptions(publicKey: string | null): UseSubscriptionsRetu
       if (!publicKey) return;
 
       setIsLoading(true);
+      setLoadingPublicKey(publicKey);
       setError(null);
+      setErrorPublicKey(null);
 
       try {
         const server = new SorobanRpc.Server(RPC_URL, { allowHttp: false });
@@ -266,15 +279,18 @@ export function useSubscriptions(publicKey: string | null): UseSubscriptionsRetu
 
         if (!cancelled) {
           setSubscriptions(results);
+          setSubscriptionsPublicKey(publicKey);
         }
       } catch (err: unknown) {
         if (!cancelled) {
           const msg = err instanceof Error ? err.message : String(err);
           setError(`Failed to load subscriptions: ${msg}`);
+          setErrorPublicKey(publicKey);
         }
       } finally {
         if (!cancelled) {
           setIsLoading(false);
+          setLoadingPublicKey(null);
         }
       }
     }
@@ -302,9 +318,10 @@ export function useSubscriptions(publicKey: string | null): UseSubscriptionsRetu
   // useSubscriptionsWithUpdater is the public API; this file just exports
   // the base hook.
   return {
-    subscriptions,
-    isLoading,
-    error,
+    subscriptions:
+      subscriptionsPublicKey === publicKey ? subscriptions : [],
+    isLoading: loadingPublicKey === publicKey && isLoading,
+    error: errorPublicKey === publicKey ? error : null,
     refetch,
     // Internal — cast to match public type; callers that need updateSubscription
     // should use the augmented return value.

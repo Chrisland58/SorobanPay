@@ -20,7 +20,7 @@
  *   - Shows the transaction hash with a Stellar Expert explorer link on success.
  */
 
-import { useState, type FormEvent } from 'react';
+import { useEffect, useState, type FormEvent } from 'react';
 import { useWallet } from '@/hooks/useWallet';
 import { buildExplorerUrl } from '@/hooks/useTransactionPoller';
 import { buildAndSubmitTransferSubscription } from '@/lib/transaction_builder';
@@ -137,7 +137,13 @@ function ConfirmModal({
 export default function TransferSubscriptionForm({
   initialValues,
 }: TransferSubscriptionFormProps = {}) {
-  const { publicKey, isCheckingFreighter, freighterInstalled, connect } = useWallet();
+  const {
+    publicKey,
+    isCheckingFreighter,
+    freighterInstalled,
+    accountChangeDetected,
+    connect,
+  } = useWallet();
 
   const [oldMerchant, setOldMerchant] = useState(initialValues?.oldMerchant ?? '');
   const [newMerchant, setNewMerchant] = useState(initialValues?.newMerchant ?? '');
@@ -147,6 +153,18 @@ export default function TransferSubscriptionForm({
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [txError, setTxError] = useState<string | null>(null);
   const [successTxHash, setSuccessTxHash] = useState<string | null>(null);
+  const [requiresRestart, setRequiresRestart] = useState(false);
+
+  useEffect(() => {
+    if (!accountChangeDetected) return;
+    setRequiresRestart(true);
+    setShowConfirm(false);
+    setSuccessTxHash(null);
+    setIsSubmitting(false);
+    setTxError(
+      'Your Freighter account changed. Reconnect your wallet and restart this operation.',
+    );
+  }, [accountChangeDetected]);
 
   // ── Validation (matches the contract error conditions) ─────────────────────
   function validate(): FieldErrors {
@@ -188,6 +206,7 @@ export default function TransferSubscriptionForm({
 
   function handleSubmit(e: FormEvent) {
     e.preventDefault();
+    if (requiresRestart) return;
     setTxError(null);
     setSuccessTxHash(null);
 
@@ -201,7 +220,7 @@ export default function TransferSubscriptionForm({
 
   async function confirmAndSubmit() {
     setShowConfirm(false);
-    if (!publicKey || !CONTRACT_ID) return;
+    if (!publicKey || !CONTRACT_ID || requiresRestart) return;
 
     setIsSubmitting(true);
     setTxError(null);
@@ -222,7 +241,14 @@ export default function TransferSubscriptionForm({
       setSuccessTxHash(result.txHash);
     } catch (err) {
       const mapped = mapError(err);
-      setTxError(mapped.message);
+      const rawMessage = err instanceof Error ? err.message : String(err);
+      setTxError(
+        /account changed|could not verify the freighter account|different account/i.test(
+          rawMessage,
+        )
+          ? rawMessage
+          : mapped.message,
+      );
     } finally {
       setIsSubmitting(false);
     }
@@ -230,6 +256,7 @@ export default function TransferSubscriptionForm({
 
   const canSubmit =
     !!publicKey &&
+    !requiresRestart &&
     !!oldMerchant.trim() &&
     !!newMerchant.trim() &&
     oldMerchant.trim() !== newMerchant.trim();
@@ -269,6 +296,31 @@ export default function TransferSubscriptionForm({
         interval, and billing cycle are preserved.
       </p>
 
+      {requiresRestart && (
+        <div
+          role="alert"
+          className="mb-4 rounded-lg border border-amber-700/50 bg-amber-900/20 px-4 py-3 text-sm text-amber-200"
+        >
+          <p>
+            Your wallet changed during this operation. Reconnect, check whether
+            the transaction completed, then explicitly restart before submitting again.
+          </p>
+          {publicKey && (
+            <button
+              type="button"
+              onClick={() => {
+                setRequiresRestart(false);
+                setTxError(null);
+                setSuccessTxHash(null);
+              }}
+              className="mt-2 underline font-semibold"
+            >
+              I checked the transaction — restart operation
+            </button>
+          )}
+        </div>
+      )}
+
       {publicKey && (
         <div className="mb-5 rounded-lg bg-gray-800/60 border border-gray-700/60 px-4 py-3 text-xs text-gray-300">
           Transferring the subscription of{' '}
@@ -297,7 +349,9 @@ export default function TransferSubscriptionForm({
             </>
           ) : (
             <>
-              Connect your Freighter wallet to transfer a subscription.
+              {accountChangeDetected
+                ? 'Your Freighter account changed during an operation. Reconnect and restart it.'
+                : 'Connect your Freighter wallet to transfer a subscription.'}
               {!isCheckingFreighter && (
                 <button
                   type="button"

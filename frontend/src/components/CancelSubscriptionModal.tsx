@@ -7,7 +7,7 @@
  * Provides clear warning about subscription removal and transaction confirmation.
  */
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { getRuntimeConfig } from "@/lib/runtime_config";
 import { buildSignAndSubmitCancel } from "@/lib/transaction_builder";
 import { useToast } from "@/components/Toast";
@@ -39,19 +39,30 @@ export function CancelSubscriptionModal({
   onSuccess,
   onError,
 }: CancelSubscriptionModalProps) {
-  const { publicKey } = useWallet();
+  const { publicKey, accountChangeDetected } = useWallet();
   const { showToast } = useToast();
   const config = getRuntimeConfig();
 
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [confirmed, setConfirmed] = useState(false);
+  const [requiresRestart, setRequiresRestart] = useState(false);
+
+  useEffect(() => {
+    if (!accountChangeDetected) return;
+    setRequiresRestart(true);
+    setConfirmed(false);
+    setError(
+      'Your Freighter account changed. Reconnect, check whether the transaction completed, then explicitly restart.',
+    );
+  }, [accountChangeDetected]);
 
   if (!isOpen) {
     return null;
   }
 
   const handleCancel = async () => {
+    if (requiresRestart) return;
     if (!publicKey) {
       setError("Wallet not connected");
       return;
@@ -141,11 +152,34 @@ export function CancelSubscriptionModal({
           <p className="text-sm text-gray-600 dark:text-gray-300 mb-3">
             Are you sure you want to cancel this recurring subscription?
           </p>
+          {requiresRestart && (
+            <p
+              role="status"
+              className="text-sm text-amber-800 dark:text-amber-200 mb-3"
+            >
+              Your Freighter account changed during an operation. Reconnect the
+              original account and check the transaction before restarting.
+            </p>
+          )}
           <div className="bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800 rounded-lg p-3 mb-4">
             <p className="text-sm text-yellow-800 dark:text-yellow-200">
               <span className="font-semibold">⚠️ Warning:</span> This action will permanently remove this subscription. Future payments will not be collected.
             </p>
           </div>
+
+          {requiresRestart && publicKey && (
+            <button
+              type="button"
+              onClick={() => {
+                setRequiresRestart(false);
+                setConfirmed(false);
+                setError(null);
+              }}
+              className="w-full mb-3 text-sm text-blue-600 dark:text-blue-400 underline"
+            >
+              I checked the transaction — restart cancellation
+            </button>
+          )}
 
           {/* Subscription Details */}
           <div className="bg-gray-50 dark:bg-gray-800/50 rounded-lg p-3 space-y-2 text-sm mb-4">
@@ -201,7 +235,7 @@ export function CancelSubscriptionModal({
           </button>
           <button
             onClick={handleCancel}
-            disabled={isSubmitting || !confirmed}
+            disabled={isSubmitting || !confirmed || !publicKey || requiresRestart}
             className="flex-1 px-4 py-2 rounded-lg bg-red-600 hover:bg-red-700 text-white disabled:opacity-50 disabled:cursor-not-allowed transition-colors font-medium flex items-center justify-center gap-2"
           >
             {isSubmitting ? (

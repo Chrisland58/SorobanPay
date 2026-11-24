@@ -111,7 +111,7 @@ After `requestAccess()` succeeds, `connectWallet()` calls `getAddress()`. If the
 
 **What happens in the code**
 
-`signTx()` in `wallet_manager.ts` calls `signTransaction(xdr, { networkPassphrase })`. Freighter should open a popup. If it doesn't, the call hangs until the user interaction timeout or the browser pop-up blocker silently swallows it.
+`signTx()` in `wallet_manager.ts` calls `signTransaction()` with the network passphrase and the account that prepared the transaction. Freighter should open a popup for that account. If it doesn't, the call hangs until the user interaction timeout or the browser pop-up blocker silently swallows it.
 
 **Fixes**
 
@@ -169,6 +169,22 @@ To approve silently without reviewing every time during development, you can ena
 **Fix**
 
 Reload the page and retry. If it recurs, check for a Freighter update — this has been a bug in older versions.
+
+---
+
+### 2.5 Freighter account changes during an operation
+
+SorobanPay watches the connected Freighter account and binds each signature and
+confirmation poll to the account that started it. If the selected account
+changes (or cannot be verified), the app disconnects the stale account, clears
+account-scoped results, and asks you to reconnect and restart the operation.
+The signing request also specifies the original account, and a signature from
+another account is rejected.
+
+If the change is detected while a transaction is already submitted, the
+transaction may still confirm on-chain even though the app stops polling it.
+Reconnect the original account and check the transaction hash in Stellar Expert
+before submitting again; do not assume the interrupted operation failed.
 
 ---
 

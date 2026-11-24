@@ -21,10 +21,11 @@
  *   - Shows the transaction hash with a Stellar Expert explorer link on success.
  */
 
-import { useState, useCallback, type FormEvent } from 'react';
+import { useState, useCallback, useEffect, useRef, type FormEvent } from 'react';
 import { useWallet } from '@/hooks/useWallet';
 import { buildExplorerUrl } from '@/hooks/useTransactionPoller';
 import { buildAndSubmitUpdateSubscription } from '@/lib/transaction_builder';
+import { assertWalletAccount } from '@/lib/wallet_manager';
 import { isValidGAddress, MIN_INTERVAL_SECONDS, MAX_INTERVAL_SECONDS } from '@/lib/validation';
 import { CONTRACT_ID, NETWORK_PASSPHRASE, NETWORK_NAME, RPC_URL } from '@/constants/network';
 import { mapError } from '@/lib/errors';
@@ -143,7 +144,15 @@ function ConfirmModal({
 export default function UpdateSubscriptionForm({
   initialValues,
 }: UpdateSubscriptionFormProps = {}) {
-  const { publicKey, isCheckingFreighter, freighterInstalled, connect } = useWallet();
+  const {
+    publicKey,
+    isCheckingFreighter,
+    freighterInstalled,
+    accountChangeDetected,
+    connect,
+  } = useWallet();
+  const accountRef = useRef(publicKey);
+  accountRef.current = publicKey;
 
   const [merchantAddress, setMerchantAddress] = useState(
     initialValues?.merchantAddress ?? '',
@@ -159,6 +168,18 @@ export default function UpdateSubscriptionForm({
   const [successTxHash, setSuccessTxHash] = useState<string | null>(null);
   const [isLoadingCurrent, setIsLoadingCurrent] = useState(false);
   const [loadCurrentError, setLoadCurrentError] = useState<string | null>(null);
+  const [requiresRestart, setRequiresRestart] = useState(false);
+
+  useEffect(() => {
+    if (!accountChangeDetected) return;
+    setRequiresRestart(true);
+    setShowConfirm(false);
+    setSuccessTxHash(null);
+    setIsSubmitting(false);
+    setTxError(
+      'Your Freighter account changed. Reconnect your wallet and restart this operation.',
+    );
+  }, [accountChangeDetected]);
 
   // ── Load current subscription values from the contract (Issue #794) ────────
   const loadCurrentValues = useCallback(async () => {
@@ -188,10 +209,12 @@ export default function UpdateSubscriptionForm({
       const sourceAccount = await server
         .getAccount(publicKey)
         .catch(() => null);
+      if (accountRef.current !== publicKey) return;
       if (!sourceAccount) {
         setLoadCurrentError('Could not read account state from the RPC.');
         return;
       }
+      await assertWalletAccount(publicKey);
 
       const tx = new TransactionBuilder(sourceAccount, {
         fee: BASE_FEE,
@@ -209,6 +232,8 @@ export default function UpdateSubscriptionForm({
         .build();
 
       const simResult = await server.simulateTransaction(tx);
+      if (accountRef.current !== publicKey) return;
+      await assertWalletAccount(publicKey);
       if (!SorobanRpc.Api.isSimulationSuccess(simResult)) {
         setLoadCurrentError(
           'No subscription found for this merchant (or the contract call failed).',
@@ -272,6 +297,7 @@ export default function UpdateSubscriptionForm({
 
   function handleSubmit(e: FormEvent) {
     e.preventDefault();
+    if (requiresRestart) return;
     setTxError(null);
     setSuccessTxHash(null);
 
@@ -285,7 +311,7 @@ export default function UpdateSubscriptionForm({
 
   async function confirmAndSubmit() {
     setShowConfirm(false);
-    if (!publicKey || !CONTRACT_ID) return;
+    if (!publicKey || !CONTRACT_ID || requiresRestart) return;
 
     setIsSubmitting(true);
     setTxError(null);
@@ -307,14 +333,25 @@ export default function UpdateSubscriptionForm({
       setSuccessTxHash(result.txHash);
     } catch (err) {
       const mapped = mapError(err);
-      setTxError(mapped.message);
+      const rawMessage = err instanceof Error ? err.message : String(err);
+      setTxError(
+        /account changed|could not verify the freighter account|different account/i.test(
+          rawMessage,
+        )
+          ? rawMessage
+          : mapped.message,
+      );
     } finally {
       setIsSubmitting(false);
     }
   }
 
   const canSubmit =
-    !!publicKey && !!merchantAddress.trim() && !!amount.trim() && !!interval.trim();
+    !!publicKey &&
+    !requiresRestart &&
+    !!merchantAddress.trim() &&
+    !!amount.trim() &&
+    !!interval.trim();
 
   const showLoadCurrent = !!publicKey && !!tokenAddress.trim();
 
@@ -354,6 +391,31 @@ export default function UpdateSubscriptionForm({
         without cancelling and re-subscribing.
       </p>
 
+      {requiresRestart && (
+        <div
+          role="alert"
+          className="mb-4 rounded-lg border border-amber-700/50 bg-amber-900/20 px-4 py-3 text-sm text-amber-200"
+        >
+          <p>
+            Your wallet changed during this operation. Reconnect, check whether
+            the transaction completed, then explicitly restart before submitting again.
+          </p>
+          {publicKey && (
+            <button
+              type="button"
+              onClick={() => {
+                setRequiresRestart(false);
+                setTxError(null);
+                setSuccessTxHash(null);
+              }}
+              className="mt-2 underline font-semibold"
+            >
+              I checked the transaction — restart operation
+            </button>
+          )}
+        </div>
+      )}
+
       {/* Wallet required notice */}
       {!publicKey && (
         <div
@@ -375,7 +437,9 @@ export default function UpdateSubscriptionForm({
             </>
           ) : (
             <>
-              Connect your Freighter wallet to update your subscription.
+              {accountChangeDetected
+                ? 'Your Freighter account changed during an operation. Reconnect and restart it.'
+                : 'Connect your Freighter wallet to update your subscription.'}
               {!isCheckingFreighter && (
                 <button
                   type="button"

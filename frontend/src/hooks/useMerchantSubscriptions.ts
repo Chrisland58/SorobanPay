@@ -224,6 +224,9 @@ export function useMerchantSubscriptions({
   const [subscriptions, setSubscriptions] = useState<MerchantSubscription[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [subscriptionsPublicKey, setSubscriptionsPublicKey] = useState<string | null>(null);
+  const [errorPublicKey, setErrorPublicKey] = useState<string | null>(null);
+  const [loadingPublicKey, setLoadingPublicKey] = useState<string | null>(null);
 
   // Track the current fetch so stale fetches can be cancelled
   const fetchIdRef = useRef(0);
@@ -235,12 +238,17 @@ export function useMerchantSubscriptions({
       if (!contractId) {
         setSubscriptions([]);
         setError('Contract ID is not configured.');
+        setErrorPublicKey(merchantKey);
+        setSubscriptionsPublicKey(merchantKey);
         setIsLoading(false);
+        setLoadingPublicKey(null);
         return;
       }
 
       setIsLoading(true);
+      setLoadingPublicKey(merchantKey);
       setError(null);
+      setErrorPublicKey(null);
 
       try {
         const { NETWORK_PASSPHRASE } = await import('@/constants/network');
@@ -355,15 +363,19 @@ export function useMerchantSubscriptions({
         });
 
         setSubscriptions(results);
+        setSubscriptionsPublicKey(merchantKey);
       } catch (err) {
         if (fetchIdRef.current !== fetchId) return; // aborted
         const msg =
           err instanceof Error ? err.message : 'Failed to load merchant subscriptions';
         setError(msg);
+        setErrorPublicKey(merchantKey);
         setSubscriptions([]);
+        setSubscriptionsPublicKey(merchantKey);
       } finally {
         if (fetchIdRef.current === fetchId) {
           setIsLoading(false);
+          setLoadingPublicKey(null);
         }
       }
     },
@@ -374,8 +386,11 @@ export function useMerchantSubscriptions({
   useEffect(() => {
     if (!publicKey) {
       setSubscriptions([]);
+      setSubscriptionsPublicKey(null);
       setError(null);
+      setErrorPublicKey(null);
       setIsLoading(false);
+      setLoadingPublicKey(null);
       fetchedForRef.current = null;
       fetchIdRef.current++;
       return;
@@ -394,5 +409,10 @@ export function useMerchantSubscriptions({
     void fetchAll(publicKey, id);
   }, [publicKey, fetchAll]);
 
-  return { subscriptions, isLoading, error, refresh };
+  return {
+    subscriptions: subscriptionsPublicKey === publicKey ? subscriptions : [],
+    isLoading: loadingPublicKey === publicKey && isLoading,
+    error: errorPublicKey === publicKey ? error : null,
+    refresh,
+  };
 }

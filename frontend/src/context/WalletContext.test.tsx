@@ -14,9 +14,15 @@ import { useWallet } from '@/hooks/useWallet';
 
 // ── Mocks ────────────────────────────────────────────────────────────────────
 
+const mockWatcher = {
+  watch: jest.fn(),
+  stop: jest.fn(),
+};
+
 jest.mock('@/lib/wallet_manager', () => ({
   detectFreighter: jest.fn(),
   connectWallet:   jest.fn(),
+  WatchWalletChanges: jest.fn(() => mockWatcher),
 }));
 
 import * as walletManager from '@/lib/wallet_manager';
@@ -27,12 +33,21 @@ const mockConnect = walletManager.connectWallet   as jest.Mock;
 // ── Test component ────────────────────────────────────────────────────────────
 
 function WalletConsumer() {
-  const { publicKey, isConnecting, connectError, freighterInstalled, connect, disconnect } = useWallet();
+  const {
+    publicKey,
+    isConnecting,
+    connectError,
+    accountChangeDetected,
+    freighterInstalled,
+    connect,
+    disconnect,
+  } = useWallet();
   return (
     <div>
       <span data-testid="pk">{publicKey ?? 'null'}</span>
       <span data-testid="connecting">{String(isConnecting)}</span>
       <span data-testid="error">{connectError ?? 'null'}</span>
+      <span data-testid="account-changed">{String(accountChangeDetected)}</span>
       <span data-testid="installed">{String(freighterInstalled)}</span>
       <button onClick={connect}    data-testid="connect-btn">connect</button>
       <button onClick={disconnect} data-testid="disconnect-btn">disconnect</button>
@@ -52,6 +67,8 @@ function renderWithProvider() {
 
 describe('WalletContext – disconnect flow', () => {
   beforeEach(() => {
+    mockWatcher.watch.mockReset().mockReturnValue({});
+    mockWatcher.stop.mockReset();
     mockDetect.mockResolvedValue(true);
     mockConnect.mockResolvedValue('GPUBLICKEY123');
   });
@@ -78,6 +95,28 @@ describe('WalletContext – disconnect flow', () => {
     expect(screen.getByTestId('pk').textContent).toBe('null');
   });
 
+  it('invalidates the connected account when Freighter switches accounts', async () => {
+    let onWalletChange: ((change: { address: string; error?: string }) => void) | undefined;
+    mockWatcher.watch.mockImplementation((callback) => {
+      onWalletChange = callback;
+      return {};
+    });
+
+    renderWithProvider();
+    await act(async () => {
+      screen.getByTestId('connect-btn').click();
+    });
+    expect(screen.getByTestId('pk').textContent).toBe('GPUBLICKEY123');
+
+    act(() => {
+      onWalletChange?.({ address: 'GOTHERACCOUNT' });
+    });
+
+    expect(screen.getByTestId('pk').textContent).toBe('null');
+    expect(screen.getByTestId('account-changed').textContent).toBe('true');
+    expect(screen.getByTestId('error').textContent).toMatch(/reconnect.*restart/i);
+  });
+
   it('clears connectError on disconnect', async () => {
     mockConnect.mockRejectedValueOnce(new Error('user rejected'));
     renderWithProvider();
@@ -92,6 +131,8 @@ describe('WalletContext – disconnect flow', () => {
 
 describe('WalletContext – reconnect flow', () => {
   beforeEach(() => {
+    mockWatcher.watch.mockReset().mockReturnValue({});
+    mockWatcher.stop.mockReset();
     mockDetect.mockResolvedValue(true);
   });
 
@@ -113,6 +154,8 @@ describe('WalletContext – reconnect flow', () => {
     // reconnect with different key
     await act(async () => { screen.getByTestId('connect-btn').click(); });
     expect(screen.getByTestId('pk').textContent).toBe('GSECOND');
+    expect(screen.getByTestId('account-changed').textContent).toBe('true');
+    expect(screen.getByTestId('error').textContent).toMatch(/account changed/i);
   });
 
   it('shows reconnect prompt (connectError) when Freighter not installed', async () => {

@@ -340,6 +340,34 @@ describe('usePaymentHistory', () => {
     expect(result.current.hasMore).toBe(false);
   });
 
+  it('does not expose a late response from the previous wallet account', async () => {
+    let resolveOldRequest!: (response: { events: object[]; cursor: null }) => void;
+    const oldRequest = new Promise<{ events: object[]; cursor: null }>((resolve) => {
+      resolveOldRequest = resolve;
+    });
+    const oldGetEvents = jest.fn().mockReturnValue(oldRequest);
+    const newGetEvents = jest.fn().mockResolvedValue({ events: [], cursor: null });
+    SorobanRpc.Server
+      .mockReturnValueOnce({ getEvents: oldGetEvents })
+      .mockReturnValueOnce({ getEvents: newGetEvents });
+
+    const { result, rerender } = renderHook(
+      ({ pk }) => usePaymentHistory({ publicKey: pk, rpcUrl: 'https://mock-rpc', contractId: 'CCONTRACT' }),
+      { initialProps: { pk: publicKey as string | null } },
+    );
+
+    await waitFor(() => expect(oldGetEvents).toHaveBeenCalled());
+    rerender({ pk: 'GNEWACCOUNT000000000000000000000000000000000000000000000000' });
+    await waitFor(() => expect(newGetEvents).toHaveBeenCalled());
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+
+    await act(async () => {
+      resolveOldRequest({ events: [makeRawEvent('previous-account-event')], cursor: null });
+    });
+
+    expect(result.current.events).toEqual([]);
+  });
+
   it('does not fetch when contractId is empty', () => {
     const mockGetEvents = jest.fn();
     SorobanRpc.Server.mockReturnValue({ getEvents: mockGetEvents });

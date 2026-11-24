@@ -15,6 +15,7 @@ import {
   requestAccess,
   getAddress,
   signTransaction,
+  WatchWalletChanges,
 } from '@stellar/freighter-api';
 
 // ─── Freighter detection ──────────────────────────────────────────────────────
@@ -107,6 +108,38 @@ export async function connectWallet(): Promise<string> {
   return keyResult.address;
 }
 
+/**
+ * Read the currently selected Freighter account.
+ *
+ * @throws If Freighter cannot verify an active account.
+ */
+export async function getWalletAddress(): Promise<string> {
+  const result = await getAddress();
+  if (result.error) {
+    throw new Error(
+      'Could not verify the Freighter account. Reconnect your wallet and restart the operation.',
+    );
+  }
+  if (!result.address) {
+    throw new Error(
+      'No Freighter account is selected. Reconnect your wallet and restart the operation.',
+    );
+  }
+  return result.address;
+}
+
+/**
+ * Verify that Freighter still has the account that started an operation selected.
+ */
+export async function assertWalletAccount(expectedAddress: string): Promise<void> {
+  const currentAddress = await getWalletAddress();
+  if (currentAddress !== expectedAddress) {
+    throw new Error(
+      'Your Freighter account changed during this operation. Reconnect the original account and restart the operation.',
+    );
+  }
+}
+
 // ─── Transaction signing ──────────────────────────────────────────────────────
 
 /**
@@ -114,23 +147,37 @@ export async function connectWallet(): Promise<string> {
  *
  * @param xdr              Base-64 encoded unsigned transaction XDR.
  * @param networkPassphrase Stellar network passphrase (testnet or mainnet).
+ * @param expectedAddress  Account that authorized the operation.
  * @returns Signed transaction XDR as a base-64 string.
- * @throws  If Freighter returns an error or the user rejects the request.
+ * @throws  If the selected or signing account differs from expectedAddress.
  */
 export async function signTx(
   xdr: string,
   networkPassphrase: string,
+  expectedAddress: string,
 ): Promise<string> {
-  const result = await signTransaction(xdr, { networkPassphrase });
+  await assertWalletAccount(expectedAddress);
+  const result = await signTransaction(xdr, {
+    networkPassphrase,
+    address: expectedAddress,
+  });
 
   if ('error' in result && result.error) {
     throw new Error(`Transaction signing failed: ${result.error}`);
   }
 
-  const signed = (result as { signedTxXdr: string }).signedTxXdr;
+  if (result.signerAddress !== expectedAddress) {
+    throw new Error(
+      'Freighter signed with a different account. Reconnect the original account and restart the operation.',
+    );
+  }
+
+  const signed = result.signedTxXdr;
   if (!signed) {
     throw new Error('Freighter returned an empty signed transaction XDR.');
   }
 
   return signed;
 }
+
+export { WatchWalletChanges };

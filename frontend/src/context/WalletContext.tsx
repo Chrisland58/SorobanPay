@@ -18,9 +18,14 @@ import React, {
   useCallback,
   useState,
   useEffect,
+  useRef,
   type ReactNode,
 } from "react";
-import { connectWallet, detectFreighter } from "@/lib/wallet_manager";
+import {
+  connectWallet,
+  detectFreighter,
+  WatchWalletChanges,
+} from "@/lib/wallet_manager";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -31,6 +36,8 @@ export interface WalletContextValue {
   isConnecting: boolean;
   /** Error message from the last failed connect attempt. */
   connectError: string | null;
+  /** True when the account changed or became unverifiable during an operation. */
+  accountChangeDetected: boolean;
   /** True when Freighter extension is detected in the browser. */
   freighterInstalled: boolean;
   /** True while checking Freighter availability on initial load. */
@@ -58,6 +65,8 @@ export function WalletProvider({ children }: { children: ReactNode }) {
   const [publicKey, setPublicKey] = useState<string | null>(null);
   const [isConnecting, setIsConnecting] = useState(false);
   const [connectError, setConnectError] = useState<string | null>(null);
+  const [accountChangeDetected, setAccountChangeDetected] = useState(false);
+  const lastConnectedAddressRef = useRef<string | null>(null);
   const [freighterInstalled, setFreighterInstalled] = useState(false);
   const [isCheckingFreighter, setIsCheckingFreighter] = useState(true);
   // FE-47: mounted flag — false during SSR, true after client hydration.
@@ -94,6 +103,35 @@ export function WalletProvider({ children }: { children: ReactNode }) {
     };
   }, []);
 
+  // Freighter may change the selected account without a page reload. Invalidate
+  // the app's account state so account-scoped data and pending UI cannot follow
+  // the newly selected wallet.
+  useEffect(() => {
+    if (!publicKey) return;
+
+    const watcher = new WatchWalletChanges(1000);
+    let invalidated = false;
+    const invalidateAccount = (changedAddress?: string) => {
+      if (invalidated) return;
+      invalidated = true;
+      if (changedAddress) lastConnectedAddressRef.current = changedAddress;
+      setPublicKey(null);
+      setAccountChangeDetected(true);
+      setConnectError(
+        "Your Freighter account changed or could not be verified. Reconnect your wallet and restart the operation.",
+      );
+    };
+
+    const watchResult = watcher.watch(({ address, error }) => {
+      if (error || !address || address !== publicKey) {
+        invalidateAccount(error ? undefined : address);
+      }
+    });
+
+    if (watchResult.error) invalidateAccount();
+    return () => watcher.stop();
+  }, [publicKey]);
+
   const connect = useCallback(async () => {
     setIsConnecting(true);
     setConnectError(null);
@@ -112,7 +150,17 @@ export function WalletProvider({ children }: { children: ReactNode }) {
 
       // Request explicit access — stores ONLY the key from this session (Req 9.3)
       const key = await connectWallet();
+      const changedAccount =
+        lastConnectedAddressRef.current !== null &&
+        lastConnectedAddressRef.current !== key;
+      lastConnectedAddressRef.current = key;
       setPublicKey(key);
+      setAccountChangeDetected(changedAccount);
+      if (changedAccount) {
+        setConnectError(
+          'Your Freighter account changed. Check any in-progress transaction before restarting.',
+        );
+      }
     } catch (err) {
       // User denied access or another Freighter error (Req 9.4)
       const msg =
@@ -127,6 +175,7 @@ export function WalletProvider({ children }: { children: ReactNode }) {
   const disconnect = useCallback(() => {
     setPublicKey(null); // Clears stored key (Req 9.6)
     setConnectError(null);
+    setAccountChangeDetected(false);
   }, []);
 
   return (
@@ -135,6 +184,7 @@ export function WalletProvider({ children }: { children: ReactNode }) {
         publicKey,
         isConnecting,
         connectError,
+        accountChangeDetected,
         freighterInstalled,
         isCheckingFreighter,
         mounted,

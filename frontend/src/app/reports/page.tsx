@@ -17,7 +17,7 @@
  * convention as /merchant and /dashboard.
  */
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import { useWallet } from '@/hooks/useWallet';
 import { NETWORK_NAME } from '@/constants/network';
@@ -99,16 +99,25 @@ export default function ReportsPage() {
   const [status, setStatus] = useState<StatusFilter>('all');
 
   const [rows, setRows] = useState<PaymentRow[]>([]);
+  const [rowsPublicKey, setRowsPublicKey] = useState<string | null>(null);
   const [offset, setOffset] = useState(0);
   const [hasMore, setHasMore] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
+  const [loadingPublicKey, setLoadingPublicKey] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [errorPublicKey, setErrorPublicKey] = useState<string | null>(null);
+  const requestIdRef = useRef(0);
+  const publicKeyRef = useRef(publicKey);
+  publicKeyRef.current = publicKey;
 
   const fetchPage = useCallback(
     async (nextOffset: number, replace: boolean) => {
       if (!publicKey) return;
+      const requestId = ++requestIdRef.current;
       setIsLoading(true);
+      setLoadingPublicKey(publicKey);
       setError(null);
+      setErrorPublicKey(null);
       try {
         const url = buildReportUrl({
           merchant: publicKey,
@@ -122,13 +131,29 @@ export default function ReportsPage() {
         const res = await fetch(url);
         if (!res.ok) throw new Error(`Report fetch failed: ${res.statusText}`);
         const page = (await res.json()) as PaymentRow[];
+        if (
+          requestIdRef.current !== requestId ||
+          publicKeyRef.current !== publicKey
+        ) {
+          return;
+        }
         setRows((prev) => (replace ? page : [...prev, ...page]));
+        setRowsPublicKey(publicKey);
         setOffset(nextOffset + page.length);
         setHasMore(page.length === PAGE_SIZE);
       } catch (err) {
-        setError(err instanceof Error ? err.message : String(err));
+        if (
+          requestIdRef.current === requestId &&
+          publicKeyRef.current === publicKey
+        ) {
+          setError(err instanceof Error ? err.message : String(err));
+          setErrorPublicKey(publicKey);
+        }
       } finally {
-        setIsLoading(false);
+        if (requestIdRef.current === requestId) {
+          setIsLoading(false);
+          setLoadingPublicKey(null);
+        }
       }
     },
     [publicKey, from, to, status],
@@ -136,12 +161,23 @@ export default function ReportsPage() {
 
   // Reload from the top whenever the wallet or filters change.
   useEffect(() => {
+    requestIdRef.current += 1;
     setRows([]);
+    setRowsPublicKey(null);
     setOffset(0);
     setHasMore(false);
+    setError(null);
+    setErrorPublicKey(null);
+    setIsLoading(false);
+    setLoadingPublicKey(null);
     if (publicKey) fetchPage(0, true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [publicKey, from, to, status]);
+
+  const visibleRows = publicKey && rowsPublicKey === publicKey ? rows : [];
+  const visibleHasMore = !!publicKey && rowsPublicKey === publicKey && hasMore;
+  const visibleIsLoading = !!publicKey && loadingPublicKey === publicKey && isLoading;
+  const visibleError = publicKey && errorPublicKey === publicKey ? error : null;
 
   const csvHref = publicKey
     ? buildReportUrl({ merchant: publicKey, from, to, status, format: 'csv', limit: 100_000, offset: 0 })
@@ -209,7 +245,7 @@ export default function ReportsPage() {
       )}
 
       {/* ── Error banner ────────────────────────────────────────────────── */}
-      {error && (
+      {visibleError && (
         <div className="w-full max-w-5xl mb-6">
           <div
             role="alert"
@@ -218,7 +254,7 @@ export default function ReportsPage() {
             <span className="flex-shrink-0 text-lg" aria-hidden="true">⚠</span>
             <div>
               <p className="font-semibold mb-1">Error</p>
-              <p>{error}</p>
+              <p>{visibleError}</p>
             </div>
           </div>
         </div>
@@ -287,11 +323,11 @@ export default function ReportsPage() {
 
       {/* ── Table ───────────────────────────────────────────────────────── */}
       <section className="w-full max-w-5xl" aria-label="Payment report table" aria-live="polite">
-        {isLoading && rows.length === 0 ? (
+        {visibleIsLoading && visibleRows.length === 0 ? (
           <div className="flex items-center gap-3 text-gray-400 text-sm p-6">
             <Spinner /> Loading report…
           </div>
-        ) : rows.length > 0 ? (
+        ) : visibleRows.length > 0 ? (
           <>
             <div className="overflow-x-auto rounded-xl border border-gray-700">
               <table className="w-full text-sm" aria-label="Payments">
@@ -306,7 +342,7 @@ export default function ReportsPage() {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-800">
-                  {rows.map((row, i) => (
+                  {visibleRows.map((row, i) => (
                     <tr key={`${row.txHash}-${i}`} className="hover:bg-gray-800/40 transition-colors">
                       <td className="px-4 py-3 text-gray-300 whitespace-nowrap">
                         {new Date(row.date).toLocaleString()}
@@ -340,15 +376,15 @@ export default function ReportsPage() {
               </table>
             </div>
 
-            {hasMore && (
+            {visibleHasMore && (
               <div className="flex justify-center mt-4">
                 <button
                   onClick={() => fetchPage(offset, false)}
-                  disabled={isLoading}
+                  disabled={visibleIsLoading}
                   className="text-sm text-blue-400 hover:text-blue-300 disabled:opacity-50 transition-colors
                              focus:outline-none focus:ring-1 focus:ring-blue-400 rounded px-3 py-1.5"
                 >
-                  {isLoading ? <span className="flex items-center gap-2"><Spinner /> Loading…</span> : 'Load more'}
+                  {visibleIsLoading ? <span className="flex items-center gap-2"><Spinner /> Loading…</span> : 'Load more'}
                 </button>
               </div>
             )}

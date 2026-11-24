@@ -39,6 +39,7 @@ const mockWallet = {
   publicKey: null as string | null,
   isConnecting: false,
   connectError: null as string | null,
+  accountChangeDetected: false,
   freighterInstalled: true,
   isCheckingFreighter: false,
   connect: jest.fn(),
