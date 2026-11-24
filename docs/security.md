@@ -778,19 +778,22 @@ updates:
 
 ---
 
-## 10. Security Disclosure Policy
+## 10. Security Disclosure Policy & Vulnerability Response
 
 SorobanPay uses **coordinated responsible disclosure**. If you discover a security vulnerability:
 
-1. **Do not open a public GitHub issue.**
-2. Report via **GitHub Security Advisories**:
-   - Repository → Security → Advisories → New Draft Advisory.
+1. **Do not open a public GitHub issue or discuss vulnerabilities publicly.**
+2. Report via **GitHub Security Advisories** (Preferred):
+   - [Repository → Security → Advisories → New Draft Advisory](https://github.com/Chrisland58/SorobanPay/security/advisories/new)
    - Include: affected component, description, reproduction steps, potential impact, and suggested mitigations.
-3. You will receive acknowledgment within **72 hours**.
-4. We will work with you to validate the issue and coordinate a disclosure timeline of **90 days** from initial report (shorter for Critical severity).
-5. Once a fix is released, you will be credited (with your consent) in the release notes and the advisory.
+   - Initial acknowledgment target: **≤ 24 hours**.
+3. Or email **`security@sorobanpay.org`** (PGP fingerprint: `0x4A6B8F9C2D1E5A7B`):
+   - Initial acknowledgment target: **≤ 48 hours**.
+4. Maintainers triage and assess severity within 24–72 hours following CVSS v3.1 scoring.
+5. We will work with you to validate the issue and coordinate a disclosure timeline of **90 days** from initial report (shorter for Critical severity upon verified deployment).
+6. Once a fix is released, a sanitized public advisory (GHSA) will be published without exposing sensitive customer, network, or credential details, and you will be credited (with your consent).
 
-For questions about this policy, reach out via GitHub Discussions.
+For complete operational guidance, maintainer triage workflows, and boundary criteria distinguishing security reports from public bugs and support requests, see [docs/security-reporting-and-vulnerability-response-policy.md](./security-reporting-and-vulnerability-response-policy.md) and [SECURITY.md](../SECURITY.md).
 
 ---
 

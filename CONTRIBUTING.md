@@ -390,17 +390,21 @@ add stuff to the frontend    (not imperative, no type)
 
 ## 7. Security Vulnerability Reporting
 
-**Do not open a public GitHub issue for security vulnerabilities.**
+**Do not open a public GitHub issue or pull request for security vulnerabilities.**
 
-Use **GitHub Security Advisories**:
+Public bug reports (e.g. UI defects, harmless error responses) belong in [GitHub Issues](https://github.com/Chrisland58/SorobanPay/issues), and user support requests belong in [GitHub Discussions](https://github.com/Chrisland58/SorobanPay/discussions).
 
-1. Repository → **Security** → **Advisories** → **New draft security advisory**.
-2. Include: affected component, description, reproduction steps, impact, and suggested mitigations.
-3. Submit — it is private and visible only to you and the maintainers.
+For security vulnerabilities (authorization bypasses, reentrancy, secret leakage, or fund risks), report privately via:
 
-You will receive acknowledgement within **72 hours**. We coordinate disclosure within **90 days** of the initial report (shorter for critical issues). Responsible disclosers are credited in release notes.
+1. **GitHub Security Advisories (Preferred)**: Repository → **Security** → **Advisories** → **New draft security advisory** (Acknowledgment ≤ 24h).
+2. **Encrypted Email**: `security@sorobanpay.org` (PGP: `0x4A6B8F9C2D1E5A7B`) (Acknowledgment ≤ 48h).
 
-Full policy: [docs/security.md](docs/security.md#8-security-disclosure-policy).
+We coordinate disclosure within **90 days** (faster for Critical severity). Responsible researchers are credited in release notes and public security advisories (GHSA).
+
+See our authoritative policies:
+- [SECURITY.md](SECURITY.md)
+- [docs/security-reporting-and-vulnerability-response-policy.md](docs/security-reporting-and-vulnerability-response-policy.md)
+- [docs/security.md](docs/security.md)
 
 ---
 
