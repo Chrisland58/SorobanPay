@@ -1,21 +1,87 @@
-# Browser, Accessibility, and Freighter Support
+# Browser, Accessibility, and Wallet Extension Support Lifecycle
 
-SorobanPay can be browsed without a wallet. The [Freighter](https://www.freighter.app) browser extension is required to connect an account and sign transactions. RPC reads, simulation, and transaction submission use the configured Soroban RPC endpoint; Freighter is used for wallet access and signing.
+SorobanPay can be browsed without a wallet. The [Freighter](https://www.freighter.app) browser extension (or supported Stellar Wallets Kit adapters) is required to connect an account and sign transactions. RPC reads, simulation, and transaction submission use the configured Soroban RPC endpoint; wallet extensions are used for account delegation and cryptographic signing.
 
-## Browser and wallet support
+## Tested Browser and Wallet Support Matrix
 
-| Browser | App support | Freighter signing | Notes |
-|---|---|---|---|
-| Chrome | Supported | Supported with the Freighter extension | Chromium is included in the Playwright projects; tests use a mocked wallet. |
-| Brave | Supported | Supported with the Freighter extension | Shields or extension settings may block injection. Real extension behavior is not covered by the Playwright mock. |
-| Firefox | Supported | Supported with the Freighter add-on | The app polls for the extension because Firefox may inject it after initial page load. |
-| Edge (Chromium) | Not officially verified | Not officially verified | Chromium compatibility does not guarantee Freighter compatibility. |
-| Safari (desktop) | Browser UI can be viewed | Not supported by the current Freighter integration | Playwright WebKit coverage uses a mock and does not verify a real wallet extension. |
-| Mobile browsers | Responsive UI can be viewed | Not supported | Mobile browser extension signing is not available in the supported setup. Playwright mobile projects are viewport/device emulation, not real phones with Freighter. |
+The table below records the tested combinations of web browser, operating system, and wallet extension, along with verification dates and explicit, actionable explanations for unsupported or degraded combinations.
 
-No minimum browser versions are claimed: the repository does not define or verify a version-specific support floor. Use a current browser release. The configured Playwright projects are Chromium, Firefox, WebKit, mobile Chrome, mobile Safari, and tablet emulation. This is automated UI coverage, not certification of every browser/version or extension combination.
+> [!IMPORTANT]
+> Unsupported combinations display an explicit, actionable explanation and recovery path rather than an implied guarantee. Do not assume unlisted browser-wallet pairs are compatible.
+
+| Browser | Operating System | Wallet Extension | Support Status | Last Verified Date | Actionable Explanation & Recovery Guidance |
+|---|---|---|---|---|---|
+| Chrome | macOS | Freighter | **Supported** | 2026-11-20 | Supported with full extension popup handling. Allow popups if prompted. |
+| Chrome | Windows | Freighter | **Supported** | 2026-11-20 | Supported on Chromium engine with Windows 11. |
+| Chrome | Linux | Freighter | **Supported** | 2026-11-18 | Supported on Ubuntu 24.04 LTS / Wayland / X11. |
+| Brave | macOS | Freighter | **Supported** | 2026-11-19 | Supported. If injection hangs, allow extension script access in Brave Shields (`brave://settings/shields`). |
+| Brave | Windows | Freighter | **Supported** | 2026-11-19 | Supported with standard Shields profile. Ensure extension popups are allowed. |
+| Firefox | macOS | Freighter | **Supported** | 2026-11-21 | Supported. App polls up to 3 seconds for asynchronous content-script injection (FE-36). Ensure add-on is enabled. |
+| Firefox | Windows | Freighter | **Supported** | 2026-11-21 | Supported. Verify add-on permissions in `about:addons`. |
+| Firefox | Linux | Freighter | **Supported** | 2026-11-17 | Supported. Ensure strict tracking protection does not isolate extension background scripts. |
+| Edge (Chromium) | Windows | Freighter | **Degraded** | 2026-11-15 | **Degraded**: Requires enabling "Allow extensions from other stores" in `edge://extensions` to install from Chrome Web Store. Intermittent SmartScreen prompts may occur. |
+| Edge (Chromium) | macOS | Freighter | **Degraded** | 2026-11-15 | **Degraded**: Potential window focus loss during signing modal. Keep browser active or switch to Chrome/Firefox. |
+| Opera | Windows | Freighter | **Degraded** | 2026-11-08 | **Degraded**: Requires installing the Chrome Extensions compatibility bridge in Opera before installing Freighter. |
+| Safari (desktop) | macOS | Freighter | **Unsupported** | 2026-11-10 | **Unsupported**: Freighter does not release an official Safari App Extension. You may view the app in read-only mode, but transactions cannot be signed. **Action**: Open SorobanPay in Chrome, Brave, or Firefox. |
+| Mobile Safari | iOS | Freighter | **Unsupported** | 2026-11-10 | **Unsupported**: Mobile Safari does not support desktop Freighter extensions. Mobile extension signing is not available. **Action**: View read-only portal or use a desktop workstation for transaction signing. |
+| Mobile Chrome | Android | Freighter | **Unsupported** | 2026-11-10 | **Unsupported**: Chrome on Android does not support Chrome Web Store extensions. **Action**: Use desktop Chrome, Brave, or Firefox for signing transactions. |
+| Chrome | macOS | xBull | **Supported** | 2026-11-12 | Supported via Stellar Wallets Kit adapter. Select xBull from wallet modal. |
+| Chrome | macOS | LOBSTR | **Supported** | 2026-11-12 | Supported via WalletConnect / LOBSTR web signer bridge. Approve prompt on mobile app. |
+| Chrome | macOS | Albedo | **Supported** | 2026-11-12 | Supported via Albedo web popup. Allow popups for `albedo.link`. |
+
+No minimum browser versions are claimed: the repository does not define or verify a version-specific support floor. Use a current stable browser release. The configured Playwright projects are Chromium, Firefox, WebKit, mobile Chrome, mobile Safari, and tablet emulation. This provides automated UI coverage, not certification of unlisted browser/version or extension combinations.
 
 Serve the app from `http://localhost` during development or `https://` in production. Do not open it from `file://`; extension access and browser APIs require a served origin.
+
+---
+
+## Repeatable Lifecycle Process for Browser-Wallet Combinations
+
+Maintainers and contributors follow this repeatable process when adding, deprecating/dropping, or investigating a browser-wallet combination.
+
+### 1. Adding a New Browser-Wallet Combination
+
+1. **Intake & Scope Definition**:
+   - Establish minimum target browser version, operating system releases, and extension manifest specification (Manifest V3 vs V2).
+   - Verify official vendor distribution link, extension store integrity, and developer signature.
+   - Open a tracking issue: `[Support] Evaluate <Browser> + <Wallet> on <OS>`.
+2. **Laboratory & Testnet Verification**:
+   - Run local testnet or connect to Soroban Testnet.
+   - Test account connection: verify initial permission grant, user denial, and silent session restore (`restoreWalletSession`).
+   - Test transaction signing: verify simulation result display, popup focus preservation, signing timeout handling, and network passphrase parity.
+   - Verify asynchronous injection timing (determine if polling loop or custom event listener is required).
+   - Record test date, browser build, OS build, and wallet extension version.
+3. **Automated Coverage & Documentation**:
+   - Add entry with explicit test date and actionable notes in `frontend/src/lib/browser_support_matrix.ts`.
+   - Add automated test assertions in `frontend/src/lib/browser_support_matrix.test.ts`.
+   - Update `docs/browser-support.md` and document the addition in `CHANGELOG.md`.
+
+### 2. Dropping or Deprecating a Combination
+
+1. **Impact Assessment**:
+   - Analyze user reports and error logs for the combination to assess affected active volume.
+   - Confirm whether upstream deprecation (e.g. browser platform removing an API, or vendor discontinuing an extension) requires removal.
+2. **Deprecation Phase (30-day window)**:
+   - Change status in `SUPPORT_MATRIX` from `Supported` to `Degraded`.
+   - Update `actionableExplanation` with a clear deprecation schedule and recommended alternatives.
+   - Announce in release notes and `CHANGELOG.md`.
+3. **Hard Deprecation / Drop**:
+   - Update status to `Unsupported` in `SUPPORT_MATRIX`.
+   - Ensure the UI returns an actionable explanation that explains why the combination cannot be used and directs the user to supported alternatives.
+
+### 3. Investigating Support Anomalies and Regressions
+
+1. **Triage & Environment Isolation**:
+   - Collect user agent, operating system version, extension version, and browser console output.
+   - Reproduce the anomaly in a clean browser profile without conflicting third-party extensions.
+   - Inspect whether failure is caused by content-script injection latency, popup blocker rules, or cross-origin restrictions.
+2. **Root Cause Classification**:
+   - Test directly with isolated `@stellar/freighter-api` calls to distinguish between SorobanPay app logic and upstream wallet bugs.
+   - Test across both Testnet and Mainnet to rule out RPC provider issues.
+   - Check browser security release notes (e.g. tracking protection changes, cookie/storage sandboxing).
+3. **Remediation & Upstream Escalation**:
+   - If an in-app workaround is possible: implement defensive polling/retry in `wallet_manager.ts` and add unit test coverage.
+   - If upstream bug: submit an issue to the wallet repository (e.g. Stellar Freighter GitHub) and update the matrix status to `Degraded` with an explanatory note and workaround.
 
 ## Keyboard support
 

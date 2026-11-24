@@ -1265,6 +1265,7 @@ payment window), configure a proactive TTL refresh using the procedure in
 
 ### See Also (updated)
 
+- [Browser & Wallet Extension Support Lifecycle](./browser-support.md) — Tested support matrix, actionable failure guidance, and procedures for adding/dropping/investigating combinations
 - [Storage TTL Guide](./storage-ttl.md) — TTL constants, cost implications, and the emergency extension procedure
 - [Network Configuration Guide](./networks.md) — testnet vs. mainnet RPC and passphrase values
 - [Backend API Cookbook](./api-cookbook.md) — Recipe 8: Monitor subscription TTL health
