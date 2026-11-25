@@ -3,6 +3,7 @@
 This guide explains how Soroban persistent-storage TTL works within SorobanPay, how to detect at-risk entries before they expire, how to extend TTL programmatically, and how to integrate TTL health checks into your backend monitoring.
 
 > **Related guides:**
+> - For Service-Level Objectives (SLOs) and alert ownership, see [docs/service-level-objectives.md](./service-level-objectives.md).
 > - For TTL constants, lifecycle diagrams, and cost implications, see [docs/storage-ttl.md](./storage-ttl.md).
 > - For the monitoring dashboard setup (Grafana/Prometheus), see [Section 7.6 Grafana Dashboard](#76-grafana-dashboard).
 > - For network-specific RPC URLs used in the scripts below, see [docs/networks.md](./networks.md).
