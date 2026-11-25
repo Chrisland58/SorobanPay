@@ -8,6 +8,7 @@
     "test:integration": "jest --testPathPattern='integration\\.test\\.ts$'",
     "test:all": "jest",
     "test:pact": "jest tests/pact/api.provider.pact.test.ts --verbose",
+    "schema:verify": "jest tests/schemaDriftVerification.test.ts",
     "test:watch": "jest --watch",
     "type-check": "tsc --noEmit"
   },
