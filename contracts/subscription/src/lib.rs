@@ -330,6 +330,115 @@ impl SubscriptionProtocol {
     }
 
     // =========================================================================
+    // Two-Step Admin Ownership Transfer (#1602)
+    // =========================================================================
+
+    /// Returns the current contract administrator address.
+    pub fn get_admin(env: Env) -> Result<Address, ContractError> {
+        env.storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(ContractError::NotInitialized)
+    }
+
+    /// Returns the pending administrator address, if an ownership transfer is in progress.
+    pub fn get_pending_admin(env: Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey::PendingAdmin)
+    }
+
+    /// Propose a new administrator for two-step ownership transfer.
+    ///
+    /// Requires authorization from the current administrator.
+    /// Emits `admin_propose` event.
+    pub fn propose_admin(
+        env: Env,
+        admin: Address,
+        new_admin: Address,
+    ) -> Result<(), ContractError> {
+        admin.require_auth();
+
+        let current_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(ContractError::NotInitialized)?;
+
+        if admin != current_admin {
+            return Err(ContractError::NotAdmin);
+        }
+
+        if admin == new_admin {
+            return Err(ContractError::InvalidAdminCandidate);
+        }
+
+        env.storage()
+            .instance()
+            .set(&DataKey::PendingAdmin, &new_admin);
+
+        events::emit_propose_admin(&env, &admin, &new_admin);
+        Ok(())
+    }
+
+    /// Accept the nominated administrator role.
+    ///
+    /// Requires authorization from the proposed pending administrator.
+    /// Emits `admin_accept` event.
+    pub fn accept_admin(env: Env, new_admin: Address) -> Result<(), ContractError> {
+        new_admin.require_auth();
+
+        let pending_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingAdmin)
+            .ok_or(ContractError::NoPendingAdmin)?;
+
+        if new_admin != pending_admin {
+            return Err(ContractError::Unauthorized);
+        }
+
+        let old_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(ContractError::NotInitialized)?;
+
+        env.storage().instance().set(&DataKey::Admin, &new_admin);
+        env.storage().instance().remove(&DataKey::PendingAdmin);
+
+        events::emit_accept_admin(&env, &old_admin, &new_admin);
+        Ok(())
+    }
+
+    /// Cancel a pending administrator transfer.
+    ///
+    /// Requires authorization from the current administrator.
+    /// Emits `admin_cancel` event.
+    pub fn cancel_admin_transfer(env: Env, admin: Address) -> Result<(), ContractError> {
+        admin.require_auth();
+
+        let current_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(ContractError::NotInitialized)?;
+
+        if admin != current_admin {
+            return Err(ContractError::NotAdmin);
+        }
+
+        let pending_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingAdmin)
+            .ok_or(ContractError::NoPendingAdmin)?;
+
+        env.storage().instance().remove(&DataKey::PendingAdmin);
+
+        events::emit_cancel_admin_transfer(&env, &admin, &pending_admin);
+        Ok(())
+    }
+
+    // =========================================================================
     // Protocol fee configuration
     // =========================================================================
 
@@ -1262,3 +1371,6 @@ mod regression_tests;
 
 #[cfg(test)]
 mod pause_resume_tests;
+
+#[cfg(test)]
+mod two_step_admin_transfer_tests;

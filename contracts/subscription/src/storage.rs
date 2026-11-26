@@ -51,6 +51,9 @@ pub enum DataKey {
     /// Designated admin address authorised to call `migrate`.
     Admin,
 
+    /// Pending administrator nominated in a two-step ownership transfer flow (#1602).
+    PendingAdmin,
+
     /// Optional maximum subscription amount for this deployment.
     MaxAmount,
 }

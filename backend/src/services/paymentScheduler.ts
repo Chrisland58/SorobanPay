@@ -10,6 +10,11 @@ import {
   submitExecutePayment,
   ExecutePaymentHelperError,
 } from './executePaymentHelper';
+import {
+  SchedulerLeaseService,
+  defaultSchedulerLeaseService,
+} from './schedulerLeaseService';
+import { randomUUID } from 'crypto';
 
 /**
  * PaymentScheduler — discovers due subscriptions from the event index and
@@ -24,46 +29,72 @@ export class PaymentScheduler {
   private contractId: string;
   private operatorKeypair: Keypair;
   private networkPassphrase: string;
+  private leaseService: SchedulerLeaseService;
+  private workerId: string;
 
   constructor(
     rpcUrl: string,
     contractId: string,
     operatorSecret: string,
     networkPassphrase: string = Networks.TESTNET,
+    leaseService: SchedulerLeaseService = defaultSchedulerLeaseService,
+    workerId: string = randomUUID(),
   ) {
     this.server = new SorobanRpc.Server(rpcUrl);
     this.contractId = contractId;
     this.operatorKeypair = Keypair.fromSecret(operatorSecret);
     this.networkPassphrase = networkPassphrase;
+    this.leaseService = leaseService;
+    this.workerId = workerId;
   }
 
-  /** Main entry point called by the cron job. */
+  /** Main entry point called by the cron job. Protected against overlapping executions (#1587). */
   async processDuePayments(): Promise<void> {
-    const due = await this.findDueSubscriptions();
-    if (due.length === 0) {
-      logger.debug({ event: 'scheduler.no_due_payments' });
+    const lease = await this.leaseService.acquireLease(
+      `payment-scheduler:${this.contractId}`,
+      this.workerId,
+      60_000,
+    );
+
+    if (!lease.acquired || !lease.token) {
+      logger.warn({
+        event: 'scheduler.overlapping_execution_prevented',
+        reason: lease.reason,
+        holderId: lease.holderId,
+        workerId: this.workerId,
+      });
       return;
     }
-    logger.info({ event: 'scheduler.due_payments_found', count: due.length });
 
-    for (const { subscriber, merchant } of due) {
-      try {
-        const txHash = await this.executePayment(subscriber, merchant);
-        logger.info({
-          event: 'scheduler.payment_ok',
-          subscriber: redactAddress(subscriber),
-          merchant: redactAddress(merchant),
-          txHash,
-        });
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        logger.error({
-          event: 'scheduler.payment_failed',
-          subscriber: redactAddress(subscriber),
-          merchant: redactAddress(merchant),
-          msg,
-        });
+    try {
+      const due = await this.findDueSubscriptions();
+      if (due.length === 0) {
+        logger.debug({ event: 'scheduler.no_due_payments' });
+        return;
       }
+      logger.info({ event: 'scheduler.due_payments_found', count: due.length });
+
+      for (const { subscriber, merchant } of due) {
+        try {
+          const txHash = await this.executePayment(subscriber, merchant);
+          logger.info({
+            event: 'scheduler.payment_ok',
+            subscriber: redactAddress(subscriber),
+            merchant: redactAddress(merchant),
+            txHash,
+          });
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          logger.error({
+            event: 'scheduler.payment_failed',
+            subscriber: redactAddress(subscriber),
+            merchant: redactAddress(merchant),
+            msg,
+          });
+        }
+      }
+    } finally {
+      await this.leaseService.releaseLease(`payment-scheduler:${this.contractId}`, lease.token);
     }
   }
 

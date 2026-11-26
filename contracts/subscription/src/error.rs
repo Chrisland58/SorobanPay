@@ -39,6 +39,12 @@ pub enum ContractError {
     NotAdmin              = 16,
     /// Error code 17: admin address not initialised; call `initialize` first.
     NotInitialized        = 17,
+    /// Error code 18: protocol fee bps exceeds maximum allowed.
+    FeeBpsTooHigh         = 18,
     /// Error code 19: subscription grace period has not elapsed.
     GracePeriodNotElapsed = 19,
+    /// Error code 20: no pending administrator transfer exists.
+    NoPendingAdmin        = 20,
+    /// Error code 21: candidate admin is identical to current admin or invalid.
+    InvalidAdminCandidate = 21,
 }

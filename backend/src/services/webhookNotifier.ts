@@ -4,6 +4,7 @@ import { getTracer, withSpan, SpanKind } from '../lib/tracing';
 import { enqueueWebhookDelivery, getWebhookQueue } from './webhookQueue'; // BE-53
 
 export type WebhookEventType = 'payment.executed' | 'payment.failed' | 'subscription.cancelled';
+export type WebhookSchemaVersion = 'v1' | 'v2';
 
 export interface WebhookPayload {
   event: WebhookEventType;
@@ -16,6 +17,73 @@ export interface WebhookPayload {
   timestamp: number;
   /** Optional: trace context to link webhook span to originating event span */
   traceContext?: string;
+}
+
+export interface FormattedWebhookV1 {
+  event: WebhookEventType;
+  subscriber: string;
+  merchant: string;
+  amount: string;
+  txHash?: string;
+  eventIndex?: number;
+  timestamp: number;
+  eventId: string;
+  traceContext?: string;
+}
+
+export interface FormattedWebhookV2 {
+  schemaVersion: 'v2';
+  id: string;
+  type: WebhookEventType;
+  createdAt: string;
+  data: {
+    subscriber: string;
+    merchant: string;
+    amount: string;
+    txHash?: string;
+    eventIndex?: number;
+  };
+  metadata: {
+    timestamp: number;
+    traceContext?: string;
+  };
+}
+
+export type FormattedWebhookPayload = FormattedWebhookV1 | FormattedWebhookV2;
+
+/**
+ * Format webhook payload according to specified schema version (#1586).
+ * Ensures backward-compatible v1 flat payload or structured v2 schema.
+ */
+export function formatWebhookPayload(
+  payload: WebhookPayload,
+  eventId: string,
+  schemaVersion: WebhookSchemaVersion = 'v1',
+): FormattedWebhookPayload {
+  if (schemaVersion === 'v2') {
+    return {
+      schemaVersion: 'v2',
+      id: eventId,
+      type: payload.event,
+      createdAt: new Date(payload.timestamp * 1000).toISOString(),
+      data: {
+        subscriber: payload.subscriber,
+        merchant: payload.merchant,
+        amount: payload.amount,
+        txHash: payload.txHash,
+        eventIndex: payload.eventIndex,
+      },
+      metadata: {
+        timestamp: payload.timestamp,
+        traceContext: payload.traceContext,
+      },
+    };
+  }
+
+  return {
+    ...payload,
+    eventId,
+  };
 }
 
 const MAX_ATTEMPTS = 5;
@@ -106,16 +174,13 @@ export async function notifyWebhooks(payload: WebhookPayload): Promise<void> {
 }
 
 async function deliverWithRetry(
-  endpoint: { id: number; url: string; secret: string | null },
+  endpoint: { id: number; url: string; secret: string | null; schemaVersion?: WebhookSchemaVersion },
   payload: WebhookPayload,
   eventId: string,
 ): Promise<void> {
-  const body = JSON.stringify({
-    ...payload,
-    // Embed the stable event ID in the payload body as well so merchants
-    // can read it without inspecting headers.
-    eventId,
-  });
+  const schemaVersion: WebhookSchemaVersion = endpoint.schemaVersion ?? 'v1';
+  const formattedPayload = formatWebhookPayload(payload, eventId, schemaVersion);
+  const body = JSON.stringify(formattedPayload);
 
   await withSpan(
     WEBHOOK_TRACER,
@@ -126,6 +191,7 @@ async function deliverWithRetry(
         'webhook.merchant': payload.merchant,
         'webhook.event': payload.event,
         'webhook.event_id': eventId,
+        'webhook.schema_version': schemaVersion,
         'webhook.max_attempts': MAX_ATTEMPTS,
       });
 
@@ -139,6 +205,8 @@ async function deliverWithRetry(
           'Content-Type': 'application/json',
           // Stable across retries — merchant's idempotency key
           'X-SorobanPay-Event-ID': eventId,
+          // Explicit schema version for consumer deserialization (#1586)
+          'X-SorobanPay-Schema-Version': schemaVersion,
           // Unique per attempt — for request tracing / deduplication on our side
           'X-SorobanPay-Delivery-ID': deliveryId,
           'X-SorobanPay-Timestamp': String(Math.floor(Date.now() / 1000)),
