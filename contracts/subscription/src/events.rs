@@ -465,3 +465,19 @@ pub fn emit_insufficient_allowance(
         (allowance, required),
     );
 }
+
+pub fn emit_cancel_at_period_end(
+    env: &Env,
+    subscriber: &Address,
+    merchant: &Address,
+    effective_at: u64,
+) {
+    env.events().publish(
+        (
+            Symbol::new(env, "cancel_period_end"),
+            subscriber.clone(),
+            merchant.clone(),
+        ),
+        effective_at,
+    );
+}
