@@ -610,7 +610,8 @@ impl SubscriptionProtocol {
         subscriber.require_auth();
 
         // 2. Verify subscription exists.
-        let key = DataKey::Subscription(subscriber.clone(), merchant.clone());
+        let hash = subscription_key(&env, &subscriber, &merchant);
+        let key = DataKey::Subscription(hash);
         let mut data: SubscriptionData = env
             .storage()
             .persistent()
@@ -907,7 +908,7 @@ impl SubscriptionProtocol {
         // Advance next_payment from now (actual collection time), not from next_payment.
         // This slides the billing window forward from the actual transfer, preventing
         // drift accumulation for merchants who collect consistently late.
-        data.next_payment = now + data.interval;
+        data.next_payment = checked_next_payment(now, data.interval)?;
         data.overdue_since = None;
         data.payment_nonce = data.payment_nonce.checked_add(1).ok_or(ContractError::InvalidTimestamp)?;
         env.storage().persistent().set(&key, &data);
@@ -1029,7 +1030,14 @@ impl SubscriptionProtocol {
 
             // Advance next_payment from now (actual collection time), consistent
             // with execute_payment behaviour.
-            data.next_payment = now + data.interval;
+            let next_payment = match checked_next_payment(now, data.interval) {
+                Ok(np) => np,
+                Err(_) => {
+                    results.push_back((subscriber.clone(), false));
+                    continue;
+                }
+            };
+            data.next_payment = next_payment;
             data.overdue_since = None;
             data.payment_nonce = data.payment_nonce.checked_add(1).ok_or(ContractError::InvalidTimestamp)?;
             env.storage().persistent().set(&key, &data);
@@ -1262,3 +1270,6 @@ mod regression_tests;
 
 #[cfg(test)]
 mod pause_resume_tests;
+
+#[cfg(test)]
+mod schedule_overflow_tests;

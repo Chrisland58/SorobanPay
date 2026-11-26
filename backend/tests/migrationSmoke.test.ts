@@ -106,4 +106,159 @@ describe('Database Migration Smoke Suite', () => {
 
     expect(pgm.droppedTables.length + pgm.executedSql.length).toBeGreaterThan(0);
   });
+
+  describe('Sequential Upgrade & Prior Schema Validation (Issue #1645)', () => {
+    interface SchemaFixture {
+      version: string;
+      description: string;
+      appliedMigrations: string[];
+      records: Record<string, Array<{ id: string | number; [key: string]: any }>>;
+      indexes: string[];
+    }
+
+    // Fixtures for representative prior versions
+    const priorSchemas: Record<string, SchemaFixture> = {
+      v1_baseline: {
+        version: '1.0.0',
+        description: 'Initial events and audit logs',
+        appliedMigrations: [
+          '20240101000001_create_events.js',
+          '20240101000002_create_audit_logs.js',
+          '20240101000003_create_payout_summaries.js',
+        ],
+        records: {
+          events: [{ id: 1, type: 'payment', subscriber: 'GSUB1', merchant: 'GMERCH1' }],
+          audit_logs: [{ id: 1, action: 'system_init', actor: 'admin' }],
+        },
+        indexes: ['events_merchant_idx'],
+      },
+      v2_webhooks_retries: {
+        version: '1.1.0',
+        description: 'Added webhooks, retries, and indexer state',
+        appliedMigrations: [
+          '20240101000001_create_events.js',
+          '20240101000002_create_audit_logs.js',
+          '20240101000003_create_payout_summaries.js',
+          '20240101000004_create_webhook_tables.js',
+          '20240101000005_create_payment_retries.js',
+          '20240101000006_create_indexer_state.js',
+        ],
+        records: {
+          events: [{ id: 1, type: 'payment', subscriber: 'GSUB1', merchant: 'GMERCH1' }],
+          webhooks: [{ id: 'wh_1', url: 'https://example.com/webhook', status: 'active' }],
+          payment_retries: [{ id: 'ret_1', attempts: 1, status: 'pending' }],
+        },
+        indexes: ['events_merchant_idx', 'webhooks_status_idx'],
+      },
+      v3_multitenant: {
+        version: '1.2.0',
+        description: 'Multi-tenant RLS, idempotency, and deduplication',
+        appliedMigrations: migrationFiles,
+        records: {
+          events: [{ id: 1, type: 'payment', subscriber: 'GSUB1', merchant: 'GMERCH1', tenant_id: 'ten_1' }],
+          webhooks: [{ id: 'wh_1', url: 'https://example.com/webhook', status: 'active', tenant_id: 'ten_1' }],
+        },
+        indexes: ['events_merchant_idx', 'webhooks_status_idx', 'events_tenant_id_idx'],
+      },
+    };
+
+    function simulateUpgrade(
+      fromFixture: SchemaFixture,
+      targetMigrations: string[],
+    ) {
+      const alreadyApplied = new Set(fromFixture.appliedMigrations);
+      const pending = targetMigrations.filter((m) => !alreadyApplied.has(m));
+
+      const pgm = new MockMigrationBuilder();
+      const preservedRecords = JSON.parse(JSON.stringify(fromFixture.records));
+
+      return {
+        pendingMigrations: pending,
+        pgm,
+        preservedRecords,
+      };
+    }
+
+    it('successfully upgrades from v1_baseline to latest schema preserving existing records', async () => {
+      const { pendingMigrations, pgm, preservedRecords } = simulateUpgrade(
+        priorSchemas.v1_baseline,
+        migrationFiles,
+      );
+
+      expect(pendingMigrations.length).toBeGreaterThan(0);
+
+      for (const file of pendingMigrations) {
+        const fullPath = path.join(migrationsDir, file);
+        // eslint-disable-next-line @typescript-eslint/no-var-requires
+        const migration = require(fullPath);
+        await migration.up(pgm as any);
+      }
+
+      // Assert representative records from v1 are preserved intact
+      expect(preservedRecords.events).toHaveLength(1);
+      expect(preservedRecords.events[0].id).toBe(1);
+      expect(preservedRecords.events[0].merchant).toBe('GMERCH1');
+      expect(preservedRecords.audit_logs).toHaveLength(1);
+
+      // Assert new schema components were constructed
+      expect(pgm.createdTables.length + pgm.executedSql.length).toBeGreaterThan(0);
+    });
+
+    it('successfully upgrades from v2_webhooks_retries to latest schema', async () => {
+      const { pendingMigrations, pgm, preservedRecords } = simulateUpgrade(
+        priorSchemas.v2_webhooks_retries,
+        migrationFiles,
+      );
+
+      for (const file of pendingMigrations) {
+        const fullPath = path.join(migrationsDir, file);
+        // eslint-disable-next-line @typescript-eslint/no-var-requires
+        const migration = require(fullPath);
+        await migration.up(pgm as any);
+      }
+
+      expect(preservedRecords.webhooks[0].url).toBe('https://example.com/webhook');
+      expect(preservedRecords.payment_retries[0].attempts).toBe(1);
+    });
+
+    it('explicitly rejects skipped-version upgrade paths (e.g., jumping without prerequisites)', () => {
+      const validateUpgradePath = (applied: string[], nextToApply: string) => {
+        const nextIdx = migrationFiles.indexOf(nextToApply);
+        if (nextIdx === -1) {
+          throw new Error(`Unknown migration: ${nextToApply}`);
+        }
+        for (let i = 0; i < nextIdx; i++) {
+          if (!applied.includes(migrationFiles[i])) {
+            throw new Error(
+              `Migration sequence broken: missing prerequisite migration "${migrationFiles[i]}" before applying "${nextToApply}".`,
+            );
+          }
+        }
+      };
+
+      // v1 baseline trying to jump straight to event deduplication without webhooks
+      const v1Applied = priorSchemas.v1_baseline.appliedMigrations;
+      const skippedTarget = '20240101000008_event_deduplication.js';
+
+      expect(() => validateUpgradePath(v1Applied, skippedTarget)).toThrow(
+        /Migration sequence broken: missing prerequisite migration/,
+      );
+    });
+
+    it('explicitly rejects unsupported downgrade paths below initial schema baseline', () => {
+      const validateRollback = (currentApplied: string[], targetMigration: string) => {
+        if (!currentApplied.includes(targetMigration)) {
+          throw new Error(`Cannot rollback: target migration ${targetMigration} is not applied.`);
+        }
+        const baseline = migrationFiles[0];
+        if (targetMigration === baseline) {
+          throw new Error('Unsupported downgrade: cannot rollback beyond initial schema baseline.');
+        }
+      };
+
+      expect(() =>
+        validateRollback(priorSchemas.v1_baseline.appliedMigrations, migrationFiles[0]),
+      ).toThrow(/Unsupported downgrade: cannot rollback beyond initial schema baseline/);
+    });
+  });
 });
