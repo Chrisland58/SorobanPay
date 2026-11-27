@@ -28,6 +28,7 @@
 
 import { SorobanRpc } from '@stellar/stellar-sdk';
 import { normalizeRpcError } from './rpc_error_normalizer';
+import { assertWalletAccount } from './wallet_manager';
 
 /** Delay between confirmation checks, in milliseconds. */
 export const POLL_INTERVAL_MS = 1_000;
@@ -40,6 +41,7 @@ export const MAX_POLL_ATTEMPTS = 60;
  *
  * @param server  Soroban RPC server instance used for the original submission.
  * @param hash    Transaction hash returned by sendTransaction.
+ * @param account Freighter account that signed the transaction.
  * @returns       The same hash, once confirmed successful.
  * @throws        A NormalizedRpcError (category 'onchain_failed' or
  *                'confirmation_timeout'), via normalizeRpcError().
@@ -47,11 +49,14 @@ export const MAX_POLL_ATTEMPTS = 60;
 export async function pollForConfirmation(
   server: SorobanRpc.Server,
   hash: string,
+  account: string,
 ): Promise<string> {
   for (let attempt = 0; attempt < MAX_POLL_ATTEMPTS; attempt++) {
     await sleep(POLL_INTERVAL_MS);
+    await assertAccountStillSelected(account, hash);
 
     const result = await server.getTransaction(hash);
+    await assertAccountStillSelected(account, hash);
 
     if (result.status === SorobanRpc.Api.GetTransactionStatus.SUCCESS) {
       return hash;
@@ -72,6 +77,20 @@ export async function pollForConfirmation(
       `Transaction confirmation timeout after ${MAX_POLL_ATTEMPTS} seconds. Hash: ${hash}`,
     ),
   );
+}
+
+async function assertAccountStillSelected(
+  account: string,
+  hash: string,
+): Promise<void> {
+  try {
+    await assertWalletAccount(account);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    throw new Error(
+      `${message} The submitted transaction may still confirm. Check transaction ${hash} before restarting.`,
+    );
+  }
 }
 
 function sleep(ms: number): Promise<void> {

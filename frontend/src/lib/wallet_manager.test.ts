@@ -25,6 +25,7 @@ jest.mock('@stellar/freighter-api', () => ({
   getAddress: (...args: unknown[]) => mockGetAddress(...args),
   getNetwork: (...args: unknown[]) => mockGetNetwork(...args),
   signTransaction: (...args: unknown[]) => mockSignTransaction(...args),
+  WatchWalletChanges: jest.fn(),
 }));
 
 import {
@@ -143,6 +144,7 @@ describe('signTx', () => {
   const UNSIGNED_XDR = 'AAAAAQ==';
   const SIGNED_XDR = 'AQAAAA==';
   const PASSPHRASE = 'Test SDF Network ; September 2015';
+  const PUBLIC_KEY = 'G' + 'A'.repeat(55);
 
   beforeEach(() => {
     jest.clearAllMocks();
@@ -151,15 +153,22 @@ describe('signTx', () => {
   });
 
   it('returns the signed XDR on success', async () => {
-    mockSignTransaction.mockResolvedValueOnce({ signedTxXdr: SIGNED_XDR });
-    expect(await signTx(UNSIGNED_XDR, PASSPHRASE)).toBe(SIGNED_XDR);
+    mockSignTransaction.mockResolvedValueOnce({
+      signedTxXdr: SIGNED_XDR,
+      signerAddress: PUBLIC_KEY,
+    });
+    expect(await signTx(UNSIGNED_XDR, PASSPHRASE, PUBLIC_KEY)).toBe(SIGNED_XDR);
   });
 
   it('passes the network passphrase to signTransaction', async () => {
-    mockSignTransaction.mockResolvedValueOnce({ signedTxXdr: SIGNED_XDR });
-    await signTx(UNSIGNED_XDR, PASSPHRASE);
+    mockSignTransaction.mockResolvedValueOnce({
+      signedTxXdr: SIGNED_XDR,
+      signerAddress: PUBLIC_KEY,
+    });
+    await signTx(UNSIGNED_XDR, PASSPHRASE, PUBLIC_KEY);
     expect(mockSignTransaction).toHaveBeenCalledWith(UNSIGNED_XDR, {
       networkPassphrase: PASSPHRASE,
+      address: PUBLIC_KEY,
     });
   });
 
@@ -197,14 +206,17 @@ describe('signTx', () => {
 
   it('throws when signTransaction returns an error field', async () => {
     mockSignTransaction.mockResolvedValueOnce({ error: 'User declined' });
-    await expect(signTx(UNSIGNED_XDR, PASSPHRASE)).rejects.toThrow(
+    await expect(signTx(UNSIGNED_XDR, PASSPHRASE, PUBLIC_KEY)).rejects.toThrow(
       /Transaction signing failed/i,
     );
   });
 
   it('throws when signTransaction returns an empty signedTxXdr', async () => {
-    mockSignTransaction.mockResolvedValueOnce({ signedTxXdr: '' });
-    await expect(signTx(UNSIGNED_XDR, PASSPHRASE)).rejects.toThrow(
+    mockSignTransaction.mockResolvedValueOnce({
+      signedTxXdr: '',
+      signerAddress: PUBLIC_KEY,
+    });
+    await expect(signTx(UNSIGNED_XDR, PASSPHRASE, PUBLIC_KEY)).rejects.toThrow(
       /empty signed transaction/i,
     );
   });

@@ -194,6 +194,11 @@ export function usePaymentHistory({
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [hasMore, setHasMore] = useState(false);
+  const [dataPublicKey, setDataPublicKey] = useState<string | null>(null);
+  const [loadingPublicKey, setLoadingPublicKey] = useState<string | null>(null);
+  const requestIdRef = useRef(0);
+  const publicKeyRef = useRef(publicKey);
+  publicKeyRef.current = publicKey;
   // cursor is the RPC pagination cursor for the next page
   const cursorRef = useRef<string | null>(null);
   // Whether we have done the initial fetch for the current publicKey
@@ -212,8 +217,14 @@ export function usePaymentHistory({
       append: boolean,
       skipCache: boolean,
     ): Promise<void> => {
+      const requestId = requestIdRef.current;
+      if (publicKeyRef.current !== publicKey) return;
       if (!publicKey || !contractId) {
         setEvents([]);
+        setDataPublicKey(publicKey ?? null);
+        setError(null);
+        setIsLoading(false);
+        setLoadingPublicKey(null);
         setHasMore(false);
         return;
       }
@@ -223,13 +234,18 @@ export function usePaymentHistory({
         const cached = readCache(publicKey);
         if (cached) {
           setEvents(cached.events);
+          setDataPublicKey(publicKey);
+          setError(null);
           cursorRef.current = cached.cursor;
           setHasMore(cached.hasMore);
+          setIsLoading(false);
+          setLoadingPublicKey(null);
           return;
         }
       }
 
       setIsLoading(true);
+      setLoadingPublicKey(publicKey);
       setError(null);
 
       try {
@@ -263,6 +279,7 @@ export function usePaymentHistory({
         }
 
         const response = await server.getEvents(requestOpts);
+        if (requestIdRef.current !== requestId) return;
 
         const decoded: PaymentEvent[] = [];
         for (const raw of response.events ?? []) {
@@ -283,6 +300,7 @@ export function usePaymentHistory({
 
         cursorRef.current = moreAvailable ? nextCursor : null;
         setEvents(nextEvents);
+        setDataPublicKey(publicKey);
         setHasMore(moreAvailable);
 
         // Only cache the first page (non-append)
@@ -295,11 +313,17 @@ export function usePaymentHistory({
           });
         }
       } catch (err) {
+        if (requestIdRef.current !== requestId) return;
         const msg = err instanceof Error ? err.message : 'Failed to load payment history';
+        setEvents([]);
+        setDataPublicKey(publicKey);
         setError(msg);
         setHasMore(false);
       } finally {
-        setIsLoading(false);
+        if (requestIdRef.current === requestId) {
+          setIsLoading(false);
+          setLoadingPublicKey(null);
+        }
       }
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -308,8 +332,12 @@ export function usePaymentHistory({
 
   // Initial fetch when publicKey changes
   useEffect(() => {
+    requestIdRef.current += 1;
     if (!publicKey) {
       setEvents([]);
+      setDataPublicKey(null);
+      setIsLoading(false);
+      setLoadingPublicKey(null);
       setError(null);
       setHasMore(false);
       cursorRef.current = null;
@@ -338,7 +366,15 @@ export function usePaymentHistory({
     void fetchPage(null, false, true);
   }, [publicKey, fetchPage]);
 
-  return { events, isLoading, error, hasMore, loadMore, refresh };
+  const hasCurrentAccountData = !!publicKey && dataPublicKey === publicKey;
+  return {
+    events: hasCurrentAccountData ? events : [],
+    isLoading: !!publicKey && loadingPublicKey === publicKey && isLoading,
+    error: hasCurrentAccountData ? error : null,
+    hasMore: hasCurrentAccountData && hasMore,
+    loadMore,
+    refresh,
+  };
 }
 
 // Re-export for convenience

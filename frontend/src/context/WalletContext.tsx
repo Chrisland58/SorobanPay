@@ -62,6 +62,8 @@ export interface WalletContextValue {
   isConnecting: boolean;
   /** Error message from the last failed connect attempt. */
   connectError: string | null;
+  /** True when the account changed or became unverifiable during an operation. */
+  accountChangeDetected: boolean;
   /** True when Freighter extension is detected in the browser. */
   freighterInstalled: boolean;
   /** True while checking Freighter availability on initial load. */
@@ -90,6 +92,8 @@ export function WalletProvider({ children }: { children: ReactNode }) {
   const [publicKey, setPublicKey] = useState<string | null>(null);
   const [isConnecting, setIsConnecting] = useState(false);
   const [connectError, setConnectError] = useState<string | null>(null);
+  const [accountChangeDetected, setAccountChangeDetected] = useState(false);
+  const lastConnectedAddressRef = useRef<string | null>(null);
   const [freighterInstalled, setFreighterInstalled] = useState(false);
   const [isCheckingFreighter, setIsCheckingFreighter] = useState(true);
   const [sessionInvalid, setSessionInvalid] = useState(false);
@@ -206,6 +210,35 @@ export function WalletProvider({ children }: { children: ReactNode }) {
     };
   }, []);
 
+  // Freighter may change the selected account without a page reload. Invalidate
+  // the app's account state so account-scoped data and pending UI cannot follow
+  // the newly selected wallet.
+  useEffect(() => {
+    if (!publicKey) return;
+
+    const watcher = new WatchWalletChanges(1000);
+    let invalidated = false;
+    const invalidateAccount = (changedAddress?: string) => {
+      if (invalidated) return;
+      invalidated = true;
+      if (changedAddress) lastConnectedAddressRef.current = changedAddress;
+      setPublicKey(null);
+      setAccountChangeDetected(true);
+      setConnectError(
+        "Your Freighter account changed or could not be verified. Reconnect your wallet and restart the operation.",
+      );
+    };
+
+    const watchResult = watcher.watch(({ address, error }) => {
+      if (error || !address || address !== publicKey) {
+        invalidateAccount(error ? undefined : address);
+      }
+    });
+
+    if (watchResult.error) invalidateAccount();
+    return () => watcher.stop();
+  }, [publicKey]);
+
   const connect = useCallback(async () => {
     const actionId = ++sessionActionRef.current;
     setIsConnecting(true);
@@ -320,6 +353,7 @@ export function WalletProvider({ children }: { children: ReactNode }) {
         publicKey,
         isConnecting,
         connectError,
+        accountChangeDetected,
         freighterInstalled,
         isCheckingFreighter,
         sessionInvalid,

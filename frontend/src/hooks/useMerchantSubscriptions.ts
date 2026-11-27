@@ -228,6 +228,9 @@ export function useMerchantSubscriptions({
   const [subscriptions, setSubscriptions] = useState<MerchantSubscription[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [subscriptionsPublicKey, setSubscriptionsPublicKey] = useState<string | null>(null);
+  const [errorPublicKey, setErrorPublicKey] = useState<string | null>(null);
+  const [loadingPublicKey, setLoadingPublicKey] = useState<string | null>(null);
 
   const [hasMore, setHasMore] = useState(false);
   const fetchIdRef = useRef(0);
@@ -246,13 +249,18 @@ export function useMerchantSubscriptions({
         setSubscriptions([]);
         setHasMore(false);
         setError('Contract ID is not configured.');
+        setErrorPublicKey(merchantKey);
+        setSubscriptionsPublicKey(merchantKey);
         setIsLoading(false);
+        setLoadingPublicKey(null);
         return;
       }
 
       loadingRef.current = true;
       setIsLoading(true);
+      setLoadingPublicKey(merchantKey);
       setError(null);
+      setErrorPublicKey(null);
 
       try {
         const { NETWORK_PASSPHRASE } = await import('@/constants/network');
@@ -362,6 +370,7 @@ export function useMerchantSubscriptions({
         if (fetchIdRef.current === fetchId) {
           loadingRef.current = false;
           setIsLoading(false);
+          setLoadingPublicKey(null);
         }
       }
     },
@@ -373,7 +382,9 @@ export function useMerchantSubscriptions({
   useEffect(() => {
     if (!publicKey || !scopeKey) {
       setSubscriptions([]);
+      setSubscriptionsPublicKey(null);
       setError(null);
+      setErrorPublicKey(null);
       setIsLoading(false);
       setHasMore(false);
       cursorRef.current = null;

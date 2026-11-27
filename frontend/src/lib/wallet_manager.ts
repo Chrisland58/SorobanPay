@@ -16,6 +16,7 @@ import {
   getAddress,
   getNetwork,
   signTransaction,
+  WatchWalletChanges,
 } from '@stellar/freighter-api';
 
 // ─── Freighter detection ──────────────────────────────────────────────────────
@@ -132,8 +133,9 @@ export async function restoreWalletSession(): Promise<string | null> {
  *
  * @param xdr              Base-64 encoded unsigned transaction XDR.
  * @param networkPassphrase Stellar network passphrase (testnet or mainnet).
+ * @param expectedAddress  Account that authorized the operation.
  * @returns Signed transaction XDR as a base-64 string.
- * @throws  If Freighter returns an error or the user rejects the request.
+ * @throws  If the selected or signing account differs from expectedAddress.
  */
 export async function signTx(
   xdr: string,
@@ -169,10 +171,18 @@ export async function signTx(
     throw new Error(`Transaction signing failed: ${result.error}`);
   }
 
-  const signed = (result as { signedTxXdr: string }).signedTxXdr;
+  if (result.signerAddress !== expectedAddress) {
+    throw new Error(
+      'Freighter signed with a different account. Reconnect the original account and restart the operation.',
+    );
+  }
+
+  const signed = result.signedTxXdr;
   if (!signed) {
     throw new Error('Freighter returned an empty signed transaction XDR.');
   }
 
   return signed;
 }
+
+export { WatchWalletChanges };

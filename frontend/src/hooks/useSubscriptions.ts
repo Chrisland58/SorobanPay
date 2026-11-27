@@ -130,6 +130,9 @@ export function useSubscriptions(publicKey: string | null): UseSubscriptionsRetu
   const [dataPublicKey, setDataPublicKey] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [subscriptionsPublicKey, setSubscriptionsPublicKey] = useState<string | null>(null);
+  const [errorPublicKey, setErrorPublicKey] = useState<string | null>(null);
+  const [loadingPublicKey, setLoadingPublicKey] = useState<string | null>(null);
 
   // Ref to allow external refetch trigger
   const fetchCounterRef = useRef(0);
@@ -154,7 +157,9 @@ export function useSubscriptions(publicKey: string | null): UseSubscriptionsRetu
       if (!publicKey) return;
 
       setIsLoading(true);
+      setLoadingPublicKey(publicKey);
       setError(null);
+      setErrorPublicKey(null);
 
       try {
         const server = new SorobanRpc.Server(RPC_URL, { allowHttp: false });
@@ -330,6 +335,7 @@ export function useSubscriptions(publicKey: string | null): UseSubscriptionsRetu
       } finally {
         if (!signal.aborted) {
           setIsLoading(false);
+          setLoadingPublicKey(null);
         }
       }
     }

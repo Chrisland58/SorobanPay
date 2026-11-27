@@ -42,6 +42,7 @@ jest.mock('@stellar/stellar-sdk', () => {
 const mockSignTx = jest.fn();
 jest.mock('@/lib/wallet_manager', () => ({
   signTx: (...args: unknown[]) => mockSignTx(...args),
+  assertWalletAccount: jest.fn().mockResolvedValue(undefined),
 }));
 
 // ── Helpers ────────────────────────────────────────────────────────────────
@@ -120,7 +121,11 @@ describe('buildAndSubmitCancel – happy path', () => {
       NETWORK_PASSPHRASE,
       RPC_URL,
     );
-    expect(mockSignTx).toHaveBeenCalledWith(expect.any(String), NETWORK_PASSPHRASE);
+    expect(mockSignTx).toHaveBeenCalledWith(
+      expect.any(String),
+      NETWORK_PASSPHRASE,
+      SUBSCRIBER,
+    );
   });
 
   it('polls until SUCCESS status', async () => {

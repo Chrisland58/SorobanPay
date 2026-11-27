@@ -9,7 +9,7 @@
  *   Step 2: Revoke SEP-41 allowance to clean up remaining authorization
  */
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { getRuntimeConfig } from "@/lib/runtime_config";
 import { buildSignAndSubmitCancel } from "@/lib/transaction_builder";
 import { normalizeRpcError } from "@/lib/rpc_error_normalizer";
@@ -43,7 +43,7 @@ export function CancelSubscriptionModal({
   onSuccess,
   onError,
 }: CancelSubscriptionModalProps) {
-  const { publicKey } = useWallet();
+  const { publicKey, accountChangeDetected } = useWallet();
   const { showToast } = useToast();
   const config = getRuntimeConfig();
 
@@ -58,6 +58,7 @@ export function CancelSubscriptionModal({
   }
 
   const handleCancel = async () => {
+    if (requiresRestart) return;
     if (!publicKey) {
       setError("Wallet not connected");
       return;

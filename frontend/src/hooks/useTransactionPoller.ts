@@ -23,6 +23,7 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
 import { SorobanRpc } from '@stellar/stellar-sdk';
 import { NETWORK_NAME } from '@/constants/network';
+import { assertWalletAccount } from '@/lib/wallet_manager';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -178,7 +179,7 @@ export function extractFailureMessage(
  * });
  *
  * // After Freighter signs and submits:
- * startPolling(sendResult.hash, server);
+ * startPolling(sendResult.hash, server, publicKey);
  * ```
  */
 export function useTransactionPoller(
@@ -216,7 +217,7 @@ export function useTransactionPoller(
   }, []);
 
   const startPolling = useCallback(
-    (txHash: string, server: SorobanRpc.Server) => {
+    (txHash: string, server: SorobanRpc.Server, account: string) => {
       // Cancel any previous poll
       cancelSessionRef.current?.();
 

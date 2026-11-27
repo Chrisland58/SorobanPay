@@ -14,6 +14,13 @@ import { renderHook, act, waitFor } from '@testing-library/react';
 import { useTransactionPoller, buildExplorerUrl, extractFailureMessage } from '@/hooks/useTransactionPoller';
 import { SorobanRpc } from '@stellar/stellar-sdk';
 
+const mockAssertWalletAccount = jest.fn();
+
+jest.mock('@/lib/wallet_manager', () => ({
+  assertWalletAccount: (...args: unknown[]) =>
+    mockAssertWalletAccount(...args),
+}));
+
 // ── Mock stellar-sdk ──────────────────────────────────────────────────────────
 
 jest.mock('@stellar/stellar-sdk', () => {
@@ -38,6 +45,7 @@ jest.mock('@stellar/stellar-sdk', () => {
 
 beforeEach(() => {
   jest.useFakeTimers();
+  mockAssertWalletAccount.mockResolvedValue(undefined);
 });
 
 afterEach(() => {
@@ -49,6 +57,7 @@ afterEach(() => {
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 const MOCK_TX_HASH = 'abc123def456abc123def456abc123def456abc123def456abc123def456abc1';
+const MOCK_ACCOUNT = 'G' + 'A'.repeat(55);
 
 function makeServer(getTransactionImpl: () => Promise<unknown>): SorobanRpc.Server {
   return {
@@ -135,12 +144,37 @@ describe('useTransactionPoller', () => {
     const { result } = renderHook(() => useTransactionPoller());
 
     act(() => {
-      result.current.startPolling(MOCK_TX_HASH, server);
+      result.current.startPolling(MOCK_TX_HASH, server, MOCK_ACCOUNT);
     });
 
     expect(result.current.state.status).toBe('confirming');
     expect(result.current.state.txHash).toBe(MOCK_TX_HASH);
     expect(result.current.state.explorerUrl).toContain(MOCK_TX_HASH);
+  });
+
+  it('stops polling and prevents a success result after the wallet account changes', async () => {
+    const onSuccess = jest.fn();
+    const server = makeServer(async () => ({ status: 'SUCCESS' }));
+    mockAssertWalletAccount.mockRejectedValueOnce(
+      new Error('Your Freighter account changed during this operation.'),
+    );
+
+    const { result } = renderHook(() => useTransactionPoller({ onSuccess }));
+    act(() => {
+      result.current.startPolling(MOCK_TX_HASH, server, MOCK_ACCOUNT);
+    });
+
+    await act(async () => {
+      jest.advanceTimersByTime(2500);
+      await Promise.resolve();
+    });
+
+    await waitFor(() => {
+      expect(result.current.state.status).toBe('failed');
+    });
+    expect(result.current.state.errorMessage).toContain(MOCK_TX_HASH);
+    expect(server.getTransaction).not.toHaveBeenCalled();
+    expect(onSuccess).not.toHaveBeenCalled();
   });
 
   it('transitions to success when getTransaction returns SUCCESS', async () => {
@@ -152,7 +186,7 @@ describe('useTransactionPoller', () => {
     );
 
     act(() => {
-      result.current.startPolling(MOCK_TX_HASH, server);
+      result.current.startPolling(MOCK_TX_HASH, server, MOCK_ACCOUNT);
     });
 
     // Advance past the initial 2 s delay
@@ -181,7 +215,7 @@ describe('useTransactionPoller', () => {
     );
 
     act(() => {
-      result.current.startPolling(MOCK_TX_HASH, server);
+      result.current.startPolling(MOCK_TX_HASH, server, MOCK_ACCOUNT);
     });
 
     await act(async () => {
@@ -210,7 +244,7 @@ describe('useTransactionPoller', () => {
     );
 
     act(() => {
-      result.current.startPolling(MOCK_TX_HASH, server);
+      result.current.startPolling(MOCK_TX_HASH, server, MOCK_ACCOUNT);
     });
 
     // Advance 61 seconds to trigger the timeout check
@@ -245,7 +279,7 @@ describe('useTransactionPoller', () => {
     );
 
     act(() => {
-      result.current.startPolling(MOCK_TX_HASH, server);
+      result.current.startPolling(MOCK_TX_HASH, server, MOCK_ACCOUNT);
     });
 
     // Advance well past the timeout
@@ -269,7 +303,7 @@ describe('useTransactionPoller', () => {
     const { result } = renderHook(() => useTransactionPoller());
 
     act(() => {
-      result.current.startPolling(MOCK_TX_HASH, server);
+      result.current.startPolling(MOCK_TX_HASH, server, MOCK_ACCOUNT);
     });
 
     // After 2 s: 1st call
@@ -301,7 +335,7 @@ describe('useTransactionPoller', () => {
     const { result } = renderHook(() => useTransactionPoller());
 
     act(() => {
-      result.current.startPolling(MOCK_TX_HASH, server);
+      result.current.startPolling(MOCK_TX_HASH, server, MOCK_ACCOUNT);
     });
     expect(result.current.state.status).toBe('confirming');
 
@@ -333,7 +367,7 @@ describe('useTransactionPoller', () => {
     const { result } = renderHook(() => useTransactionPoller());
 
     act(() => {
-      result.current.startPolling(MOCK_TX_HASH, server);
+      result.current.startPolling(MOCK_TX_HASH, server, MOCK_ACCOUNT);
     });
 
     expect(result.current.state.explorerUrl).toBe(

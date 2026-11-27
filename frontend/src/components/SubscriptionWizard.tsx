@@ -558,11 +558,13 @@ function StepSigning({
   const [phase, setPhase] = useState<'submitting' | 'error'>('submitting');
   const [errorMsg, setErrorMsg] = useState('');
   const [errorAction, setErrorAction] = useState('');
+  const [requiresWalletRestart, setRequiresWalletRestart] = useState(false);
   const hasRun = useRef(false);
 
   const submit = useCallback(async () => {
     setPhase('submitting');
     setErrorMsg('');
+    setRequiresWalletRestart(false);
     try {
       const result = await buildAndSubmitSubscribe(
         {
@@ -588,7 +590,13 @@ function StepSigning({
       });
     } catch (err) {
       const mapped = mapError(err);
-      setErrorMsg(mapped.message);
+      const rawMessage = err instanceof Error ? err.message : String(err);
+      const walletChanged =
+        /account changed|could not verify the freighter account|different account/i.test(
+          rawMessage,
+        );
+      setRequiresWalletRestart(walletChanged);
+      setErrorMsg(walletChanged ? rawMessage : mapped.message);
       setErrorAction(mapped.action);
       setPhase('error');
       showToast({ variant: 'error', message: mapped.message, action: mapped.action });
@@ -611,17 +619,23 @@ function StepSigning({
               <p className="text-xs text-gray-200 leading-relaxed">{errorAction}</p>
             </div>
           )}
-          <p className="text-xs text-gray-400">Your form data has been preserved — review and retry.</p>
+          <p className="text-xs text-gray-400">
+            {requiresWalletRestart
+              ? 'Reconnect the original wallet and check the transaction hash before restarting; it may already have been submitted.'
+              : 'Your form data has been preserved — review and retry.'}
+          </p>
         </div>
         <div className="flex gap-3">
           <button type="button" onClick={onRetry}
             className="flex-1 rounded-lg border border-gray-600 bg-gray-800/60 text-gray-300 hover:bg-gray-700 py-3 text-sm font-semibold min-h-[48px] transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-500">
             ← Edit details
           </button>
-          <button type="button" onClick={() => { hasRun.current = false; submit(); }}
-            className="flex-1 rounded-lg bg-blue-600 hover:bg-blue-500 py-3 text-sm font-semibold text-white min-h-[48px] transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400">
-            Retry
-          </button>
+          {!requiresWalletRestart && (
+            <button type="button" onClick={() => { hasRun.current = false; submit(); }}
+              className="flex-1 rounded-lg bg-blue-600 hover:bg-blue-500 py-3 text-sm font-semibold text-white min-h-[48px] transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400">
+              Retry
+            </button>
+          )}
         </div>
       </div>
     );

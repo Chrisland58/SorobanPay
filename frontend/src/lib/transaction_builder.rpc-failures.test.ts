@@ -55,6 +55,7 @@ jest.mock('@stellar/stellar-sdk', () => {
 
 jest.mock('@/lib/wallet_manager', () => ({
   signTx: jest.fn().mockResolvedValue('SIGNED_XDR'),
+  assertWalletAccount: jest.fn().mockResolvedValue(undefined),
 }));
 
 import { buildAndSubmitSubscribe } from './transaction_builder';

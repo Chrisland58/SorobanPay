@@ -43,6 +43,7 @@ jest.mock('@stellar/stellar-sdk', () => {
 
 jest.mock('@/lib/wallet_manager', () => ({
   signTx: (...args: unknown[]) => mockSignTx(...args),
+  assertWalletAccount: jest.fn().mockResolvedValue(undefined),
 }));
 
 describe('transaction_builder cancel flow', () => {
