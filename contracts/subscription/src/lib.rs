@@ -16,6 +16,9 @@ use crate::storage::{
 /// Maximum number of subscribers allowed in a single `batch_execute_payment` call.
 pub const BATCH_MAX_SIZE: u32 = 50;
 
+/// Maximum supported token decimals (0 to 18).
+pub const MAX_SUPPORTED_DECIMALS: u32 = 18;
+
 // ─── Internal helpers ─────────────────────────────────────────────────────────
 
 #[inline]
@@ -533,6 +536,10 @@ impl SubscriptionProtocol {
         let contract_address = env.current_contract_address();
         let token_client = token::Client::new(&env, &token);
         token_client.symbol();
+        let token_decimals = token_client.decimals();
+        if token_decimals > MAX_SUPPORTED_DECIMALS {
+            return Err(ContractError::UnsupportedTokenDecimals);
+        }
         let allowance = token_client.allowance(&subscriber, &contract_address);
 
         if allowance < amount {
@@ -573,6 +580,61 @@ impl SubscriptionProtocol {
         events::emit_subscribe(&env, &subscriber, &merchant, &token, amount);
 
         Ok(())
+    }
+
+    /// Onboard a subscription with explicit token decimal configuration.
+    ///
+    /// Validates that the caller's explicit decimal configuration matches on-chain
+    /// token metadata and does not exceed [`MAX_SUPPORTED_DECIMALS`]. Rejects unsupported
+    /// or inconsistent decimal metadata before writing any subscription state.
+    pub fn subscribe_with_decimals(
+        env: Env,
+        subscriber: Address,
+        merchant: Address,
+        token: Address,
+        amount: i128,
+        interval: u64,
+        strict: bool,
+        grace_period: Option<u64>,
+        expected_decimals: u32,
+    ) -> Result<(), ContractError> {
+        let token_client = token::Client::new(&env, &token);
+        token_client.symbol();
+        let decimals = token_client.decimals();
+        if decimals > MAX_SUPPORTED_DECIMALS {
+            return Err(ContractError::UnsupportedTokenDecimals);
+        }
+        if decimals != expected_decimals {
+            return Err(ContractError::InconsistentTokenDecimals);
+        }
+        Self::subscribe(env, subscriber, merchant, token, amount, interval, strict, grace_period)
+    }
+
+    /// Read-only validation of token metadata and decimal configuration.
+    ///
+    /// # Returns
+    /// The token's on-chain decimal count if supported and consistent with `expected_decimals`.
+    ///
+    /// # Errors
+    /// - `ContractError::UnsupportedTokenDecimals` if decimals > 18.
+    /// - `ContractError::InconsistentTokenDecimals` if expected_decimals is provided and does not match.
+    pub fn validate_token_decimals(
+        env: Env,
+        token: Address,
+        expected_decimals: Option<u32>,
+    ) -> Result<u32, ContractError> {
+        let token_client = token::Client::new(&env, &token);
+        token_client.symbol();
+        let decimals = token_client.decimals();
+        if decimals > MAX_SUPPORTED_DECIMALS {
+            return Err(ContractError::UnsupportedTokenDecimals);
+        }
+        if let Some(expected) = expected_decimals {
+            if decimals != expected {
+                return Err(ContractError::InconsistentTokenDecimals);
+            }
+        }
+        Ok(decimals)
     }
 
     /// Update amount and/or interval of an existing subscription in-place.
@@ -922,6 +984,10 @@ impl SubscriptionProtocol {
         write_execution_marker(&env, &hash, data.payment_nonce);
 
         events::emit_executed(&env, &subscriber, &merchant, &data.token, data.amount, data.payment_nonce);
+
+        Ok(())
+    }
+
     /// Attempt payment collection for each subscriber in one merchant-authorized call.
     ///
     /// Subscribers without an active, due, sufficiently funded subscription are
@@ -1262,3 +1328,6 @@ mod regression_tests;
 
 #[cfg(test)]
 mod pause_resume_tests;
+
+#[cfg(test)]
+mod token_decimals_tests;
