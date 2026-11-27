@@ -1006,6 +1006,7 @@ interface TxErrorInfo {
   summary: string;
   fix: string;
   raw: string;
+  category?: string;
 }
 
 /**
@@ -1024,6 +1025,7 @@ function classifyError(err: unknown): TxErrorInfo {
     summary: normalized.summary,
     fix:     normalized.action,
     raw:     normalized.rawMessage,
+    category: normalized.failureCategory,
   };
 }
 

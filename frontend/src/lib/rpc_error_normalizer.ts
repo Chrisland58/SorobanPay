@@ -31,7 +31,30 @@
  * Use `category` for programmatic branching (e.g. deciding whether to
  * re-enable the submit button immediately vs. prompting the user to act).
  */
+export type FrontendErrorCategory =
+  | 'wallet_rejection'
+  | 'unavailable_rpc'
+  | 'simulation_failure'
+  | 'ledger_execution_failure'
+  | 'unknown';
+
+export interface DiagnosticContext {
+  category: FrontendErrorCategory;
+  recoveryPath: string;
+  sanitizedDetail: string;
+}
+
+export interface FrontendErrorState {
+  category: FrontendErrorCategory;
+  title: string;
+  message: string;
+  nextSteps: string;
+  retryable: boolean;
+  diagnosticContext: DiagnosticContext;
+}
+
 export type RpcErrorCategory =
+  | FrontendErrorCategory
   | 'contract_error'       // on-chain ContractError (known code or name)
   | 'simulation_failed'    // prepareTransaction / simulation rejected
   | 'submission_failed'    // sendTransaction returned ERROR status
@@ -41,19 +64,20 @@ export type RpcErrorCategory =
   | 'wrong_network'        // Freighter / app network passphrase mismatch
   | 'insufficient_funds'   // subscriber XLM or token balance too low
   | 'allowance_too_low'    // token allowance for contract is insufficient
-  | 'network_error'        // fetch / RPC connection failure
-  | 'unknown';             // catch-all
+  | 'network_error';       // fetch / RPC connection failure
 
 /**
  * Structured error produced by `normalizeRpcError`.
  *
- * All fields are safe to display in the UI.  Sensitive technical detail is
- * isolated in `rawMessage`, which is only shown in the "technical details"
- * collapsed section.
+ * All fields are safe to display in the UI. Sensitive technical details,
+ * provider credentials, and secret keys are sanitized in `rawMessage`.
  */
 export interface NormalizedRpcError {
   /** Machine-readable category for switch/if branching in UI and retry logic. */
   category: RpcErrorCategory;
+
+  /** High-level typed frontend failure category. */
+  failureCategory: FrontendErrorCategory;
 
   /**
    * Short, user-facing title.
@@ -88,10 +112,15 @@ export interface NormalizedRpcError {
   contractCode?: number;
 
   /**
-   * The raw error message as a string.
-   * Shown collapsed in the "technical details" section.
+   * The sanitized error message as a string.
+   * Redacts passwords, API keys, tokens, and private keys.
    */
   rawMessage: string;
+
+  /**
+   * Diagnostic context for troubleshooting without leaking secrets.
+   */
+  diagnosticContext: DiagnosticContext;
 }
 
 // ─── Contract error code map ──────────────────────────────────────────────────
@@ -302,9 +331,111 @@ function extractContractCode(msg: string): number | undefined {
  * }
  * ```
  */
+/**
+ * Redacts sensitive credentials, private keys, authorization tokens,
+ * and secret query parameters so raw provider details are never exposed to users.
+ */
+export function sanitizeSensitiveDetails(message: string): string {
+  if (!message || typeof message !== 'string') return '';
+  return message
+    // 1. Basic auth in URLs: https://user:pass@host -> https://***:***@host
+    .replace(/(https?:\/\/)([^:\/\s@]+):([^@\/\s]+)@/gi, '$1***:***@')
+    // 2. Sensitive query params: ?api_key=..., &token=..., &secret=..., etc.
+    .replace(/([?&](?:api[-_]?key|key|token|secret|access[-_]?token|password)=)([^&"'\s]+)/gi, '$1[REDACTED]')
+    // 3. Bearer or auth tokens
+    .replace(/(Bearer\s+)[A-Za-z0-9_\-\.~+/]+=*/gi, '$1[REDACTED]')
+    // 4. Stellar secret seed keys (S...)
+    .replace(/\bS[A-Z2-7]{55}\b/g, '[SECRET_KEY_REDACTED]')
+    // 5. Authorization header patterns
+    .replace(/(authorization:\s*)(basic|bearer)\s+[A-Za-z0-9_\-\.~+/]+=*/gi, '$1$2 [REDACTED]');
+}
+
+export function toFrontendErrorCategory(category: RpcErrorCategory): FrontendErrorCategory {
+  switch (category) {
+    case 'signing_rejected':
+    case 'wallet_rejection':
+      return 'wallet_rejection';
+    case 'network_error':
+    case 'confirmation_timeout':
+    case 'unavailable_rpc':
+      return 'unavailable_rpc';
+    case 'simulation_failed':
+    case 'simulation_failure':
+      return 'simulation_failure';
+    case 'contract_error':
+    case 'onchain_failed':
+    case 'submission_failed':
+    case 'ledger_execution_failure':
+      return 'ledger_execution_failure';
+    default:
+      return 'unknown';
+  }
+}
+
+export function getRecoveryPath(category: FrontendErrorCategory): string {
+  switch (category) {
+    case 'wallet_rejection':
+      return 'Re-prompt wallet signing';
+    case 'unavailable_rpc':
+      return 'Failover or retry after checking connectivity';
+    case 'simulation_failure':
+      return 'Adjust form inputs or approve required token allowance';
+    case 'ledger_execution_failure':
+      return 'Inspect ledger meta result and update contract state/inputs';
+    case 'unknown':
+    default:
+      return 'Safe fallback retry';
+  }
+}
+
+function buildResult(
+  category: RpcErrorCategory,
+  title: string,
+  summary: string,
+  action: string,
+  retryable: boolean,
+  rawMessage: string,
+  contractCode?: number,
+): NormalizedRpcError {
+  const failureCategory = toFrontendErrorCategory(category);
+  return {
+    category,
+    failureCategory,
+    title,
+    summary,
+    action,
+    retryable,
+    contractCode,
+    rawMessage,
+    diagnosticContext: {
+      category: failureCategory,
+      recoveryPath: getRecoveryPath(failureCategory),
+      sanitizedDetail: rawMessage,
+    },
+  };
+}
+
+/**
+ * Normalizes every Soroban RPC error shape into a single structured
+ * `NormalizedRpcError`.
+ *
+ * Pass the caught value directly — the function handles `Error` objects,
+ * plain strings, and anything else.
+ *
+ * @example
+ * ```ts
+ * try {
+ *   await buildAndSubmitSubscribe(…);
+ * } catch (err) {
+ *   const normalized = normalizeRpcError(err);
+ *   // normalized.category, .failureCategory, .title, .summary, .action, .retryable
+ * }
+ * ```
+ */
 export function normalizeRpcError(err: unknown): NormalizedRpcError {
-  const rawMessage =
+  const rawOriginal =
     err instanceof Error ? err.message : String(err ?? 'Unknown error');
+  const rawMessage = sanitizeSensitiveDetails(rawOriginal);
   const msg = rawMessage.toLowerCase();
 
   // ── 1. Contract error by numeric code (highest-priority — most precise) ─────
@@ -312,12 +443,15 @@ export function normalizeRpcError(err: unknown): NormalizedRpcError {
   if (contractCode !== undefined) {
     const def = CONTRACT_ERROR_DEFS[contractCode];
     if (def) {
-      return {
-        category: 'contract_error',
-        contractCode,
+      return buildResult(
+        'contract_error',
+        def.title,
+        def.summary,
+        def.action,
+        def.retryable,
         rawMessage,
-        ...def,
-      };
+        contractCode,
+      );
     }
   }
 
@@ -326,33 +460,35 @@ export function normalizeRpcError(err: unknown): NormalizedRpcError {
     if (re.test(rawMessage)) {
       const def = CONTRACT_ERROR_DEFS[code];
       if (def) {
-        return {
-          category: 'contract_error',
-          contractCode: code,
+        return buildResult(
+          'contract_error',
+          def.title,
+          def.summary,
+          def.action,
+          def.retryable,
           rawMessage,
-          ...def,
-        };
+          code,
+        );
       }
     }
   }
 
-  // ── 3. Freighter signing rejection ────────────────────────────────────────
+  // ── 3. Freighter signing rejection / wallet rejection ───────────────────────
   if (
     msg.includes('user declined') ||
     msg.includes('user rejected') ||
     msg.includes('signing failed') ||
+    msg.includes('wallet rejection') ||
     msg.includes('rejected') // generic Freighter rejection
   ) {
-    return {
-      category: 'signing_rejected',
-      title: 'Signing cancelled',
-      summary:
-        'The Freighter pop-up was dismissed or the signing request was rejected.',
-      action:
-        'Click "Authorize Subscription" again and approve the transaction in the Freighter pop-up. To use a different account, switch accounts in Freighter first.',
-      retryable: true,
+    return buildResult(
+      'signing_rejected',
+      'Signing cancelled',
+      'The Freighter pop-up was dismissed or the signing request was rejected.',
+      'Click "Authorize Subscription" again and approve the transaction in the Freighter pop-up. To use a different account, switch accounts in Freighter first.',
+      true,
       rawMessage,
-    };
+    );
   }
 
   // ── 4. Wrong network ──────────────────────────────────────────────────────
@@ -361,58 +497,58 @@ export function normalizeRpcError(err: unknown): NormalizedRpcError {
     msg.includes('network mismatch') ||
     msg.includes('passphrase')
   ) {
-    return {
-      category: 'wrong_network',
-      title: 'Wrong network',
-      summary:
-        'Freighter is configured for a different network than the app expects.',
-      action:
-        'Open Freighter, click the network selector, and switch to the network that matches NEXT_PUBLIC_NETWORK_PASSPHRASE in your .env.local, then retry.',
-      retryable: true,
+    return buildResult(
+      'wrong_network',
+      'Wrong network',
+      'Freighter is configured for a different network than the app expects.',
+      'Open Freighter, click the network selector, and switch to the network that matches NEXT_PUBLIC_NETWORK_PASSPHRASE in your .env.local, then retry.',
+      true,
       rawMessage,
-    };
+    );
   }
 
   // ── 5. Simulation failure (transaction_builder prepareTransaction) ─────────
-  if (msg.includes('transaction preparation failed')) {
-    return {
-      category: 'simulation_failed',
-      title: 'Simulation failed',
-      summary:
-        'The Soroban RPC could not simulate the transaction or inject resource fees.',
-      action:
-        'Check that the contract address and network are correct. If the problem persists, the RPC node may be congested — retry in a moment.',
-      retryable: true,
+  if (
+    msg.includes('transaction preparation failed') ||
+    msg.includes('simulation failed') ||
+    msg.includes('simulation failure')
+  ) {
+    return buildResult(
+      'simulation_failed',
+      'Simulation failed',
+      'The Soroban RPC could not simulate the transaction or inject resource fees.',
+      'Check that the contract address and network are correct. If the problem persists, the RPC node may be congested — retry in a moment.',
+      true,
       rawMessage,
-    };
+    );
   }
 
   // ── 6. Submission failure (transaction_builder sendTransaction ERROR) ──────
   if (msg.includes('transaction submission failed')) {
-    return {
-      category: 'submission_failed',
-      title: 'Transaction submission failed',
-      summary:
-        'The Soroban RPC rejected the transaction envelope at submission time.',
-      action:
-        'This is often a transient RPC issue. Retry the transaction. If it persists, inspect the XDR in the technical details for a specific cause.',
-      retryable: true,
+    return buildResult(
+      'submission_failed',
+      'Transaction submission failed',
+      'The Soroban RPC rejected the transaction envelope at submission time.',
+      'This is often a transient RPC issue. Retry the transaction. If it persists, inspect the XDR in the technical details for a specific cause.',
+      true,
       rawMessage,
-    };
+    );
   }
 
   // ── 7. On-chain failure (polling found FAILED status) ─────────────────────
-  if (msg.includes('transaction failed on-chain')) {
-    return {
-      category: 'onchain_failed',
-      title: 'Transaction failed on-chain',
-      summary:
-        'The transaction was included in the ledger but the contract invocation reverted.',
-      action:
-        'Inspect the result meta XDR in the technical details to identify the contract error, then correct the inputs.',
-      retryable: false,
+  if (
+    msg.includes('transaction failed on-chain') ||
+    msg.includes('ledger execution failure') ||
+    msg.includes('execution failure')
+  ) {
+    return buildResult(
+      'onchain_failed',
+      'Transaction failed on-chain',
+      'The transaction was included in the ledger but the contract invocation reverted.',
+      'Inspect the result meta XDR in the technical details to identify the contract error, then correct the inputs.',
+      false,
       rawMessage,
-    };
+    );
   }
 
   // ── 8. Polling timeout ────────────────────────────────────────────────────
@@ -421,16 +557,14 @@ export function normalizeRpcError(err: unknown): NormalizedRpcError {
     msg.includes('timed out') ||
     msg.includes('timeout')
   ) {
-    return {
-      category: 'confirmation_timeout',
-      title: 'Transaction timed out',
-      summary:
-        'The network did not confirm the transaction within the expected window.',
-      action:
-        'The transaction may still confirm — wait a minute before resubmitting to avoid a duplicate. You can look up the transaction hash in Stellar Expert to check its status.',
-      retryable: true,
+    return buildResult(
+      'confirmation_timeout',
+      'Transaction timed out',
+      'The network did not confirm the transaction within the expected window.',
+      'The transaction may still confirm — wait a minute before resubmitting to avoid a duplicate. You can look up the transaction hash in Stellar Expert to check its status.',
+      true,
       rawMessage,
-    };
+    );
   }
 
   // ── 9. Insufficient balance ───────────────────────────────────────────────
@@ -439,16 +573,14 @@ export function normalizeRpcError(err: unknown): NormalizedRpcError {
     msg.includes('not enough') ||
     msg.includes('underfunded')
   ) {
-    return {
-      category: 'insufficient_funds',
-      title: 'Insufficient balance',
-      summary:
-        'Your wallet does not have enough tokens or XLM to cover this transaction.',
-      action:
-        'Top up your account. On testnet use Stellar Friendbot; on mainnet transfer XLM or the relevant token to your address.',
-      retryable: false,
+    return buildResult(
+      'insufficient_funds',
+      'Insufficient balance',
+      'Your wallet does not have enough tokens or XLM to cover this transaction.',
+      'Top up your account. On testnet use Stellar Friendbot; on mainnet transfer XLM or the relevant token to your address.',
+      false,
       rawMessage,
-    };
+    );
   }
 
   // ── 10. Token allowance ───────────────────────────────────────────────────
@@ -457,19 +589,17 @@ export function normalizeRpcError(err: unknown): NormalizedRpcError {
     msg.includes('transfer from') ||
     msg.includes('spend limit')
   ) {
-    return {
-      category: 'allowance_too_low',
-      title: 'Token allowance too low',
-      summary:
-        'The contract is not authorized to transfer this token amount on your behalf.',
-      action:
-        'Approve a higher token allowance: call token.approve(contract_id, amount) from your wallet before subscribing.',
-      retryable: false,
+    return buildResult(
+      'allowance_too_low',
+      'Token allowance too low',
+      'The contract is not authorized to transfer this token amount on your behalf.',
+      'Approve a higher token allowance: call token.approve(contract_id, amount) from your wallet before subscribing.',
+      false,
       rawMessage,
-    };
+    );
   }
 
-  // ── 11. Network / fetch error ─────────────────────────────────────────────
+  // ── 11. Network / fetch error / unavailable RPC ───────────────────────────
   if (
     msg.includes('failed to fetch') ||
     msg.includes('network request failed') ||
@@ -478,27 +608,109 @@ export function normalizeRpcError(err: unknown): NormalizedRpcError {
     (msg.includes('fetch') && !msg.includes('freighter')) ||
     msg.includes('econnrefused') ||
     msg.includes('enotfound') ||
+    msg.includes('unavailable rpc') ||
     msg.includes('rpc')
   ) {
-    return {
-      category: 'network_error',
-      title: 'Network error',
-      summary: 'Could not reach the Soroban RPC endpoint.',
-      action:
-        'Check your internet connection and verify NEXT_PUBLIC_RPC_URL in .env.local. Retry in a moment.',
-      retryable: true,
+    return buildResult(
+      'network_error',
+      'Network error',
+      'Could not reach the Soroban RPC endpoint.',
+      'Check your internet connection and verify NEXT_PUBLIC_RPC_URL in .env.local. Retry in a moment.',
+      true,
       rawMessage,
-    };
+    );
   }
 
   // ── 12. Unknown / catch-all ───────────────────────────────────────────────
-  return {
-    category: 'unknown',
-    title: 'Transaction failed',
-    summary: 'An unexpected error occurred while submitting the transaction.',
-    action:
-      'Review the technical details below and retry. If the problem persists, consult the README troubleshooting section.',
-    retryable: true,
+  return buildResult(
+    'unknown',
+    'Transaction failed',
+    'An unexpected error occurred while submitting the transaction.',
+    'Review the technical details below and retry. If the problem persists, consult the README troubleshooting section.',
+    true,
     rawMessage,
-  };
+  );
+}
+
+/**
+ * High-level typed frontend error mapping that maps any error to a stable
+ * UI recovery state while sanitizing sensitive details and provider payloads.
+ */
+export function mapFrontendError(err: unknown): FrontendErrorState {
+  const normalized = normalizeRpcError(err);
+  const failureCategory = normalized.failureCategory ?? toFrontendErrorCategory(normalized.category);
+  const sanitized = sanitizeSensitiveDetails(normalized.rawMessage);
+
+  switch (failureCategory) {
+    case 'wallet_rejection':
+      return {
+        category: 'wallet_rejection',
+        title: 'Wallet Signature Declined',
+        message: 'The transaction signing request was declined or dismissed in your wallet.',
+        nextSteps: 'Click Authorize Subscription again and approve the transaction in the wallet pop-up.',
+        retryable: true,
+        diagnosticContext: {
+          category: 'wallet_rejection',
+          recoveryPath: 'Re-prompt wallet signing',
+          sanitizedDetail: sanitized,
+        },
+      };
+
+    case 'unavailable_rpc':
+      return {
+        category: 'unavailable_rpc',
+        title: 'RPC Service Unavailable',
+        message: 'The Soroban RPC node could not be reached or the request timed out.',
+        nextSteps: 'Check your internet connection, verify configured endpoint URL, or wait for RPC failover.',
+        retryable: true,
+        diagnosticContext: {
+          category: 'unavailable_rpc',
+          recoveryPath: 'Failover or retry after checking connectivity',
+          sanitizedDetail: sanitized,
+        },
+      };
+
+    case 'simulation_failure':
+      return {
+        category: 'simulation_failure',
+        title: 'Transaction Simulation Failed',
+        message: 'The transaction simulation failed pre-flight verification against the contract.',
+        nextSteps: 'Verify subscription inputs, token contract validity, and account allowance before retrying.',
+        retryable: true,
+        diagnosticContext: {
+          category: 'simulation_failure',
+          recoveryPath: 'Adjust form inputs or approve required token allowance',
+          sanitizedDetail: sanitized,
+        },
+      };
+
+    case 'ledger_execution_failure':
+      return {
+        category: 'ledger_execution_failure',
+        title: 'Ledger Execution Failed',
+        message: 'The transaction reached the ledger but was rejected during execution.',
+        nextSteps: 'Inspect contract error diagnostics, correct the failing condition, and resubmit.',
+        retryable: false,
+        diagnosticContext: {
+          category: 'ledger_execution_failure',
+          recoveryPath: 'Inspect ledger meta result and update contract state/inputs',
+          sanitizedDetail: sanitized,
+        },
+      };
+
+    case 'unknown':
+    default:
+      return {
+        category: 'unknown',
+        title: 'Transaction Encountered An Error',
+        message: 'An unexpected error occurred while processing your transaction.',
+        nextSteps: 'Please review your inputs and try again. If the issue persists, contact support.',
+        retryable: normalized.retryable,
+        diagnosticContext: {
+          category: 'unknown',
+          recoveryPath: 'Safe fallback retry',
+          sanitizedDetail: sanitized,
+        },
+      };
+  }
 }

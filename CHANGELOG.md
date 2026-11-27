@@ -24,6 +24,8 @@ rules, and step-by-step checklist — see [docs/release-process.md](docs/release
 
 ### Added
 
+- **[Frontend]** Normalize wallet and RPC failures into typed actionable error states (wallet_rejection, unavailable_rpc, simulation_failure, ledger_execution_failure) with sensitive credential redaction and safe fallback for unknown errors. (Closes #1567)
+
 - **[Docs]** Complete the Keep a Changelog release history, architecture guide,
   and Rust contract API documentation. (Closes #1405, Closes #1406, Closes #1407)
 - **[Docs]** Document all `deploy/deploy.sh` environment variables (`STELLAR_NETWORK`, `STELLAR_IDENTITY`) and derived values (`RPC_URL`, `PASSPHRASE`) in the script header and `docs/deployment.md`. (Closes #77)
