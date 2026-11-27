@@ -24,6 +24,8 @@ rules, and step-by-step checklist — see [docs/release-process.md](docs/release
 
 ### Added
 
+- **[Docs]** Add a disaster recovery guide with measurable RTO/RPO objectives, authoritative vs rebuildable data classification, restoration ordering, and tested recovery procedures. (Closes #1625)
+
 - **[Docs]** Complete the Keep a Changelog release history, architecture guide,
   and Rust contract API documentation. (Closes #1405, Closes #1406, Closes #1407)
 - **[Docs]** Document all `deploy/deploy.sh` environment variables (`STELLAR_NETWORK`, `STELLAR_IDENTITY`) and derived values (`RPC_URL`, `PASSPHRASE`) in the script header and `docs/deployment.md`. (Closes #77)

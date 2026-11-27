@@ -4,6 +4,7 @@ This guide explains how Soroban persistent-storage TTL works within SorobanPay, 
 
 > **Related guides:**
 > - For TTL constants, lifecycle diagrams, and cost implications, see [docs/storage-ttl.md](./storage-ttl.md).
+> - For disaster recovery, RTO/RPO objectives, and restoration ordering, see [docs/disaster-recovery.md](./disaster-recovery.md).
 > - For the monitoring dashboard setup (Grafana/Prometheus), see [Section 7.6 Grafana Dashboard](#76-grafana-dashboard).
 > - For network-specific RPC URLs used in the scripts below, see [docs/networks.md](./networks.md).
 
