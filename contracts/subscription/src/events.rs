@@ -465,3 +465,50 @@ pub fn emit_insufficient_allowance(
         (allowance, required),
     );
 }
+
+// ─── Two-Step Admin Ownership Transfer Events (#1602) ─────────────────────────
+
+pub fn emit_propose_admin(
+    env: &Env,
+    current_admin: &Address,
+    proposed_admin: &Address,
+) {
+    env.events().publish(
+        (
+            Symbol::new(env, "admin_propose"),
+            current_admin.clone(),
+            proposed_admin.clone(),
+        ),
+        (),
+    );
+}
+
+pub fn emit_accept_admin(
+    env: &Env,
+    old_admin: &Address,
+    new_admin: &Address,
+) {
+    env.events().publish(
+        (
+            Symbol::new(env, "admin_accept"),
+            old_admin.clone(),
+            new_admin.clone(),
+        ),
+        (),
+    );
+}
+
+pub fn emit_cancel_admin_transfer(
+    env: &Env,
+    current_admin: &Address,
+    cancelled_admin: &Address,
+) {
+    env.events().publish(
+        (
+            Symbol::new(env, "admin_cancel"),
+            current_admin.clone(),
+            cancelled_admin.clone(),
+        ),
+        (),
+    );
+}
