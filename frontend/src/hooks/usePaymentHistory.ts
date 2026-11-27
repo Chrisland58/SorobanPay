@@ -69,6 +69,8 @@ export interface UsePaymentHistoryResult {
   error: string | null;
   /** True if there are more events to load */
   hasMore: boolean;
+  /** True when the end of the history list has been reached */
+  isEndReached: boolean;
   /** Load the next page of events */
   loadMore: () => void;
   /** Re-fetch from scratch, bypassing the cache */
@@ -274,12 +276,21 @@ export function usePaymentHistory({
         const moreAvailable =
           !!nextCursor && (response.events?.length ?? 0) >= pageSize;
 
+        // Deduplicate events by id and sort stably (ledger desc, timestamp desc, id desc)
         let nextEvents: PaymentEvent[];
+        const map = new Map<string, PaymentEvent>();
         if (append) {
-          nextEvents = [...events, ...decoded];
-        } else {
-          nextEvents = decoded;
+          for (const ev of events) map.set(ev.id, ev);
         }
+        for (const ev of decoded) {
+          map.set(ev.id, ev);
+        }
+        nextEvents = Array.from(map.values()).sort(
+          (a, b) =>
+            b.ledger - a.ledger ||
+            b.timestamp.localeCompare(a.timestamp) ||
+            b.id.localeCompare(a.id),
+        );
 
         cursorRef.current = moreAvailable ? nextCursor : null;
         setEvents(nextEvents);
@@ -303,7 +314,7 @@ export function usePaymentHistory({
       }
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [publicKey, contractId, rpcUrl, pageSize],
+    [publicKey, contractId, rpcUrl, pageSize, events],
   );
 
   // Initial fetch when publicKey changes
@@ -338,7 +349,9 @@ export function usePaymentHistory({
     void fetchPage(null, false, true);
   }, [publicKey, fetchPage]);
 
-  return { events, isLoading, error, hasMore, loadMore, refresh };
+  const isEndReached = !hasMore && events.length > 0;
+
+  return { events, isLoading, error, hasMore, isEndReached, loadMore, refresh };
 }
 
 // Re-export for convenience

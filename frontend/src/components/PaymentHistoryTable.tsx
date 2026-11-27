@@ -49,6 +49,8 @@ export interface PaymentHistoryTableProps {
   canGoNext?: boolean;
   onPreviousPage?: () => void;
   onNextPage?: () => void;
+  /** Explicit indicator that the end of history has been reached */
+  isEndReached?: boolean;
   /** True when a wallet is connected — shows table vs. disconnected prompt */
   isConnected: boolean;
   /** "Testnet" or "Mainnet" — used for Stellar Expert links */
@@ -324,15 +326,16 @@ export default function PaymentHistoryTable({
         </table>
       </div>
 
-      {/* Pagination */}
-      {(canGoPrevious || nextPageAvailable) && !isLoading && (
+      {/* Pagination & Load More */}
+      {(canGoPrevious || nextPageAvailable || isLoading) && (
         <nav aria-label="Payment history pagination" className="flex items-center justify-center gap-4">
           {canGoPrevious && onPreviousPage && (
             <button
               type="button"
+              disabled={isLoading}
               onClick={onPreviousPage}
               aria-label="Previous payment history page"
-              className="rounded-lg border border-gray-700 bg-gray-800 px-4 py-2.5 text-sm font-medium text-gray-300 hover:bg-gray-700 hover:text-white transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400"
+              className="rounded-lg border border-gray-700 bg-gray-800 px-4 py-2.5 text-sm font-medium text-gray-300 hover:bg-gray-700 hover:text-white disabled:opacity-40 disabled:cursor-not-allowed transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400"
             >
               Previous
             </button>
@@ -341,18 +344,32 @@ export default function PaymentHistoryTable({
           {nextPageAvailable && (
             <button
               type="button"
+              disabled={isLoading}
+              aria-busy={isLoading}
               onClick={onNextPage ?? onLoadMore}
-              aria-label={onNextPage ? 'Next payment history page' : 'Load more payment history events'}
-              className="rounded-lg border border-gray-700 bg-gray-800 px-6 py-2.5 text-sm font-medium text-gray-300 hover:bg-gray-700 hover:text-white transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400"
+              aria-label={
+                isLoading
+                  ? 'Loading more subscription activity…'
+                  : onNextPage
+                  ? 'Next payment history page'
+                  : 'Load more payment history events'
+              }
+              className="rounded-lg border border-gray-700 bg-gray-800 px-6 py-2.5 text-sm font-medium text-gray-300 hover:bg-gray-700 hover:text-white disabled:opacity-50 disabled:cursor-wait transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400"
             >
-              {onNextPage ? 'Next page' : 'Load more'}
+              {isLoading ? 'Loading more…' : onNextPage ? 'Next page' : 'Load more'}
             </button>
           )}
         </nav>
       )}
 
+      {/* Screen reader live region for status announcements */}
+      <div role="status" aria-live="polite" aria-atomic="true" className="sr-only">
+        {isLoading && events.length > 0 && 'Loading more subscription activity…'}
+        {!isLoading && !nextPageAvailable && events.length > 0 && 'All subscription activity loaded. End of list reached.'}
+      </div>
+
       {isLoading && events.length > 0 && (
-        <p role="status" aria-live="polite" className="text-center text-xs text-gray-500">
+        <p className="text-center text-xs text-gray-500" aria-hidden="true">
           Loading subscription activity…
         </p>
       )}
