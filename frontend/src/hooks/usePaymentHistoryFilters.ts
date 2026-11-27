@@ -28,6 +28,7 @@ import {
   useDeferredValue,
   useEffect,
   useMemo,
+  useRef,
   useState,
 } from 'react';
 import { useRouter, useSearchParams, usePathname } from 'next/navigation';
@@ -95,31 +96,107 @@ export const DEFAULT_FILTERS: PaymentHistoryFilterState = {
 
 // ── URL param helpers ─────────────────────────────────────────────────────────
 
-function filtersToParams(f: PaymentHistoryFilterState): URLSearchParams {
-  const p = new URLSearchParams();
-  if (f.dateFrom) p.set('from', f.dateFrom);
-  if (f.dateTo) p.set('to', f.dateTo);
-  if (f.eventTypes.length) p.set('types', f.eventTypes.join(','));
-  if (f.merchantSearch) p.set('merchant', f.merchantSearch);
-  if (f.amountMin) p.set('minAmt', f.amountMin);
-  if (f.amountMax) p.set('maxAmt', f.amountMax);
-  if (f.tokenFilter) p.set('token', f.tokenFilter);
+export const FILTER_PARAM_KEYS = [
+  'from',
+  'to',
+  'types',
+  'merchant',
+  'minAmt',
+  'maxAmt',
+  'token',
+] as const;
+
+export const VALID_EVENT_TYPES = new Set<EventTypeFilter>([
+  'executed',
+  'payment_transfer_failure',
+  'cancel',
+  'all',
+]);
+
+function isValidIsoDate(value: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const parsed = new Date(`${value}T00:00:00.000Z`);
+  return !Number.isNaN(parsed.getTime()) && parsed.toISOString().startsWith(value);
+}
+
+function isValidAmount(value: string): boolean {
+  if (!value) return false;
+  const num = Number(value);
+  return Number.isFinite(num) && num >= 0;
+}
+
+export function filtersToParams(
+  f: PaymentHistoryFilterState,
+  existingParams?: Pick<URLSearchParams, 'toString'>,
+): URLSearchParams {
+  const p = new URLSearchParams(existingParams?.toString() ?? '');
+  for (const key of FILTER_PARAM_KEYS) {
+    p.delete(key);
+  }
+  if (f.dateFrom && isValidIsoDate(f.dateFrom)) p.set('from', f.dateFrom);
+  if (f.dateTo && isValidIsoDate(f.dateTo)) p.set('to', f.dateTo);
+  const validTypes = Array.from(
+    new Set(f.eventTypes.filter((t) => VALID_EVENT_TYPES.has(t))),
+  );
+  if (validTypes.length) p.set('types', validTypes.join(','));
+  if (f.merchantSearch.trim()) p.set('merchant', f.merchantSearch.trim());
+  if (f.amountMin.trim() && isValidAmount(f.amountMin.trim())) {
+    p.set('minAmt', f.amountMin.trim());
+  }
+  if (f.amountMax.trim() && isValidAmount(f.amountMax.trim())) {
+    p.set('maxAmt', f.amountMax.trim());
+  }
+  if (f.tokenFilter.trim()) p.set('token', f.tokenFilter.trim());
   return p;
 }
 
-function paramsToFilters(p: URLSearchParams): PaymentHistoryFilterState {
-  const types = p.get('types');
+export function paramsToFilters(
+  p: Pick<URLSearchParams, 'get'>,
+): PaymentHistoryFilterState {
+  const rawFrom = (p.get('from') ?? '').trim();
+  const rawTo = (p.get('to') ?? '').trim();
+  const rawTypes = p.get('types') ?? '';
+  const rawMerchant = (p.get('merchant') ?? '').trim();
+  const rawMinAmt = (p.get('minAmt') ?? '').trim();
+  const rawMaxAmt = (p.get('maxAmt') ?? '').trim();
+  const rawToken = (p.get('token') ?? '').trim();
+
+  const eventTypes = Array.from(
+    new Set(
+      rawTypes
+        .split(',')
+        .map((t) => t.trim())
+        .filter((t): t is EventTypeFilter =>
+          VALID_EVENT_TYPES.has(t as EventTypeFilter),
+        ),
+    ),
+  );
+
   return {
-    dateFrom: p.get('from') ?? '',
-    dateTo: p.get('to') ?? '',
-    eventTypes: types
-      ? (types.split(',') as EventTypeFilter[])
-      : [],
-    merchantSearch: p.get('merchant') ?? '',
-    amountMin: p.get('minAmt') ?? '',
-    amountMax: p.get('maxAmt') ?? '',
-    tokenFilter: p.get('token') ?? '',
+    dateFrom: isValidIsoDate(rawFrom) ? rawFrom : '',
+    dateTo: isValidIsoDate(rawTo) ? rawTo : '',
+    eventTypes,
+    merchantSearch: rawMerchant,
+    amountMin: isValidAmount(rawMinAmt) ? rawMinAmt : '',
+    amountMax: isValidAmount(rawMaxAmt) ? rawMaxAmt : '',
+    tokenFilter: rawToken,
   };
+}
+
+function filtersEqual(
+  a: PaymentHistoryFilterState,
+  b: PaymentHistoryFilterState,
+): boolean {
+  return (
+    a.dateFrom === b.dateFrom &&
+    a.dateTo === b.dateTo &&
+    a.merchantSearch === b.merchantSearch &&
+    a.amountMin === b.amountMin &&
+    a.amountMax === b.amountMax &&
+    a.tokenFilter === b.tokenFilter &&
+    a.eventTypes.length === b.eventTypes.length &&
+    a.eventTypes.every((t, i) => t === b.eventTypes[i])
+  );
 }
 
 // ── Hook ─────────────────────────────────────────────────────────────────────
@@ -136,17 +213,29 @@ export function usePaymentHistoryFilters(
     paramsToFilters(searchParams),
   );
 
+  const searchParamsString = searchParams.toString();
+  const lastSearchParamsRef = useRef(searchParamsString);
+
+  // Sync URL → filter state on browser back/forward navigation
+  useEffect(() => {
+    if (searchParamsString === lastSearchParamsRef.current) return;
+    lastSearchParamsRef.current = searchParamsString;
+    const nextFromUrl = paramsToFilters(searchParams);
+    setFilters((prev) => (filtersEqual(prev, nextFromUrl) ? prev : nextFromUrl));
+  }, [searchParams, searchParamsString]);
+
   // Debounce merchant search for filtering
   const deferredMerchant = useDeferredValue(filters.merchantSearch);
 
-  // Sync filter state → URL
+  // Sync filter state → URL (preserving unrelated query parameters)
   useEffect(() => {
-    const params = filtersToParams(filters);
+    const params = filtersToParams(filters, searchParams);
     const qs = params.toString();
+    if (qs === searchParamsString) return;
+    lastSearchParamsRef.current = qs;
     const next = qs ? `${pathname}?${qs}` : pathname;
     router.replace(next, { scroll: false });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [filters]);
+  }, [filters, pathname, router, searchParams, searchParamsString]);
 
   const setFilter = useCallback(
     <K extends keyof PaymentHistoryFilterState>(

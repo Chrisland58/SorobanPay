@@ -465,3 +465,56 @@ pub fn emit_insufficient_allowance(
         (allowance, required),
     );
 }
+
+// ─── Subscription Schedule Change & Terms Events (#1604, #1603) ──────────────
+
+pub fn emit_schedule_change_requested(
+    env: &Env,
+    subscriber: &Address,
+    merchant: &Address,
+    new_amount: i128,
+    new_interval: u64,
+    effective_time: u64,
+) {
+    env.events().publish(
+        (
+            Symbol::new(env, "schedule_change_req"),
+            subscriber.clone(),
+            merchant.clone(),
+        ),
+        (new_amount, new_interval, effective_time),
+    );
+}
+
+pub fn emit_schedule_change_applied(
+    env: &Env,
+    subscriber: &Address,
+    merchant: &Address,
+    applied_amount: i128,
+    applied_interval: u64,
+) {
+    env.events().publish(
+        (
+            Symbol::new(env, "schedule_change_app"),
+            subscriber.clone(),
+            merchant.clone(),
+        ),
+        (applied_amount, applied_interval),
+    );
+}
+
+pub fn emit_terms_digest_stored(
+    env: &Env,
+    subscriber: &Address,
+    merchant: &Address,
+    terms_hash: &BytesN<32>,
+) {
+    env.events().publish(
+        (
+            Symbol::new(env, "terms_digest_stored"),
+            subscriber.clone(),
+            merchant.clone(),
+        ),
+        terms_hash.clone(),
+    );
+}

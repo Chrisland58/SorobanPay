@@ -15,6 +15,10 @@ import {
   EmptyPlansList,
   EmptyAnalyticsState,
   EmptyWebhookList,
+  ErrorState,
+  FilteredEmptyState,
+  NetworkMismatchState,
+  SkeletonList,
 } from './EmptyState';
 
 describe('Actionable Empty States', () => {
@@ -77,5 +81,59 @@ describe('Actionable Empty States', () => {
     expect(screen.getByText(/no webhooks configured/i)).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: /add webhook/i }));
     expect(onAdd).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('Distinct Empty, Loading, Error, and Filtered States', () => {
+  it('renders ErrorState with role="alert" and retry recovery action', () => {
+    const onRetry = jest.fn();
+    render(<ErrorState onRetry={onRetry} />);
+
+    const alert = screen.getByRole('alert');
+    expect(alert).toHaveAttribute('data-state', 'error');
+    expect(screen.getByText(/failed to load data/i)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /retry/i }));
+    expect(onRetry).toHaveBeenCalledTimes(1);
+  });
+
+  it('renders FilteredEmptyState with role="status" and clear filters action', () => {
+    const onResetFilters = jest.fn();
+    render(<FilteredEmptyState onResetFilters={onResetFilters} />);
+
+    const status = screen.getByRole('status');
+    expect(status).toHaveAttribute('data-state', 'filtered');
+    expect(screen.getByText(/no matching results/i)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /clear filters/i }));
+    expect(onResetFilters).toHaveBeenCalledTimes(1);
+  });
+
+  it('renders NetworkMismatchState with role="alert" and switch network action', () => {
+    const onSwitchNetwork = jest.fn();
+    const onReconnect = jest.fn();
+    render(
+      <NetworkMismatchState
+        expectedNetwork="Testnet"
+        onSwitchNetwork={onSwitchNetwork}
+        onReconnect={onReconnect}
+      />,
+    );
+
+    const alert = screen.getByRole('alert');
+    expect(alert).toHaveAttribute('data-state', 'network-mismatch');
+    expect(screen.getByText(/testnet/i)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /switch network/i }));
+    expect(onSwitchNetwork).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(screen.getByRole('button', { name: /reconnect wallet/i }));
+    expect(onReconnect).toHaveBeenCalledTimes(1);
+  });
+
+  it('renders SkeletonList with aria-busy="true" for loading state', () => {
+    render(<SkeletonList rows={2} />);
+    const loading = screen.getByRole('status');
+    expect(loading).toHaveAttribute('aria-busy', 'true');
   });
 });

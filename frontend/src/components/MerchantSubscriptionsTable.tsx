@@ -1,5 +1,7 @@
 'use client';
 
+import { ScheduleTime } from './ScheduleTime';
+
 /**
  * MerchantSubscriptionsTable.tsx
  *
@@ -34,6 +36,7 @@ import { useState, useCallback, useMemo } from 'react';
 import type { MerchantSubscription } from '@/hooks/useMerchantSubscriptions';
 import { truncateAddress } from '@/lib/utils';
 import { SkeletonMerchantSubscriberList, useMinLoadingDuration } from '@/components/Skeleton';
+import { StatusBadge as SharedStatusBadge } from '@/components/StatusBadge';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -62,34 +65,31 @@ type SubscriptionStatusFilter = 'all' | 'due' | 'not-due' | 'expired';
 function StatusBadge({ sub }: { sub: MerchantSubscription }) {
   if (sub.isExpired) {
     return (
-      <span
-        aria-label="Subscription expired or cancelled"
-        className="inline-flex items-center gap-1 rounded-full border border-gray-700 bg-gray-800 px-2 py-0.5 text-xs font-medium text-gray-400"
+      <SharedStatusBadge
+        variant="neutral"
+        srLabel="Subscription expired or cancelled"
       >
-        <span className="h-1.5 w-1.5 rounded-full bg-gray-500" aria-hidden="true" />
         Expired
-      </span>
+      </SharedStatusBadge>
     );
   }
   if (sub.isDue) {
     return (
-      <span
-        aria-label="Payment is due and collectable"
-        className="inline-flex items-center gap-1 rounded-full border border-green-700/40 bg-green-900/30 px-2 py-0.5 text-xs font-medium text-green-300"
+      <SharedStatusBadge
+        variant="success"
+        srLabel="Payment is due and collectable"
       >
-        <span className="h-1.5 w-1.5 rounded-full bg-green-400" aria-hidden="true" />
         Due
-      </span>
+      </SharedStatusBadge>
     );
   }
   return (
-    <span
-      aria-label="Payment not yet due"
-      className="inline-flex items-center gap-1 rounded-full border border-yellow-700/40 bg-yellow-900/20 px-2 py-0.5 text-xs font-medium text-yellow-300"
+    <SharedStatusBadge
+      variant="warning"
+      srLabel="Payment not yet due"
     >
-      <span className="h-1.5 w-1.5 rounded-full bg-yellow-400" aria-hidden="true" />
       Not Due
-    </span>
+    </SharedStatusBadge>
   );
 }
 
@@ -296,7 +296,7 @@ export default function MerchantSubscriptionsTable({
               onChange={(event) => setSubscriberQuery(event.target.value)}
               placeholder="Enter a wallet address"
               aria-label="Search subscribers by wallet address"
-              className="min-h-[40px] w-full rounded-lg border border-gray-700 bg-gray-900 px-3 text-sm text-gray-100 placeholder:text-gray-500 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400 motion-reduce:transition-none"
+              className="min-h-[44px] w-full rounded-lg border border-gray-700 bg-gray-900 px-3 text-sm text-gray-100 placeholder:text-gray-500 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400 motion-reduce:transition-none"
             />
           </label>
           <label className="flex flex-col gap-1 text-xs text-gray-400 sm:w-36">
@@ -305,7 +305,7 @@ export default function MerchantSubscriptionsTable({
               value={statusFilter}
               onChange={(event) => setStatusFilter(event.target.value as SubscriptionStatusFilter)}
               aria-label="Filter subscriptions by status"
-              className="min-h-[40px] w-full rounded-lg border border-gray-700 bg-gray-900 px-3 text-sm text-gray-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400 motion-reduce:transition-none"
+              className="min-h-[44px] w-full rounded-lg border border-gray-700 bg-gray-900 px-3 text-sm text-gray-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400 motion-reduce:transition-none"
             >
               <option value="all">All statuses</option>
               <option value="due">Due</option>
@@ -320,19 +320,19 @@ export default function MerchantSubscriptionsTable({
                 setSubscriberQuery('');
                 setStatusFilter('all');
               }}
-              className="min-h-[40px] rounded-lg border border-gray-700 px-3 text-xs text-gray-300 hover:border-gray-500 hover:text-white focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400 motion-reduce:transition-none"
+              className="min-h-[44px] rounded-lg border border-gray-700 px-3 text-xs text-gray-300 hover:border-gray-500 hover:text-white focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400 motion-reduce:transition-none"
             >
               Clear filters
             </button>
           )}
         </div>
-        <div className="flex items-center justify-end gap-2">
+        <div className="flex flex-wrap items-center justify-end gap-2">
           {/* Collect All Due */}
           {dueCount > 0 && (
             <button
               type="button"
               onClick={() => onBatchCollect(selectableSubscribers)}
-              className="rounded-lg bg-blue-700 hover:bg-blue-600 px-3 py-1.5 text-xs font-semibold text-white transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400"
+              className="min-h-[44px] min-w-[44px] rounded-lg bg-blue-700 hover:bg-blue-600 px-3 py-2 text-xs font-semibold text-white transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400"
               aria-label={`Collect all ${dueCount} due payments`}
             >
               Collect All Due ({dueCount})
@@ -343,7 +343,7 @@ export default function MerchantSubscriptionsTable({
             <button
               type="button"
               onClick={handleBatchCollect}
-              className="rounded-lg bg-green-700 hover:bg-green-600 px-3 py-1.5 text-xs font-semibold text-white transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-green-400"
+              className="min-h-[44px] min-w-[44px] rounded-lg bg-green-700 hover:bg-green-600 px-3 py-2 text-xs font-semibold text-white transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-green-400"
               aria-label={`Collect ${selectedCount} selected payment${selectedCount > 1 ? 's' : ''}`}
             >
               Collect Selected ({selectedCount})
@@ -355,7 +355,7 @@ export default function MerchantSubscriptionsTable({
             onClick={onRefresh}
             disabled={isLoading}
             aria-label="Refresh subscription list"
-            className="rounded-lg border border-gray-700 px-3 py-1.5 text-xs text-gray-400 hover:text-gray-200 hover:border-gray-500 disabled:opacity-40 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-400"
+            className="min-h-[44px] min-w-[44px] rounded-lg border border-gray-700 px-3 py-2 text-xs text-gray-400 hover:text-gray-200 hover:border-gray-500 disabled:opacity-40 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-400"
           >
             {isLoading ? (
               <span className="flex items-center gap-1">
@@ -386,17 +386,19 @@ export default function MerchantSubscriptionsTable({
               {/* Select-all checkbox */}
               <th
                 scope="col"
-                className="px-4 py-2 w-8"
+                className="px-2 py-2 w-12"
                 aria-label="Select all due subscriptions"
               >
-                <input
-                  type="checkbox"
-                  checked={allDueSelected}
-                  onChange={toggleSelectAll}
-                  disabled={selectableSubscribers.length === 0}
-                  aria-label="Select all due subscriptions for batch collection"
-                  className="h-3.5 w-3.5 rounded border-gray-600 bg-gray-800 text-blue-500 focus:ring-blue-400 focus:ring-offset-gray-900 disabled:opacity-30"
-                />
+                <label className={`inline-flex min-h-[44px] min-w-[44px] items-center justify-center ${selectableSubscribers.length === 0 ? 'cursor-not-allowed' : 'cursor-pointer'}`}>
+                  <input
+                    type="checkbox"
+                    checked={allDueSelected}
+                    onChange={toggleSelectAll}
+                    disabled={selectableSubscribers.length === 0}
+                    aria-label="Select all due subscriptions for batch collection"
+                    className="h-4 w-4 rounded border-gray-600 bg-gray-800 text-blue-500 focus:ring-blue-400 focus:ring-offset-gray-900 disabled:opacity-30"
+                  />
+                </label>
               </th>
               <th scope="col" className="px-4 py-2">Subscriber</th>
               <th scope="col" className="px-4 py-2">Amount</th>
@@ -431,15 +433,17 @@ export default function MerchantSubscriptionsTable({
                   }`}
                 >
                   {/* Checkbox */}
-                  <td className="px-4 py-3">
-                    <input
-                      type="checkbox"
-                      checked={isSelected}
-                      onChange={() => toggleRow(sub.subscriber)}
-                      disabled={!canSelect}
-                      aria-label={`Select ${truncateAddress(sub.subscriber)} for batch collection`}
-                      className="h-3.5 w-3.5 rounded border-gray-600 bg-gray-800 text-blue-500 focus:ring-blue-400 focus:ring-offset-gray-900 disabled:opacity-30"
-                    />
+                  <td className="px-2 py-2">
+                    <label className={`inline-flex min-h-[44px] min-w-[44px] items-center justify-center ${!canSelect ? 'cursor-not-allowed' : 'cursor-pointer'}`}>
+                      <input
+                        type="checkbox"
+                        checked={isSelected}
+                        onChange={() => toggleRow(sub.subscriber)}
+                        disabled={!canSelect}
+                        aria-label={`Select ${truncateAddress(sub.subscriber)} for batch collection`}
+                        className="h-4 w-4 rounded border-gray-600 bg-gray-800 text-blue-500 focus:ring-blue-400 focus:ring-offset-gray-900 disabled:opacity-30"
+                      />
+                    </label>
                   </td>
 
                   {/* Subscriber address */}
@@ -475,15 +479,9 @@ export default function MerchantSubscriptionsTable({
                     {sub.isExpired || sub.nextPaymentTimestamp === 0 ? (
                       <span className="text-gray-600">—</span>
                     ) : (
-                      <time dateTime={sub.nextPaymentDate}>
-                        {new Date(sub.nextPaymentDate).toLocaleString(undefined, {
-                          month: 'short',
-                          day: 'numeric',
-                          year: 'numeric',
-                          hour: '2-digit',
-                          minute: '2-digit',
-                        })}
-                      </time>
+                      <ScheduleTime
+                        timestamp={sub.nextPaymentTimestamp || sub.nextPaymentDate}
+                      />
                     )}
                   </td>
 
@@ -505,7 +503,7 @@ export default function MerchantSubscriptionsTable({
                               ? `Collect payment from ${truncateAddress(sub.subscriber)}`
                               : `Payment from ${truncateAddress(sub.subscriber)} is not yet due`
                           }
-                          className={`rounded-lg px-3 py-1.5 text-xs font-semibold transition-colors focus:outline-none focus-visible:ring-2 ${
+                          className={`inline-flex min-h-[44px] min-w-[44px] items-center justify-center rounded-lg px-3 py-2 text-xs font-semibold transition-colors focus:outline-none focus-visible:ring-2 ${
                             isCollecting
                               ? 'cursor-wait bg-gray-700 text-gray-400 focus-visible:ring-gray-400'
                               : sub.isDue
@@ -561,7 +559,7 @@ export default function MerchantSubscriptionsTable({
             onClick={onLoadMore}
             disabled={isLoading}
             aria-label="Load more merchant subscriptions"
-            className="rounded-lg border border-gray-700 bg-gray-800 px-6 py-2.5 text-sm font-medium text-gray-300 hover:bg-gray-700 hover:text-white disabled:opacity-50 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400"
+            className="min-h-[44px] rounded-lg border border-gray-700 bg-gray-800 px-6 py-2.5 text-sm font-medium text-gray-300 hover:bg-gray-700 hover:text-white disabled:opacity-50 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400"
           >
             {isLoading ? 'Loading subscriptions…' : 'Load more'}
           </button>

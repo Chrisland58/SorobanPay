@@ -73,11 +73,27 @@ export interface UseSimulateFeeResult {
   breakdown: SimulateFeeBreakdown | null;
   /** Simulation error message. Null when status !== 'error'. */
   error: string | null;
+  /** Timestamp (ms) when the current fee estimate was generated. */
+  estimatedAt: number | null;
+  /** Timestamp (ms) when the current fee estimate expires. */
+  expiresAt: number | null;
+  /** True when the estimate has expired according to the expiry policy. */
+  isExpired: boolean;
+  /** Expiry duration in milliseconds. */
+  ttlMs: number;
+  /** Imperatively re-estimate fee immediately before signing, returning whether fee changed. */
+  refreshFee: () => Promise<{
+    minResourceFee: string | null;
+    changed: boolean;
+    previousFee: string | null;
+    newFee: string | null;
+  }>;
 }
 
 // ── Constants ──────────────────────────────────────────────────────────────────
 
 const DEBOUNCE_MS = 500;
+const DEFAULT_TTL_MS = 30_000; // 30 seconds fee estimate freshness window
 const STROOPS_PER_XLM = 10_000_000;
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -91,12 +107,19 @@ export function stroopsToXlm(stroops: string): string {
 
 // ── Reducer ───────────────────────────────────────────────────────────────────
 
-type State = UseSimulateFeeResult;
+type State = Omit<UseSimulateFeeResult, 'refreshFee' | 'ttlMs'>;
 
 type Action =
   | { type: 'RESET' }
   | { type: 'LOADING' }
-  | { type: 'SUCCESS'; minResourceFee: string; breakdown: SimulateFeeBreakdown }
+  | {
+      type: 'SUCCESS';
+      minResourceFee: string;
+      breakdown: SimulateFeeBreakdown;
+      estimatedAt: number;
+      ttlMs: number;
+    }
+  | { type: 'EXPIRE' }
   | { type: 'ERROR'; error: string };
 
 const initialState: State = {
@@ -104,6 +127,9 @@ const initialState: State = {
   minResourceFee: null,
   breakdown: null,
   error: null,
+  estimatedAt: null,
+  expiresAt: null,
+  isExpired: false,
 };
 
 function reducer(_state: State, action: Action): State {
@@ -111,16 +137,35 @@ function reducer(_state: State, action: Action): State {
     case 'RESET':
       return initialState;
     case 'LOADING':
-      return { status: 'loading', minResourceFee: null, breakdown: null, error: null };
+      return {
+        ...initialState,
+        status: 'loading',
+      };
     case 'SUCCESS':
       return {
         status: 'success',
         minResourceFee: action.minResourceFee,
         breakdown: action.breakdown,
         error: null,
+        estimatedAt: action.estimatedAt,
+        expiresAt: action.estimatedAt + action.ttlMs,
+        isExpired: false,
+      };
+    case 'EXPIRE':
+      return {
+        ..._state,
+        isExpired: true,
       };
     case 'ERROR':
-      return { status: 'error', minResourceFee: null, breakdown: null, error: action.error };
+      return {
+        status: 'error',
+        minResourceFee: null,
+        breakdown: null,
+        error: action.error,
+        estimatedAt: null,
+        expiresAt: null,
+        isExpired: false,
+      };
     default:
       return _state;
   }
@@ -141,6 +186,7 @@ export function useSimulateFee(
   rpcUrl = RPC_URL,
   contractId = CONTRACT_ID,
   networkPassphrase = NETWORK_PASSPHRASE,
+  ttlMs = DEFAULT_TTL_MS,
 ): UseSimulateFeeResult {
   const [state, dispatch] = useReducer(reducer, initialState);
 
@@ -152,6 +198,113 @@ export function useSimulateFee(
     interval,
     formValid,
   } = params;
+
+  // Track expiry timer
+  useEffect(() => {
+    if (state.status !== 'success' || !state.expiresAt) return;
+
+    const remaining = state.expiresAt - Date.now();
+    if (remaining <= 0) {
+      dispatch({ type: 'EXPIRE' });
+      return;
+    }
+
+    const timer = setTimeout(() => {
+      dispatch({ type: 'EXPIRE' });
+    }, remaining);
+
+    return () => clearTimeout(timer);
+  }, [state.status, state.expiresAt]);
+
+  const runSimulation = async (): Promise<{
+    minResourceFee: string;
+    breakdown: SimulateFeeBreakdown;
+  }> => {
+    const server = new SorobanRpc.Server(rpcUrl, { allowHttp: true });
+    const account = await server.getAccount(subscriber);
+    const contract = new Contract(contractId);
+    const tx = new TransactionBuilder(account, {
+      fee: BASE_FEE,
+      networkPassphrase,
+    })
+      .addOperation(
+        contract.call(
+          'subscribe',
+          new Address(subscriber).toScVal(),
+          new Address(merchant).toScVal(),
+          new Address(token).toScVal(),
+          nativeToScVal(BigInt(amount), { type: 'i128' }),
+          nativeToScVal(BigInt(interval), { type: 'u64' }),
+        ),
+      )
+      .setTimeout(30)
+      .build();
+
+    const simResult = await server.simulateTransaction(tx);
+
+    if (SorobanRpc.Api.isSimulationError(simResult)) {
+      throw new Error(simResult.error || 'Simulation failed — see contract requirements.');
+    }
+
+    if (!SorobanRpc.Api.isSimulationSuccess(simResult)) {
+      throw new Error('Simulation returned an unexpected result.');
+    }
+
+    const txDataXdr = simResult.transactionData.build();
+    const resources = txDataXdr.resources();
+    const instrValue = resources.instructions();
+    const readValue = resources.readBytes();
+    const writeValue = resources.writeBytes();
+
+    return {
+      minResourceFee: simResult.minResourceFee,
+      breakdown: {
+        instructions: typeof instrValue === 'number' ? instrValue : Number(instrValue),
+        readBytes: typeof readValue === 'number' ? readValue : Number(readValue),
+        writeBytes: typeof writeValue === 'number' ? writeValue : Number(writeValue),
+      },
+    };
+  };
+
+  const refreshFee = async () => {
+    const prevFee = state.minResourceFee;
+    if (!formValid || !subscriber) {
+      return {
+        minResourceFee: null,
+        changed: false,
+        previousFee: prevFee,
+        newFee: null,
+      };
+    }
+
+    try {
+      dispatch({ type: 'LOADING' });
+      const result = await runSimulation();
+      const changed = prevFee !== null && prevFee !== result.minResourceFee;
+      dispatch({
+        type: 'SUCCESS',
+        minResourceFee: result.minResourceFee,
+        breakdown: result.breakdown,
+        estimatedAt: Date.now(),
+        ttlMs,
+      });
+      return {
+        minResourceFee: result.minResourceFee,
+        changed,
+        previousFee: prevFee,
+        newFee: result.minResourceFee,
+      };
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      dispatch({ type: 'ERROR', error: msg });
+      return {
+        minResourceFee: null,
+        changed: false,
+        previousFee: prevFee,
+        newFee: null,
+      };
+    }
+  };
 
   useEffect(() => {
     // Reset to idle immediately when form becomes invalid
@@ -168,64 +321,15 @@ export function useSimulateFee(
       if (cancelled) return;
 
       try {
-        const server = new SorobanRpc.Server(rpcUrl, { allowHttp: true });
-
-        // We need an account sequence to build a valid transaction for simulation.
-        // getAccount may throw for unfunded accounts — treat that as a simulation error.
-        const account = await server.getAccount(subscriber);
+        const result = await runSimulation();
         if (cancelled) return;
-
-        const contract = new Contract(contractId);
-        const tx = new TransactionBuilder(account, {
-          fee: BASE_FEE,
-          networkPassphrase,
-        })
-          .addOperation(
-            contract.call(
-              'subscribe',
-              new Address(subscriber).toScVal(),
-              new Address(merchant).toScVal(),
-              new Address(token).toScVal(),
-              nativeToScVal(BigInt(amount), { type: 'i128' }),
-              nativeToScVal(BigInt(interval), { type: 'u64' }),
-            ),
-          )
-          .setTimeout(30)
-          .build();
-
-        const simResult = await server.simulateTransaction(tx);
-        if (cancelled) return;
-
-        if (SorobanRpc.Api.isSimulationError(simResult)) {
-          dispatch({
-            type: 'ERROR',
-            error: simResult.error || 'Simulation failed — see contract requirements.',
-          });
-          return;
-        }
-
-        if (!SorobanRpc.Api.isSimulationSuccess(simResult)) {
-          dispatch({ type: 'ERROR', error: 'Simulation returned an unexpected result.' });
-          return;
-        }
-
-        // Extract resource metrics from the XDR soroban data.
-        // SorobanDataBuilder.build() returns xdr.SorobanTransactionData which
-        // has a .resources() method returning xdr.SorobanResources.
-        const txDataXdr = simResult.transactionData.build();
-        const resources = txDataXdr.resources();
-        const instrValue = resources.instructions();
-        const readValue = resources.readBytes();
-        const writeValue = resources.writeBytes();
 
         dispatch({
           type: 'SUCCESS',
-          minResourceFee: simResult.minResourceFee,
-          breakdown: {
-            instructions: typeof instrValue === 'number' ? instrValue : Number(instrValue),
-            readBytes: typeof readValue === 'number' ? readValue : Number(readValue),
-            writeBytes: typeof writeValue === 'number' ? writeValue : Number(writeValue),
-          },
+          minResourceFee: result.minResourceFee,
+          breakdown: result.breakdown,
+          estimatedAt: Date.now(),
+          ttlMs,
         });
       } catch (err: unknown) {
         if (cancelled) return;
@@ -249,7 +353,12 @@ export function useSimulateFee(
     rpcUrl,
     contractId,
     networkPassphrase,
+    ttlMs,
   ]);
 
-  return state;
+  return {
+    ...state,
+    ttlMs,
+    refreshFee,
+  };
 }

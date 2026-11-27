@@ -41,4 +41,10 @@ pub enum ContractError {
     NotInitialized        = 17,
     /// Error code 19: subscription grace period has not elapsed.
     GracePeriodNotElapsed = 19,
+    /// Error code 23: schedule change effective time is in the past.
+    EffectiveTimeInPast   = 23,
+    /// Error code 24: schedule change effective time is before current due payment.
+    EffectiveTimeTooEarly = 24,
+    /// Error code 25: no pending schedule change found.
+    NoPendingSchedule     = 25,
 }

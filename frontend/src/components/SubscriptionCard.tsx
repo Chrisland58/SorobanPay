@@ -16,6 +16,8 @@ import { useState, useCallback } from 'react';
 import { truncateAddress, formatInterval, stroopsToTokens } from '@/lib/utils';
 import { buildAndSubmitCancel } from '@/lib/cancel_builder';
 import { CopyButton } from './CopyButton';
+import { ScheduleTime } from './ScheduleTime';
+import { formatScheduleTime } from '@/lib/schedule_time';
 import {
   CONTRACT_ID,
   NETWORK_PASSPHRASE,
@@ -52,12 +54,7 @@ export interface SubscriptionCardProps {
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 function formatDate(unixSeconds: number): string {
-  if (!unixSeconds) return '—';
-  return new Date(unixSeconds * 1000).toLocaleDateString(undefined, {
-    year: 'numeric',
-    month: 'short',
-    day: 'numeric',
-  });
+  return formatScheduleTime(unixSeconds)?.localLabel ?? '—';
 }
 
 function isOverdue(unixSeconds: number): boolean {
@@ -206,7 +203,7 @@ export default function SubscriptionCard({
                   : `Next payment: ${formatDate(nextPayment)}`
               }
             >
-              {formatDate(nextPayment)}
+              <ScheduleTime timestamp={nextPayment} />
               {overdue && (
                 <span
                   className="ml-1.5 text-xs text-yellow-400"

@@ -96,6 +96,26 @@ export interface NetworkConfig {
    * Use this flag to guard mainnet-only UI warnings.
    */
   isProduction: boolean;
+
+  /**
+   * Deployed Soroban contract address for this specific network.
+   */
+  contractId?: string;
+}
+
+// ── Contract Configuration Status ─────────────────────────────────────────────
+
+export type ContractConfigStatus =
+  | 'ready'
+  | 'network-mismatch'
+  | 'missing-config'
+  | 'refreshing';
+
+export interface ContractConfigState {
+  status: ContractConfigStatus;
+  contractId: string | null;
+  network: StellarNetwork;
+  error?: string;
 }
 
 // ── Canonical network definitions ─────────────────────────────────────────────
@@ -203,4 +223,110 @@ export function getNetworkConfig(): NetworkConfig {
  */
 export function isStellarNetwork(value: unknown): value is StellarNetwork {
   return value === 'testnet' || value === 'mainnet';
+}
+
+// ── Contract Network Synchronization & Invalidation ─────────────────────────
+
+const contractCache = new Map<string, string>();
+const networkListeners = new Set<(network: StellarNetwork) => void>();
+
+/**
+ * Register a listener for network changes.
+ */
+export function onNetworkChange(callback: (network: StellarNetwork) => void): () => void {
+  networkListeners.add(callback);
+  return () => {
+    networkListeners.delete(callback);
+  };
+}
+
+/**
+ * Clear cached contract configurations and notify listeners that dependent data must be refreshed.
+ */
+export function invalidateContractCache(newNetwork?: StellarNetwork): void {
+  contractCache.clear();
+  if (newNetwork && isStellarNetwork(newNetwork)) {
+    for (const listener of networkListeners) {
+      try {
+        listener(newNetwork);
+      } catch (err) {
+        console.error('[network_config] Error in network listener:', err);
+      }
+    }
+  }
+}
+
+/**
+ * Resolve contract address for a given network.
+ * Priority:
+ * 1. Network-specific env var (e.g. NEXT_PUBLIC_CONTRACT_ID_MAINNET / NEXT_PUBLIC_CONTRACT_ID_TESTNET)
+ * 2. General NEXT_PUBLIC_CONTRACT_ID
+ * 3. NETWORK_CONFIGS[network].contractId
+ */
+export function resolveContractIdForNetwork(network: StellarNetwork): string | null {
+  const envSpecific =
+    network === 'mainnet'
+      ? process.env.NEXT_PUBLIC_CONTRACT_ID_MAINNET?.trim()
+      : process.env.NEXT_PUBLIC_CONTRACT_ID_TESTNET?.trim();
+
+  if (envSpecific) return envSpecific;
+
+  const general = process.env.NEXT_PUBLIC_CONTRACT_ID?.trim();
+  if (general) return general;
+
+  return NETWORK_CONFIGS[network].contractId ?? null;
+}
+
+/**
+ * Retrieve the current contract configuration state for the given or active network.
+ */
+export function getContractConfig(activeWalletNetwork?: StellarNetwork | null): ContractConfigState {
+  const currentNetwork = resolveActiveNetwork();
+
+  // If wallet reported a network and it does not match app network
+  if (activeWalletNetwork && activeWalletNetwork !== currentNetwork) {
+    return {
+      status: 'network-mismatch',
+      contractId: null,
+      network: currentNetwork,
+      error: `Wallet is on ${activeWalletNetwork} while app requires ${currentNetwork}.`,
+    };
+  }
+
+  const contractId = resolveContractIdForNetwork(currentNetwork);
+  if (!contractId) {
+    return {
+      status: 'missing-config',
+      contractId: null,
+      network: currentNetwork,
+      error: `Contract configuration missing for ${currentNetwork}.`,
+    };
+  }
+
+  return {
+    status: 'ready',
+    contractId,
+    network: currentNetwork,
+  };
+}
+
+/**
+ * Guard write operations: asserts that the contract ID is configured and matches the target network.
+ * Throws a descriptive error if the configuration is invalid or mismatched.
+ */
+export function assertContractConfigForNetwork(
+  targetNetwork: StellarNetwork,
+  contractId: string | null | undefined,
+): void {
+  const activeNetwork = resolveActiveNetwork();
+  if (targetNetwork !== activeNetwork) {
+    throw new Error(
+      `Cannot execute write action: Contract network mismatch. Active network is ${activeNetwork}, but transaction targeted ${targetNetwork}.`,
+    );
+  }
+  if (!contractId || !contractId.trim()) {
+    throw new Error(
+      `Cannot execute write action: No contract ID configured for ${targetNetwork}.`,
+    );
+  }
 }

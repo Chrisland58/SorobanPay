@@ -39,11 +39,20 @@ export function correlationIdMiddleware(
   res: Response,
   next: NextFunction,
 ): void {
-  // Accept a forwarded correlation ID (e.g., from an API gateway) or mint a
-  // new UUID. Node 18+ crypto.randomUUID() needs no external dependency.
-  const correlationId =
-    (req.headers['x-correlation-id'] as string | undefined) ??
-    crypto.randomUUID();
+  // Length-check (max 64) and sanitize caller-supplied header to prevent log injection (Issue #1601)
+  const rawHeader = req.headers['x-correlation-id'];
+  let correlationId: string;
+
+  if (
+    typeof rawHeader === 'string' &&
+    rawHeader.length > 0 &&
+    rawHeader.length <= 64 &&
+    /^[a-zA-Z0-9_\-\.:]+$/.test(rawHeader)
+  ) {
+    correlationId = rawHeader;
+  } else {
+    correlationId = crypto.randomUUID();
+  }
 
   req.id = correlationId;
   req.log = logger.child({
@@ -54,6 +63,21 @@ export function correlationIdMiddleware(
 
   // Propagate the correlation ID in the response so callers can reference it.
   res.setHeader('X-Correlation-Id', correlationId);
+
+  // Standard response metadata contract for request correlation (Issue #1601)
+  const originalJson = res.json.bind(res);
+  res.json = function (body: any): Response {
+    if (body && typeof body === 'object' && !Array.isArray(body)) {
+      if (!body.correlationId && !body.meta?.requestId) {
+        if (body.error !== undefined) {
+          body.correlationId = correlationId;
+        } else {
+          body.meta = { ...(body.meta || {}), requestId: correlationId, timestamp: new Date().toISOString() };
+        }
+      }
+    }
+    return originalJson(body);
+  };
 
   req.log.info({ event: 'request.received' });
 

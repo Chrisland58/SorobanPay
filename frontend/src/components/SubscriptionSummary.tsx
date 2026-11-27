@@ -20,6 +20,14 @@ export interface SubscriptionSummaryProps {
   interval: string;
   isValid: boolean;
   getLabel?: (address: string) => string | null;
+  /** True when displaying cached summary data while refresh failed (Issue #1581) */
+  isStale?: boolean;
+  /** Timestamp (ms) when data was last updated */
+  lastUpdated?: number | null;
+  /** Error message from recent refresh attempt */
+  refreshError?: string | null;
+  /** Optional callback to retry data refresh */
+  onRefresh?: () => void;
 }
 
 /**
@@ -33,6 +41,10 @@ export function SubscriptionSummary({
   interval,
   isValid,
   getLabel,
+  isStale = false,
+  lastUpdated,
+  refreshError,
+  onRefresh,
 }: SubscriptionSummaryProps) {
   if (!isValid || !merchantAddress || !tokenAddress || !amount || !interval) {
     return null;
@@ -46,14 +58,49 @@ export function SubscriptionSummary({
     <div
       role="region"
       aria-labelledby="summary-heading"
-      className="mb-4 rounded-lg bg-blue-900/20 border border-blue-600/40 p-4 space-y-3"
+      className={`mb-4 rounded-lg border p-4 space-y-3 transition-colors ${
+        isStale
+          ? "bg-amber-950/20 border-amber-600/50"
+          : "bg-blue-900/20 border-blue-600/40"
+      }`}
     >
-      <h3
-        id="summary-heading"
-        className="text-xs font-semibold uppercase tracking-widest text-blue-300"
-      >
-        Subscription Summary
-      </h3>
+      <div className="flex items-center justify-between">
+        <h3
+          id="summary-heading"
+          className={`text-xs font-semibold uppercase tracking-widest ${
+            isStale ? "text-amber-300" : "text-blue-300"
+          }`}
+        >
+          Subscription Summary
+        </h3>
+
+        {/* Stale data indicator (Issue #1581) */}
+        {isStale && (
+          <div className="flex items-center gap-2">
+            <span
+              role="status"
+              className="inline-flex items-center gap-1 rounded bg-amber-900/60 border border-amber-500/60 px-2 py-0.5 text-xs font-medium text-amber-200"
+            >
+              <span aria-hidden="true">⚠️</span> Stale (cached)
+            </span>
+            {onRefresh && (
+              <button
+                type="button"
+                onClick={onRefresh}
+                className="text-xs text-amber-300 hover:text-amber-200 underline focus:outline-none"
+              >
+                Refresh
+              </button>
+            )}
+          </div>
+        )}
+      </div>
+
+      {refreshError && isStale && (
+        <p className="text-xs text-amber-300/80">
+          Showing last known values. Network refresh failed: {refreshError}
+        </p>
+      )}
 
       <div className="grid grid-cols-1 gap-3 text-sm">
         {/* Merchant */}

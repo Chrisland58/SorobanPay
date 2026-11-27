@@ -29,6 +29,9 @@ set -euo pipefail
 
 RUNBOOK_URL="${RUNBOOK_URL:-docs/operations.md#10-failed-rollback-escalation-runbook}"
 CHECKPOINT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/checkpoints"
+DEPLOY_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+MANIFEST_FILE="${DEPLOY_DIR}/deployments.json"
+IMAGE_REPO="${IMAGE_REPO:-ghcr.io/chrisland58/sorobanpay}"
 mkdir -p "$CHECKPOINT_DIR"
 
 # Configurable timeouts and retries for post-rollback health gating
@@ -39,21 +42,47 @@ DEFAULT_HEALTH_URL="http://localhost:3001/health/ready"
 
 COMMAND="${1:---help}"
 
+validate_digest() {
+  local digest="${1:-}"
+  if [[ ! "$digest" =~ ^sha256:[a-f0-9]{64}$ ]]; then
+    echo "Error: Invalid or mutable image reference '${digest}'. Expected immutable digest format 'sha256:<64-hex-chars>'." >&2
+    return 1
+  fi
+}
+
 create_checkpoint() {
   local contract_id="${2:-unknown}"
   local image_tag="${3:-latest}"
+  local image_digest="${4:-}"
+  local source_revision="${5:-$(git rev-parse HEAD 2>/dev/null || echo "unknown")}"
+
+  if [ -n "$image_digest" ]; then
+    validate_digest "$image_digest"
+  fi
+
   local timestamp
   timestamp="$(date +%Y%m%d_%H%M%S)"
   local git_sha
   git_sha="$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")"
   local checkpoint_file="${CHECKPOINT_DIR}/checkpoint_${timestamp}_${git_sha}.json"
 
+  local previous_digest=""
+  local latest_checkpoint
+  latest_checkpoint="$(ls -1t "$CHECKPOINT_DIR"/checkpoint_*.json 2>/dev/null | head -n 1 || true)"
+  if [ -n "$latest_checkpoint" ] && [ -f "$latest_checkpoint" ]; then
+    previous_digest="$(grep -o '"image_digest":[[:space:]]*"[^"]*"' "$latest_checkpoint" | head -n 1 | cut -d'"' -f4 || true)"
+  fi
+
   cat > "$checkpoint_file" <<EOF
 {
   "timestamp": "${timestamp}",
   "git_sha": "${git_sha}",
+  "source_revision": "${source_revision}",
   "contract_id": "${contract_id}",
   "image_tag": "${image_tag}",
+  "image_digest": "${image_digest}",
+  "previous_digest": "${previous_digest}",
+  "validated": $([ -n "$image_digest" ] && echo "true" || echo "false"),
   "deployments": [
     "sorobanpay-api",
     "sorobanpay-indexer",
@@ -63,6 +92,74 @@ create_checkpoint() {
 EOF
 
   echo "Checkpoint created: ${checkpoint_file}"
+}
+
+record_deployment() {
+  local env="${2:-testnet}"
+  local image_digest="${3:-}"
+  local source_revision="${4:-$(git rev-parse HEAD 2>/dev/null || echo "unknown")}"
+  local release_notes_file="${5:-}"
+
+  validate_digest "$image_digest"
+
+  local updated_at
+  updated_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+  python3 - "$MANIFEST_FILE" "$env" "$image_digest" "$source_revision" "$updated_at" <<'PY'
+import json, sys, os
+
+manifest_path, env, digest, rev, updated_at = sys.argv[1:6]
+data = {}
+if os.path.exists(manifest_path):
+    with open(manifest_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+env_data = data.get(env, {})
+prev_digest = env_data.get("current_digest", "")
+if prev_digest == digest:
+    prev_digest = env_data.get("previous_digest", "")
+
+data[env] = {
+    "current_digest": digest,
+    "previous_digest": prev_digest,
+    "source_revision": rev,
+    "updated_at": updated_at,
+}
+
+with open(manifest_path, "w", encoding="utf-8") as f:
+    json.dump(data, f, indent=2)
+    f.write("\n")
+PY
+
+  echo "Deployment recorded for ${env}: digest=${image_digest}, source_revision=${source_revision}"
+
+  if [ -n "$release_notes_file" ]; then
+    cat >> "$release_notes_file" <<EOF
+### Deployment Record (${env})
+- **Deployed Digest:** \`${image_digest}\`
+- **Source Revision:** \`${source_revision}\`
+- **Recorded At:** ${updated_at}
+EOF
+  fi
+}
+
+show_status() {
+  local env="${2:-testnet}"
+  if [ ! -f "$MANIFEST_FILE" ]; then
+    echo "No deployment manifest found at ${MANIFEST_FILE}."
+    return 1
+  fi
+  python3 - "$MANIFEST_FILE" "$env" <<'PY'
+import json, sys
+with open(sys.argv[1], "r", encoding="utf-8") as f:
+    data = json.load(f)
+env_data = data.get(sys.argv[2], {})
+print(f"Environment: {sys.argv[2]}")
+print(f"Current Digest: {env_data.get('current_digest', 'none')}")
+print(f"Previous Digest: {env_data.get('previous_digest', 'none')}")
+print(f"Source Revision: {env_data.get('source_revision', 'none')}")
+print(f"Updated At: {env_data.get('updated_at', 'none')}")
+PY
 }
 
 list_checkpoints() {
@@ -269,29 +366,47 @@ gate_post_rollback_health() {
 
 execute_rollback() {
   local target="${2:-}"
-  local health_url="${3:-$DEFAULT_HEALTH_URL}"
+  local rollback_digest=""
+  local source_revision="unknown"
+
   echo "Initiating rollback procedure..."
-  if [ -n "$target" ] && [ -f "$target" ]; then
+  if [ -n "$target" ]; then
+    if [ ! -f "$target" ]; then
+      echo "Error: Checkpoint file not found: $target" >&2
+      return 1
+    fi
     echo "Restoring from checkpoint: $target"
+    rollback_digest="$(grep -o '"image_digest":[[:space:]]*"[^"]*"' "$target" | head -n 1 | cut -d'"' -f4 || true)"
+    source_revision="$(grep -o '"source_revision":[[:space:]]*"[^"]*"' "$target" | head -n 1 | cut -d'"' -f4 || echo "unknown")"
   else
-    echo "Rolling back to previous Kubernetes deployment revisions..."
+    local latest_checkpoint
+    latest_checkpoint="$(ls -1t "$CHECKPOINT_DIR"/checkpoint_*.json 2>/dev/null | head -n 1 || true)"
+    if [ -n "$latest_checkpoint" ] && [ -f "$latest_checkpoint" ]; then
+      echo "Restoring from latest checkpoint: $latest_checkpoint"
+      rollback_digest="$(grep -o '"previous_digest":[[:space:]]*"[^"]*"' "$latest_checkpoint" | head -n 1 | cut -d'"' -f4 || true)"
+      if [ -z "$rollback_digest" ]; then
+        rollback_digest="$(grep -o '"image_digest":[[:space:]]*"[^"]*"' "$latest_checkpoint" | head -n 1 | cut -d'"' -f4 || true)"
+      fi
+      source_revision="$(grep -o '"source_revision":[[:space:]]*"[^"]*"' "$latest_checkpoint" | head -n 1 | cut -d'"' -f4 || echo "unknown")"
+    fi
   fi
+
+  if [ -z "$rollback_digest" ]; then
+    echo "Error: No previously validated immutable digest found for rollback." >&2
+    return 1
+  fi
+
+  validate_digest "$rollback_digest"
+  echo "Verified immutable rollback digest: ${rollback_digest} (source_revision: ${source_revision})"
 
   # Roll back Kubernetes deployments if kubectl is available
   if command -v kubectl >/dev/null 2>&1; then
-    echo "Rolling back sorobanpay-api..."
-    kubectl rollout undo deployment/sorobanpay-api -n sorobanpay || true
-    echo "Rolling back sorobanpay-indexer..."
-    kubectl rollout undo deployment/sorobanpay-indexer -n sorobanpay || true
-    echo "Rolling back sorobanpay-webhook-worker..."
-    kubectl rollout undo deployment/sorobanpay-webhook-worker -n sorobanpay || true
-
-    echo "Waiting for rollout undo to complete on deployments..."
-    kubectl rollout status deployment/sorobanpay-api -n sorobanpay --timeout=120s || true
-    kubectl rollout status deployment/sorobanpay-indexer -n sorobanpay --timeout=120s || true
-    kubectl rollout status deployment/sorobanpay-webhook-worker -n sorobanpay --timeout=120s || true
+    for dep in sorobanpay-api sorobanpay-indexer sorobanpay-webhook-worker; do
+      echo "Rolling back ${dep} to ${IMAGE_REPO}@${rollback_digest}..."
+      kubectl set image "deployment/${dep}" "${dep}=${IMAGE_REPO}@${rollback_digest}" -n sorobanpay || true
+    done
   else
-    echo "[dry-run] kubectl not found in local environment. Simulated rollback commands executed."
+    echo "[dry-run] kubectl not found in local environment. Simulated rollback to ${IMAGE_REPO}@${rollback_digest} executed."
   fi
 
   # Gate rollback completion on application and dependency readiness
@@ -328,6 +443,12 @@ case "$COMMAND" in
   --create-checkpoint)
     create_checkpoint "$@"
     ;;
+  --record-deployment)
+    record_deployment "$@"
+    ;;
+  --status)
+    show_status "$@"
+    ;;
   --list)
     list_checkpoints
     ;;
@@ -342,6 +463,6 @@ case "$COMMAND" in
     auto_verify_and_rollback "$@"
     ;;
   *)
-    echo "Usage: bash deploy/rollback.sh [--create-checkpoint | --list | --rollback [checkpoint] [health_url] | --verify-health [health_url] | --auto-verify [health_url]]"
+    echo "Usage: bash deploy/rollback.sh [--create-checkpoint | --record-deployment | --status | --list | --rollback | --auto-verify]"
     ;;
 esac

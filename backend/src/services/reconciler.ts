@@ -427,3 +427,125 @@ export async function runReconciledWithAudit(
 
   return { result, auditEntries };
 }
+
+// ── Payment Event Reconciliation Service (Issue #1598) ────────────────────────
+
+export type PaymentDiscrepancyType =
+  | 'MISSING_PAYMENT_ROW'
+  | 'DUPLICATE_PAYMENT_ROW'
+  | 'AMOUNT_MISMATCH'
+  | 'IDEMPOTENCY_KEY_ORPHAN';
+
+export interface PaymentDiscrepancy {
+  category: PaymentDiscrepancyType;
+  txHash: string;
+  subscriber: string;
+  merchant: string;
+  expectedAmount?: string;
+  actualAmount?: string;
+  details: string;
+}
+
+export interface PaymentReconciliationReport {
+  dryRun: boolean;
+  totalEventsProcessed: number;
+  totalPaymentsProcessed: number;
+  discrepancies: PaymentDiscrepancy[];
+  summary: Record<PaymentDiscrepancyType, number>;
+}
+
+/**
+ * Compare on-chain payment events against recorded payment rows and idempotency keys.
+ * Deterministic and read-only by default.
+ */
+export function reconcilePaymentsAndEvents(
+  events: Array<{ txHash: string; subscriber: string; merchant: string; amount: bigint | string; type: string }>,
+  payments: Array<{ txHash: string; subscriber: string; merchant: string; amount: bigint | string }>,
+  idempotencyKeys: Array<{ key: string; txHash?: string | null; status: string }> = [],
+  chunkSize = 1000,
+): PaymentReconciliationReport {
+  const executedEvents = events.filter((e) => e.type === 'executed');
+  const discrepancies: PaymentDiscrepancy[] = [];
+
+  const summary: Record<PaymentDiscrepancyType, number> = {
+    MISSING_PAYMENT_ROW: 0,
+    DUPLICATE_PAYMENT_ROW: 0,
+    AMOUNT_MISMATCH: 0,
+    IDEMPOTENCY_KEY_ORPHAN: 0,
+  };
+
+  const paymentsByHash = new Map<string, typeof payments>();
+  for (let i = 0; i < payments.length; i += chunkSize) {
+    const chunk = payments.slice(i, i + chunkSize);
+    for (const p of chunk) {
+      const list = paymentsByHash.get(p.txHash) || [];
+      list.push(p);
+      paymentsByHash.set(p.txHash, list);
+    }
+  }
+
+  const eventHashes = new Set<string>();
+  for (let i = 0; i < executedEvents.length; i += chunkSize) {
+    const chunk = executedEvents.slice(i, i + chunkSize);
+    for (const ev of chunk) {
+      eventHashes.add(ev.txHash);
+      const matches = paymentsByHash.get(ev.txHash);
+      if (!matches || matches.length === 0) {
+        discrepancies.push({
+          category: 'MISSING_PAYMENT_ROW',
+          txHash: ev.txHash,
+          subscriber: ev.subscriber,
+          merchant: ev.merchant,
+          expectedAmount: ev.amount.toString(),
+          details: 'Executed contract event has no matching payment record in database',
+        });
+        summary.MISSING_PAYMENT_ROW++;
+      } else {
+        if (matches.length > 1) {
+          discrepancies.push({
+            category: 'DUPLICATE_PAYMENT_ROW',
+            txHash: ev.txHash,
+            subscriber: ev.subscriber,
+            merchant: ev.merchant,
+            details: `Found ${matches.length} duplicate payment rows for transaction hash`,
+          });
+          summary.DUPLICATE_PAYMENT_ROW++;
+        }
+        const first = matches[0];
+        if (first.amount.toString() !== ev.amount.toString()) {
+          discrepancies.push({
+            category: 'AMOUNT_MISMATCH',
+            txHash: ev.txHash,
+            subscriber: ev.subscriber,
+            merchant: ev.merchant,
+            expectedAmount: ev.amount.toString(),
+            actualAmount: first.amount.toString(),
+            details: `Recorded amount (${first.amount}) diverges from on-chain event amount (${ev.amount})`,
+          });
+          summary.AMOUNT_MISMATCH++;
+        }
+      }
+    }
+  }
+
+  for (const idemp of idempotencyKeys) {
+    if (idemp.txHash && !eventHashes.has(idemp.txHash) && idemp.status === 'completed') {
+      discrepancies.push({
+        category: 'IDEMPOTENCY_KEY_ORPHAN',
+        txHash: idemp.txHash,
+        subscriber: '',
+        merchant: '',
+        details: `Completed idempotency key "${idemp.key}" has no matching on-chain event`,
+      });
+      summary.IDEMPOTENCY_KEY_ORPHAN++;
+    }
+  }
+
+  return {
+    dryRun: true,
+    totalEventsProcessed: executedEvents.length,
+    totalPaymentsProcessed: payments.length,
+    discrepancies,
+    summary,
+  };
+}

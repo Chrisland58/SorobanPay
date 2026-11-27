@@ -19,6 +19,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { Address } from "@stellar/stellar-sdk";
 import { AddressDisplay } from "@/components/AddressDisplay";
+import { StatusBadge as SharedStatusBadge, type StatusVariant } from "@/components/StatusBadge";
 import { formatTokenWithSymbol } from "@/lib/token_decimals";
 import { SkeletonSubscriptionList, useMinLoadingDuration } from "@/components/Skeleton";
 
@@ -135,40 +136,19 @@ function formatFrequency(intervalSeconds: number): string {
 
 // ─── Status Indicator Components ────────────────────────────────────────────────
 
+const STATUS_CONFIG: Record<
+  "active" | "paused" | "overdue" | "pending",
+  { variant: StatusVariant; label: string }
+> = {
+  active: { variant: "success", label: "Active" },
+  paused: { variant: "warning", label: "Paused" },
+  overdue: { variant: "error", label: "Overdue" },
+  pending: { variant: "info", label: "Pending" },
+};
+
 function StatusBadge({ status }: { status: "active" | "paused" | "overdue" | "pending" }) {
-  const styles = {
-    active: "bg-green-900/50 border-green-600/50 text-green-300",
-    paused: "bg-yellow-900/50 border-yellow-600/50 text-yellow-300",
-    overdue: "bg-red-900/50 border-red-600/50 text-red-300",
-    pending: "bg-blue-900/50 border-blue-600/50 text-blue-300",
-  };
-
-  const labels = {
-    active: "Active",
-    paused: "Paused",
-    overdue: "Overdue",
-    pending: "Pending",
-  };
-
-  return (
-    <span
-      className={`inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-semibold border ${styles[status]}`}
-    >
-      <span
-        className={`h-2 w-2 rounded-full ${
-          status === "active"
-            ? "bg-green-400"
-            : status === "paused"
-              ? "bg-yellow-400"
-              : status === "overdue"
-                ? "bg-red-400"
-                : "bg-blue-400"
-        }`}
-        aria-hidden="true"
-      />
-      {labels[status]}
-    </span>
-  );
+  const { variant, label } = STATUS_CONFIG[status];
+  return <SharedStatusBadge variant={variant}>{label}</SharedStatusBadge>;
 }
 
 // ─── Subscription Card ──────────────────────────────────────────────────────────

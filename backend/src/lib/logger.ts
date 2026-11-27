@@ -29,7 +29,15 @@ export function redactAddress(address: string): string {
   return `${prefix}...${suffix}`;
 }
 
-/** Redact a Stellar secret seed, JWT, Bearer token, or private key. */
+/** Redact an email address: keep first char and domain, mask the rest. */
+export function redactEmail(email: string): string {
+  if (!email || !email.includes('@')) return email;
+  const [local, domain] = email.split('@');
+  if (local.length <= 2) return `*@${domain}`;
+  return `${local[0]}***${local[local.length - 1]}@${domain}`;
+}
+
+/** Redact a Stellar secret seed or private token. */
 export function redactSecret(secret: string): string {
   if (!secret) return secret;
   // Stellar secret seed: starts with S, 56 chars
@@ -42,42 +50,27 @@ export function redactSecret(secret: string): string {
   return '[REDACTED]';
 }
 
-/** Redact email address: keep first char and domain, mask user identifier */
-export function redactEmail(email: string): string {
-  const atIndex = email.indexOf('@');
-  if (atIndex <= 1) return '***@' + (email.slice(atIndex + 1) || 'redacted.com');
-  return `${email[0]}***@${email.slice(atIndex + 1)}`;
-}
+const SENSITIVE_KEY_PATTERN =
+  /^(password|secret|seed|authorization|token|refreshtoken|accesstoken|apikey|api_key|privatekey|private_key|webhooksecret|webhook_secret|cookie|signature|ssn|card|cvv|creditcard|email)$/i;
 
-/** Redact connection URI (strips password) */
-export function redactUri(uri: string): string {
-  return uri.replace(
-    /((?:postgres|postgresql|mysql|mongodb|redis):\/\/[^:\s]+):([^@\s]+)@/i,
-    '$1:[REDACTED]@',
-  );
-}
+const STRING_SECRET_PATTERNS = [
+  { regex: /S[A-Z2-7]{55}/g, replace: 'S...[REDACTED_SEED]' },
+  { regex: /Bearer\s+[A-Za-z0-9._~+/-]+=*/gi, replace: 'Bearer [REDACTED]' },
+  { regex: /ey[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/g, replace: '[REDACTED_JWT]' },
+];
 
 /** Recursively redact sensitive fields from telemetry or log payload objects. */
 export function redactTelemetryPayload<T>(payload: T): T {
   if (payload === null || payload === undefined) return payload;
   if (typeof payload === 'string') {
-    // Stellar secret seed
-    if (/^S[A-Z2-7]{55}$/.test(payload)) {
-      return redactSecret(payload) as unknown as T;
+    let str = payload;
+    for (const { regex, replace } of STRING_SECRET_PATTERNS) {
+      str = str.replace(regex, replace);
     }
-    // Database URL
-    if (/(?:postgres|postgresql|mysql|mongodb|redis):\/\/[^:\s]+:[^@\s]+@/i.test(payload)) {
-      return redactUri(payload) as unknown as T;
+    if (/^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/.test(str)) {
+      return redactEmail(str) as unknown as T;
     }
-    // Bearer token
-    if (/^Bearer\s+[a-zA-Z0-9_.\-~+/]+=*$/i.test(payload)) {
-      return 'Bearer [REDACTED]' as unknown as T;
-    }
-    // JWT
-    if (/^eyJ[a-zA-Z0-9_-]{10,}\.eyJ[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,}$/.test(payload)) {
-      return '[REDACTED_JWT]' as unknown as T;
-    }
-    return payload;
+    return str as unknown as T;
   }
   if (Array.isArray(payload)) {
     return payload.map((item) => redactTelemetryPayload(item)) as unknown as T;
@@ -95,7 +88,7 @@ export function redactTelemetryPayload<T>(payload: T): T {
       ) {
         output[key] = redactAddress(value);
       } else if (
-        key.toLowerCase() === 'email' &&
+        key.toLowerCase().includes('email') &&
         typeof value === 'string'
       ) {
         output[key] = redactEmail(value);
@@ -144,7 +137,12 @@ function buildTransport(): pino.TransportSingleOptions | undefined {
 
 const transport = buildTransport();
 
-/** Root application logger with automatic serializer-level redaction. */
+function sanitizeError(err: unknown) {
+  const serialized = pino.stdSerializers.err(err as any);
+  return redactTelemetryPayload(serialized);
+}
+
+/** Root application logger. */
 export const logger = pino(
   {
     level: logLevel,
@@ -153,54 +151,35 @@ export const logger = pino(
     redact: {
       paths: [
         'password',
-        'passwd',
-        'secret',
-        'secret_key',
-        'secretKey',
-        'private_key',
-        'privateKey',
-        'seed',
-        'secret_seed',
-        'token',
-        'accessToken',
-        'access_token',
-        'refreshToken',
-        'refresh_token',
-        'authorization',
-        'apiKey',
-        'api_key',
-        'webhookSecret',
-        'webhook_secret',
-        'admin_jwt_secret',
-        'cookie',
-        'session',
-        'sessionId',
-        'creditCard',
-        'credit_card',
-        'cardNumber',
-        'cvv',
-        'cvc',
-        'ssn',
         '*.password',
-        '*.passwd',
+        '*.*.password',
+        'secret',
         '*.secret',
-        '*.secret_key',
-        '*.secretKey',
-        '*.private_key',
-        '*.privateKey',
+        '*.*.secret',
+        'seed',
         '*.seed',
+        '*.*.seed',
+        'token',
         '*.token',
+        '*.*.token',
+        'refreshToken',
+        '*.refreshToken',
+        'accessToken',
+        '*.accessToken',
+        'authorization',
         '*.authorization',
-        '*.apiKey',
-        '*.api_key',
-        '*.webhookSecret',
-        '*.webhook_secret',
+        'headers.authorization',
+        'headers.cookie',
+        'req.headers.authorization',
+        'req.headers.cookie',
+        'signature',
+        '*.signature',
       ],
       censor: '[REDACTED]',
     },
     serializers: {
-      err: pino.stdSerializers.err,
-      error: pino.stdSerializers.err,
+      err: sanitizeError,
+      error: sanitizeError,
     },
   },
   transport ? pino.transport(transport) : undefined,

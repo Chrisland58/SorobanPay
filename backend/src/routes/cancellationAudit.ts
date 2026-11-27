@@ -150,15 +150,9 @@ router.get('/export', async (req: Request, res: Response) => {
       'createdAt',
     ] as const;
 
-    /** Escape a CSV cell value: wrap in quotes if it contains commas, quotes, or newlines. */
-    const escapeCell = (val: unknown): string => {
-      if (val === null || val === undefined) return '';
-      const str = String(val);
-      if (str.includes(',') || str.includes('"') || str.includes('\n')) {
-        return `"${str.replace(/"/g, '""')}"`;
-      }
-      return str;
-    };
+import { sanitizeCsvCell } from '../utils/csv';
+
+    const escapeCell = (val: unknown): string => sanitizeCsvCell(val);
 
     const header = CSV_COLUMNS.join(',');
     const rows = result.data.map((r) =>

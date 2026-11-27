@@ -11,6 +11,7 @@
 import { useWallet } from "@/hooks/useWallet";
 import { getNetworkInfo } from "@/lib/runtime_config";
 import { AddressDisplay } from "@/components/AddressDisplay";
+import { NetworkStatusIndicator } from "@/components/NetworkStatusIndicator";
 
 export function PageHeader() {
   const { publicKey, isConnecting, freighterInstalled } = useWallet();
@@ -51,22 +52,14 @@ export function PageHeader() {
             </div>
           </div>
 
-          {/* Center: Status Info (hidden on mobile, shown on tablet+) */}
-          <div className="hidden sm:flex items-center gap-3">
-            {/* Network Badge */}
-            <div
-              className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-lg border ${networkBadgeStyle}`}
-              role="status"
-              aria-label={`Network: ${networkName}`}
-            >
-              <span className="text-sm font-medium">{networkBadgeLabel}</span>
-              <span className="text-xs text-gray-400">
-                {networkName === "Mainnet" ? "Live" : "Test"}
-              </span>
-            </div>
+          {/* Center/Right: Persistent Network Status Indicator (visible on all widths) */}
+          <div className="flex items-center gap-3 min-w-0">
+            <NetworkStatusIndicator />
 
-            {/* Divider */}
-            <div className="h-6 w-px bg-gray-300 dark:bg-gray-700" />
+            {/* Wallet Status (shown on tablet+) */}
+            <div className="hidden sm:flex items-center gap-3">
+              {/* Divider */}
+              <div className="h-6 w-px bg-gray-300 dark:bg-gray-700" />
 
             {/* Wallet Status */}
             <div
@@ -98,16 +91,7 @@ export function PageHeader() {
                 )}
               </span>
             </div>
-          </div>
-
-          {/* Right: Network indicator (mobile view) */}
-          <div className="sm:hidden">
-            <span
-              className={`inline-block w-3 h-3 rounded-full ${
-                isProduction ? "bg-red-500" : "bg-yellow-500"
-              }`}
-              title={networkName}
-            />
+            </div>
           </div>
         </div>
 
