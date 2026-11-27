@@ -451,6 +451,9 @@ to run `migrate` multiple times as a precaution.
 
 ## 5. Frontend and backend compatibility matrix
 
+> [!NOTE]
+> For the authoritative compatibility matrix across API versions, contract storage schemas, frontend releases, and the explicit End-of-Support (EOS) policy, consult [docs/compatibility-matrix.md](compatibility-matrix.md).
+
 ### Contract interface stability in v1.x.x
 
 The following surfaces are **guaranteed stable** across all v1.x.x releases:
