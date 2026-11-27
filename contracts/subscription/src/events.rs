@@ -333,6 +333,44 @@ pub fn emit_contract_migrated(env: &Env, admin: &Address, new_version: u32) {
     );
 }
 
+/// Emit `migration_step` when a bounded batch migration step finishes successfully.
+///
+/// Topics: (symbol("migration_step"), admin)
+/// Data:   (processed_records, batch_cursor)
+pub fn emit_migration_step_completed(
+    env: &Env,
+    admin: &Address,
+    processed_records: u32,
+    batch_cursor: u32,
+) {
+    env.events().publish(
+        (
+            Symbol::new(env, "migration_step"),
+            admin.clone(),
+        ),
+        (processed_records, batch_cursor),
+    );
+}
+
+/// Emit `migration_paused` when bounded migration encounters an invalid record.
+///
+/// Topics: (symbol("migration_paused"), admin)
+/// Data:   (failed_record_index, error_code)
+pub fn emit_migration_interrupted(
+    env: &Env,
+    admin: &Address,
+    failed_record_index: u32,
+    error_code: u32,
+) {
+    env.events().publish(
+        (
+            Symbol::new(env, "migration_paused"),
+            admin.clone(),
+        ),
+        (failed_record_index, error_code),
+    );
+}
+
 /// Emit the `subscription_transferred` event after a subscription has been atomically
 /// moved from one merchant address to another.
 ///

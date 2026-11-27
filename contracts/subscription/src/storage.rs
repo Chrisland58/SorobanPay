@@ -35,6 +35,7 @@ pub fn subscription_key(env: &Env, subscriber: &Address, merchant: &Address) -> 
 
 /// Storage keys used by the contract.
 #[contracttype]
+#[derive(Clone)]
 pub enum DataKey {
     /// Per-subscription record, keyed by sha256(subscriber_xdr ++ merchant_xdr).
     /// Compact 32-byte key instead of the old two-Address tuple (~70 bytes).
@@ -53,7 +54,52 @@ pub enum DataKey {
 
     /// Optional maximum subscription amount for this deployment.
     MaxAmount,
+
+    /// Optional admin configuration (rate limits, caps).
+    AdminConfig,
+
+    /// Per-merchant active subscriber count.
+    MerchantSubscriberCount(Address),
+
+    /// Migration progress marker tracking resumable bounded migrations.
+    MigrationProgress,
 }
+
+/// Migration execution status.
+#[contracttype]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[repr(u32)]
+pub enum MigrationStatus {
+    /// No migration currently running.
+    Idle = 0,
+    /// Migration actively progressing in bounded steps.
+    InProgress = 1,
+    /// Migration halted due to invalid data or interruption; ready to resume.
+    Paused = 2,
+    /// All migration batches completed successfully.
+    Completed = 3,
+}
+
+/// Persistent progress marker for bounded schema migrations.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MigrationProgress {
+    /// Current execution state.
+    pub status: MigrationStatus,
+    /// Total number of records successfully validated and migrated.
+    pub processed_records: u32,
+    /// Total target records registered for this migration cycle.
+    pub total_records: u32,
+    /// Cursor index representing the next record to process in the input batch.
+    pub batch_cursor: u32,
+    /// Index in the current batch where an error occurred, if paused.
+    pub failed_record_index: Option<u32>,
+    /// Stable error code that caused the migration to pause.
+    pub last_error_code: Option<u32>,
+}
+
+/// Maximum number of records that can be migrated in a single bounded invocation.
+pub const MAX_MIGRATION_STEP: u32 = 50;
 
 /// Persistent on-chain record for a subscription.
 ///
@@ -177,4 +223,32 @@ pub fn set_subscriber_count(env: &Env, merchant: &Address, count: u32) {
             MIN_TTL_LEDGERS,
             MAX_TTL_LEDGERS,
         );
+}
+
+// ─── Migration progress helpers (#1613) ──────────────────────────────────────
+
+/// Load current migration progress marker from instance storage.
+/// Returns an `Idle` state if no migration progress has been recorded.
+pub fn get_migration_progress(env: &Env) -> MigrationProgress {
+    env.storage()
+        .instance()
+        .get(&DataKey::MigrationProgress)
+        .unwrap_or(MigrationProgress {
+            status: MigrationStatus::Idle,
+            processed_records: 0,
+            total_records: 0,
+            batch_cursor: 0,
+            failed_record_index: None,
+            last_error_code: None,
+        })
+}
+
+/// Persist migration progress marker to instance storage.
+pub fn set_migration_progress(env: &Env, progress: &MigrationProgress) {
+    env.storage().instance().set(&DataKey::MigrationProgress, progress);
+}
+
+/// Clear migration progress marker from instance storage.
+pub fn clear_migration_progress(env: &Env) {
+    env.storage().instance().remove(&DataKey::MigrationProgress);
 }

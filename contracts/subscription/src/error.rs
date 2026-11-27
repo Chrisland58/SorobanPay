@@ -41,4 +41,10 @@ pub enum ContractError {
     NotInitialized        = 17,
     /// Error code 19: subscription grace period has not elapsed.
     GracePeriodNotElapsed = 19,
+    /// Error code 20: invalid legacy record encountered during schema migration (#1613).
+    InvalidLegacyRecord   = 20,
+    /// Error code 21: migration step size exceeds bounded batch limit (#1613).
+    MigrationStepTooLarge = 21,
+    /// Error code 22: schema migration already completed for this batch (#1613).
+    MigrationAlreadyCompleted = 22,
 }
