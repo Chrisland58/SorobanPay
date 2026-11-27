@@ -3,6 +3,9 @@
 Everything you need to run the contract tests, build the WASM, start the
 frontend, and connect Freighter — all from a clean checkout.
 
+> [!NOTE]
+> For the end-to-end local testnet deployment, database seeding, Freighter browser interaction, and reset behavior checkpoints, see [Local Testnet Workflow](local-testnet-workflow.md).
+
 ---
 
 ## Prerequisites
