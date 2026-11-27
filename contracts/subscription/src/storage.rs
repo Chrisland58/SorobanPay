@@ -35,6 +35,7 @@ pub fn subscription_key(env: &Env, subscriber: &Address, merchant: &Address) -> 
 
 /// Storage keys used by the contract.
 #[contracttype]
+#[derive(Clone)]
 pub enum DataKey {
     /// Per-subscription record, keyed by sha256(subscriber_xdr ++ merchant_xdr).
     /// Compact 32-byte key instead of the old two-Address tuple (~70 bytes).
@@ -53,7 +54,40 @@ pub enum DataKey {
 
     /// Optional maximum subscription amount for this deployment.
     MaxAmount,
+
+    /// Optional admin configuration (rate limits, caps).
+    AdminConfig,
+
+    /// Per-merchant active subscriber count.
+    MerchantSubscriberCount(Address),
+
+    /// Temporary nonce execution marker.
+    ExecutionMarker(BytesN<32>, u64),
+
+    /// Deduplication record for unique payment execution identifiers (#1610).
+    PaymentDedup(BytesN<32>),
+
+    /// Protocol fee configuration stored in instance storage.
+    ProtocolFeeConfig,
 }
+
+/// Deduplication record stored for an execution identifier within its retention window.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExecutionRecord {
+    /// Unique execution identifier.
+    pub execution_id: BytesN<32>,
+    /// Ledger Unix timestamp when settlement occurred.
+    pub executed_at: u64,
+    /// Amount transferred during settlement.
+    pub amount: i128,
+}
+
+/// Retention window for deduplication records in seconds: 7 days.
+pub const DEDUP_WINDOW_SECONDS: u64 = 7 * 24 * 60 * 60;
+
+/// Bounded TTL for deduplication temporary storage entries: ~7 days at 5-second ledger closes.
+pub const DEDUP_WINDOW_LEDGERS: u32 = (7 * 24 * 60 * 60) / 5;
 
 /// Persistent on-chain record for a subscription.
 ///
@@ -177,4 +211,75 @@ pub fn set_subscriber_count(env: &Env, merchant: &Address, count: u32) {
             MIN_TTL_LEDGERS,
             MAX_TTL_LEDGERS,
         );
+}
+
+// ─── ProtocolFeeConfig ────────────────────────────────────────────────────────
+
+pub const MAX_FEE_BPS: u32 = 500;
+
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct ProtocolFeeConfig {
+    pub fee_bps: u32,
+    pub fee_collector: Address,
+}
+
+pub fn get_protocol_fee_config(env: &Env) -> Option<ProtocolFeeConfig> {
+    env.storage().instance().get(&DataKey::ProtocolFeeConfig)
+}
+
+pub fn set_protocol_fee_config(env: &Env, config: ProtocolFeeConfig) {
+    env.storage().instance().set(&DataKey::ProtocolFeeConfig, &config);
+}
+
+// ─── Execution marker helpers ────────────────────────────────────────────────
+
+pub const MARKER_TTL_LEDGERS: u32 = MAX_TTL_LEDGERS * 2;
+
+pub fn has_execution_marker(env: &Env, hash: &BytesN<32>, nonce: u64) -> bool {
+    let key = DataKey::ExecutionMarker(hash.clone(), nonce);
+    env.storage().temporary().has(&key)
+}
+
+pub fn write_execution_marker(env: &Env, hash: &BytesN<32>, nonce: u64) {
+    let key = DataKey::ExecutionMarker(hash.clone(), nonce);
+    env.storage().temporary().set(&key, &true);
+    env.storage()
+        .temporary()
+        .extend_ttl(&key, MARKER_TTL_LEDGERS, MARKER_TTL_LEDGERS);
+}
+
+// ─── Payment execution identifier deduplication helpers (#1610) ──────────────
+
+/// Derive scoped 32-byte deduplication key from (subscriber, merchant, execution_id).
+pub fn execution_dedup_key(
+    env: &Env,
+    subscriber: &Address,
+    merchant: &Address,
+    execution_id: &BytesN<32>,
+) -> BytesN<32> {
+    let mut preimage = soroban_sdk::Bytes::new(env);
+    preimage.append(&subscriber.to_xdr(env));
+    preimage.append(&merchant.to_xdr(env));
+    preimage.append(&execution_id.to_xdr(env));
+    env.crypto().sha256(&preimage)
+}
+
+/// Retrieve stored execution deduplication record, if present in temporary storage.
+pub fn get_execution_record(env: &Env, key: &BytesN<32>) -> Option<ExecutionRecord> {
+    env.storage().temporary().get(&DataKey::PaymentDedup(key.clone()))
+}
+
+/// Persist deduplication record with bounded retention window TTL in temporary storage.
+pub fn set_execution_record(env: &Env, key: &BytesN<32>, record: &ExecutionRecord) {
+    let data_key = DataKey::PaymentDedup(key.clone());
+    env.storage().temporary().set(&data_key, record);
+    env.storage()
+        .temporary()
+        .extend_ttl(&data_key, DEDUP_WINDOW_LEDGERS, DEDUP_WINDOW_LEDGERS);
+}
+
+/// Remove deduplication record after retention window expiry.
+pub fn remove_execution_record(env: &Env, key: &BytesN<32>) {
+    env.storage().temporary().remove(&DataKey::PaymentDedup(key.clone()));
 }

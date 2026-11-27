@@ -216,6 +216,43 @@ pub fn emit_executed(env: &Env, subscriber: &Address, merchant: &Address, token:
     );
 }
 
+/// Emit `payment_with_id` when payment settles with an explicit deduplication identifier (#1610).
+pub fn emit_payment_executed_with_id(
+    env: &Env,
+    subscriber: &Address,
+    merchant: &Address,
+    token: &Address,
+    amount: i128,
+    execution_id: &BytesN<32>,
+) {
+    env.events().publish(
+        (
+            Symbol::new(env, "payment_with_id"),
+            subscriber.clone(),
+            merchant.clone(),
+            token.clone(),
+        ),
+        (amount, execution_id.clone()),
+    );
+}
+
+/// Emit `dedup_cleaned` when an expired deduplication record is removed (#1610).
+pub fn emit_execution_record_cleaned(
+    env: &Env,
+    subscriber: &Address,
+    merchant: &Address,
+    execution_id: &BytesN<32>,
+) {
+    env.events().publish(
+        (
+            Symbol::new(env, "dedup_cleaned"),
+            subscriber.clone(),
+            merchant.clone(),
+        ),
+        execution_id.clone(),
+    );
+}
+
 /// Emit the `expired` event after a subscription expires.
 ///
 /// Topics: `(expired, subscriber, merchant)`. The event has no data payload.

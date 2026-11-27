@@ -390,6 +390,16 @@ is successfully collected, `next_payment` is advanced by `interval` seconds. Any
 subsequent retry within that same interval will return `PaymentNotDue` — the
 subscriber cannot be double-charged within a single payment cycle.
 
+### Bounded Deduplication Window (`execute_payment_with_id`) (#1610)
+
+For payment retries requiring explicit external identifier tracking without unbounded permanent storage growth:
+- **Identifier Scope:** Scoped per subscription obligation `(subscriber, merchant, execution_id)`.
+- **Retention Window:** Exactly 7 days (`DEDUP_WINDOW_SECONDS = 604_800s`, `DEDUP_WINDOW_LEDGERS = 120_960`).
+- **Atomic Persistence:** Upon successful settlement, the deduplication marker (`ExecutionRecord`) is persisted atomically with the token transfer to temporary storage with the 7-day TTL.
+- **Replay Protection:** Replaying the same identifier within the 7-day window is strictly rejected with `DuplicateExecution` (error 24).
+- **Behavior After Retention Window:** Once the 7-day window elapses, the record can be deterministically pruned via `cleanup_execution_record()`, or automatically expired by Soroban temporary ledger TTL. Any subsequent attempt to replay an expired identifier against an already-advanced billing cycle is safely rejected by the contract's forward billing invariant (`PaymentNotDue`).
+
+
 This means:
 
 - You may safely retry `execute_payment` for the same `(subscriber, merchant)`

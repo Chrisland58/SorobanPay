@@ -24,6 +24,8 @@ rules, and step-by-step checklist — see [docs/release-process.md](docs/release
 
 ### Added
 
+- **[Contract]** Add bounded deduplication window for payment execution identifiers (`execute_payment_with_id`, `cleanup_execution_record`) with atomic settlement persistence and window boundary protection. (Closes #1610)
+
 - **[Docs]** Complete the Keep a Changelog release history, architecture guide,
   and Rust contract API documentation. (Closes #1405, Closes #1406, Closes #1407)
 - **[Docs]** Document all `deploy/deploy.sh` environment variables (`STELLAR_NETWORK`, `STELLAR_IDENTITY`) and derived values (`RPC_URL`, `PASSPHRASE`) in the script header and `docs/deployment.md`. (Closes #77)
