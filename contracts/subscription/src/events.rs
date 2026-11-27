@@ -355,6 +355,47 @@ pub fn emit_subscription_transferred(
     );
 }
 
+/// Emit the `transfer_proposed` event when a subscription transfer proposal is created.
+///
+/// Topics: (symbol("transfer_proposed"), subscriber, old_merchant, new_merchant)
+/// Data:   expires_at (u64)
+pub fn emit_transfer_proposed(
+    env: &Env,
+    subscriber: &Address,
+    old_merchant: &Address,
+    new_merchant: &Address,
+    expires_at: u64,
+) {
+    env.events().publish(
+        (
+            Symbol::new(env, "transfer_proposed"),
+            subscriber.clone(),
+            old_merchant.clone(),
+            new_merchant.clone(),
+        ),
+        expires_at,
+    );
+}
+
+/// Emit the `transfer_proposal_cancelled` event when a transfer proposal is cancelled.
+///
+/// Topics: (symbol("transfer_proposal_cancelled"), subscriber, old_merchant)
+/// Data:   ()
+pub fn emit_transfer_proposal_cancelled(
+    env: &Env,
+    subscriber: &Address,
+    old_merchant: &Address,
+) {
+    env.events().publish(
+        (
+            Symbol::new(env, "transfer_proposal_cancelled"),
+            subscriber.clone(),
+            old_merchant.clone(),
+        ),
+        (),
+    );
+}
+
 /// Emit the `low_allowance` warning event when a subscriber's token allowance is below
 /// the subscription amount at the time of `subscribe`.
 ///

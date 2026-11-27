@@ -9,8 +9,9 @@ use soroban_sdk::{contract, contractimpl, symbol_short, token, Address, BytesN, 
 use crate::error::ContractError;
 use crate::storage::{
     get_protocol_fee_config, has_execution_marker, set_protocol_fee_config, subscription_key,
-    write_execution_marker, DataKey, ProtocolFeeConfig, SubscriptionData, CONTRACT_VERSION,
-    CURRENT_SCHEMA_VERSION, MAX_AMOUNT, MAX_FEE_BPS, MAX_TTL_LEDGERS, MIN_TTL_LEDGERS,
+    write_execution_marker, DataKey, ProtocolFeeConfig, SubscriptionData, TransferProposal,
+    CONTRACT_VERSION, CURRENT_SCHEMA_VERSION, MAX_AMOUNT, MAX_FEE_BPS, MAX_TTL_LEDGERS,
+    MIN_TTL_LEDGERS,
 };
 
 /// Maximum number of subscribers allowed in a single `batch_execute_payment` call.
@@ -1181,10 +1182,177 @@ impl SubscriptionProtocol {
             &subscriber,
             &old_merchant,
             &new_merchant,
-            data.amount,
         );
 
         Ok(())
+    }
+
+    /// Propose transferring an active subscription to a new merchant with an explicit expiry.
+    ///
+    /// Requires authorization from both `subscriber` and `old_merchant`.
+    /// Replaces any existing pending proposal for this subscription.
+    pub fn propose_subscription_transfer(
+        env: Env,
+        subscriber: Address,
+        old_merchant: Address,
+        new_merchant: Address,
+        expires_at: u64,
+    ) -> Result<(), ContractError> {
+        subscriber.require_auth();
+        old_merchant.require_auth();
+
+        if old_merchant == new_merchant {
+            return Err(ContractError::SameMerchant);
+        }
+        if subscriber == new_merchant {
+            return Err(ContractError::SelfSubscription);
+        }
+
+        let old_hash = subscription_key(&env, &subscriber, &old_merchant);
+        let old_key = DataKey::Subscription(old_hash.clone());
+        if !env.storage().persistent().has(&old_key) {
+            return Err(ContractError::NoActiveSubscription);
+        }
+
+        let new_hash = subscription_key(&env, &subscriber, &new_merchant);
+        let new_key = DataKey::Subscription(new_hash);
+        if env.storage().persistent().has(&new_key) {
+            return Err(ContractError::SubscriptionAlreadyExists);
+        }
+
+        let now = env.ledger().timestamp();
+        if expires_at <= now {
+            return Err(ContractError::InvalidTransferExpiry);
+        }
+
+        let proposal = TransferProposal {
+            new_merchant: new_merchant.clone(),
+            expires_at,
+        };
+        let prop_key = DataKey::TransferProposal(old_hash);
+        env.storage().persistent().set(&prop_key, &proposal);
+        env.storage()
+            .persistent()
+            .extend_ttl(&prop_key, MIN_TTL_LEDGERS, MAX_TTL_LEDGERS);
+
+        events::emit_transfer_proposed(&env, &subscriber, &old_merchant, &new_merchant, expires_at);
+
+        Ok(())
+    }
+
+    /// Accept a pending subscription transfer proposal before it expires.
+    ///
+    /// Requires authorization from `new_merchant`.
+    /// If `ledger.timestamp() > expires_at`, returns `TransferProposalExpired` and preserves existing ownership.
+    /// If `ledger.timestamp() <= expires_at`, executes the transfer atomically and removes the proposal.
+    pub fn accept_subscription_transfer(
+        env: Env,
+        subscriber: Address,
+        old_merchant: Address,
+        new_merchant: Address,
+    ) -> Result<(), ContractError> {
+        new_merchant.require_auth();
+
+        let old_hash = subscription_key(&env, &subscriber, &old_merchant);
+        let prop_key = DataKey::TransferProposal(old_hash.clone());
+        let proposal: TransferProposal = env
+            .storage()
+            .persistent()
+            .get(&prop_key)
+            .ok_or(ContractError::NoTransferProposal)?;
+
+        if proposal.new_merchant != new_merchant {
+            return Err(ContractError::Unauthorized);
+        }
+
+        let now = env.ledger().timestamp();
+        if now > proposal.expires_at {
+            return Err(ContractError::TransferProposalExpired);
+        }
+
+        let old_key = DataKey::Subscription(old_hash.clone());
+        let data: SubscriptionData = env
+            .storage()
+            .persistent()
+            .get(&old_key)
+            .ok_or(ContractError::NoActiveSubscription)?;
+
+        let new_hash = subscription_key(&env, &subscriber, &new_merchant);
+        let new_key = DataKey::Subscription(new_hash.clone());
+        if env.storage().persistent().has(&new_key) {
+            return Err(ContractError::SubscriptionAlreadyExists);
+        }
+
+        env.storage().persistent().set(&new_key, &data);
+        env.storage()
+            .persistent()
+            .extend_ttl(&new_key, MIN_TTL_LEDGERS, MAX_TTL_LEDGERS);
+
+        env.storage().persistent().remove(&old_key);
+        env.storage().persistent().remove(&prop_key);
+
+        index_remove(&env, &old_merchant, &old_hash);
+        index_add(&env, &new_merchant, new_hash);
+
+        events::emit_subscription_transferred(
+            &env,
+            &subscriber,
+            &old_merchant,
+            &new_merchant,
+        );
+
+        Ok(())
+    }
+
+    /// Cancel a pending transfer proposal by the old merchant.
+    pub fn cancel_transfer_proposal(
+        env: Env,
+        subscriber: Address,
+        old_merchant: Address,
+    ) -> Result<(), ContractError> {
+        old_merchant.require_auth();
+
+        let old_hash = subscription_key(&env, &subscriber, &old_merchant);
+        let prop_key = DataKey::TransferProposal(old_hash);
+        if !env.storage().persistent().has(&prop_key) {
+            return Err(ContractError::NoTransferProposal);
+        }
+
+        env.storage().persistent().remove(&prop_key);
+        events::emit_transfer_proposal_cancelled(&env, &subscriber, &old_merchant);
+
+        Ok(())
+    }
+
+    /// Cancel a pending transfer proposal by the subscriber.
+    pub fn cancel_transfer_proposal_by_subscriber(
+        env: Env,
+        subscriber: Address,
+        old_merchant: Address,
+    ) -> Result<(), ContractError> {
+        subscriber.require_auth();
+
+        let old_hash = subscription_key(&env, &subscriber, &old_merchant);
+        let prop_key = DataKey::TransferProposal(old_hash);
+        if !env.storage().persistent().has(&prop_key) {
+            return Err(ContractError::NoTransferProposal);
+        }
+
+        env.storage().persistent().remove(&prop_key);
+        events::emit_transfer_proposal_cancelled(&env, &subscriber, &old_merchant);
+
+        Ok(())
+    }
+
+    /// Query the pending transfer proposal for a subscription, if one exists.
+    pub fn get_transfer_proposal(
+        env: Env,
+        subscriber: Address,
+        old_merchant: Address,
+    ) -> Option<TransferProposal> {
+        let old_hash = subscription_key(&env, &subscriber, &old_merchant);
+        let prop_key = DataKey::TransferProposal(old_hash);
+        env.storage().persistent().get(&prop_key)
     }
 
     /// Query active subscription details for a subscriber-merchant pair.
@@ -1262,3 +1430,6 @@ mod regression_tests;
 
 #[cfg(test)]
 mod pause_resume_tests;
+
+#[cfg(test)]
+mod transfer_proposal_expiry_tests;

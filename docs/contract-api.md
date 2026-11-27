@@ -685,6 +685,9 @@ Complete table of all 17 error codes with trigger conditions, affected entry poi
 | 16 | `NotAdmin` | `migrate` | Caller ≠ stored admin address | Use the admin identity set during `initialize` |
 | 17 | `NotInitialized` | `migrate` | `initialize` not yet called | Call `initialize(admin)` first |
 | 19 | `GracePeriodNotElapsed` | `expire_subscription` | Overdue timestamp is absent or grace period has not elapsed | Wait until `overdue_since + grace_period` |
+| 22 | `NoTransferProposal` | `accept_subscription_transfer`, `cancel_transfer_proposal` | No pending proposal exists for this subscription | Call `propose_subscription_transfer` first |
+| 23 | `TransferProposalExpired` | `accept_subscription_transfer` | Ledger time > proposal `expires_at` | Propose a new transfer with updated expiry |
+| 24 | `InvalidTransferExpiry` | `propose_subscription_transfer` | `expires_at <= current ledger timestamp` | Provide an expiry timestamp strictly in the future |
 
 ### Errors returned per entry point
 
@@ -697,6 +700,18 @@ Complete table of all 17 error codes with trigger conditions, affected entry poi
 | `expire_subscription` | 4, 8, 19 |
 | `get_subscription` | _(none — returns `Option`)_ |
 | `migrate` | 15, 16, 17 |
+| `propose_subscription_transfer` | 4, 8, 10, 18, 19, 24 |
+| `accept_subscription_transfer` | 4, 6, 19, 22, 23 |
+| `cancel_transfer_proposal` | 22 |
+| `cancel_transfer_proposal_by_subscriber` | 22 |
+| `get_transfer_proposal` | _(none — returns `Option`)_ |
+
+### Subscription Transfer Proposal & Expiry Lifecycle
+
+To prevent pending transfers from remaining valid indefinitely if a recipient does not accept:
+- **`propose_subscription_transfer(subscriber, old_merchant, new_merchant, expires_at)`**: Requires signatures from both current parties (`subscriber` and `old_merchant`). Validates that `expires_at > env.ledger().timestamp()` (error `InvalidTransferExpiry = 24`). If a proposal already exists, it is replaced atomically.
+- **`accept_subscription_transfer(subscriber, old_merchant, new_merchant)`**: Authorized by `new_merchant`. If `env.ledger().timestamp() > proposal.expires_at`, the transaction fails with `TransferProposalExpired = 23` and **ownership remains strictly unchanged**. If `env.ledger().timestamp() <= proposal.expires_at` (including the exact boundary `now == expires_at`), ownership is atomically transferred to `new_merchant` and the proposal is removed from storage.
+- **Cancellation**: Either party can cancel a pending proposal prior to acceptance via `cancel_transfer_proposal` (old merchant) or `cancel_transfer_proposal_by_subscriber` (subscriber).
 
 ---
 
