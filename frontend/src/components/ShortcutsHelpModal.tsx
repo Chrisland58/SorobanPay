@@ -1,5 +1,7 @@
 'use client';
 
+import { useDialogFocus } from '@/hooks/useDialogFocus';
+
 /**
  * ShortcutsHelpModal.tsx
  *
@@ -62,54 +64,16 @@ export default function ShortcutsHelpModal({ isOpen, onClose }: ShortcutsHelpMod
   const dialogRef = useRef<HTMLDivElement>(null);
   const closeButtonRef = useRef<HTMLButtonElement>(null);
   /** Element that had focus before the modal opened */
-  const previouslyFocusedRef = useRef<HTMLElement | null>(null);
-
   // Register Escape to close when modal is open
   useHotkeys('escape', onClose, { enabled: isOpen, enableOnFormTags: true });
 
-  // On open: save focus target, focus the close button
-  useEffect(() => {
-    if (isOpen) {
-      previouslyFocusedRef.current = document.activeElement as HTMLElement;
-      // Micro-task delay so the modal is painted before we focus
-      setTimeout(() => closeButtonRef.current?.focus(), 50);
-    } else {
-      // Restore focus on close
-      previouslyFocusedRef.current?.focus();
-      previouslyFocusedRef.current = null;
-    }
-  }, [isOpen]);
-
-  // Focus trap: keep Tab / Shift+Tab within the modal
-  const handleKeyDown = useCallback(
-    (e: React.KeyboardEvent<HTMLDivElement>) => {
-      if (!isOpen || e.key !== 'Tab') return;
-
-      const dialog = dialogRef.current;
-      if (!dialog) return;
-
-      const focusable = Array.from(
-        dialog.querySelectorAll<HTMLElement>(
-          'a[href], button:not([disabled]), input:not([disabled]), ' +
-            'select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
-        ),
-      );
-
-      if (!focusable.length) return;
-
-      const first = focusable[0];
-      const last = focusable[focusable.length - 1];
-
-      if (e.shiftKey && document.activeElement === first) {
-        e.preventDefault();
-        last.focus();
-      } else if (!e.shiftKey && document.activeElement === last) {
-        e.preventDefault();
-        first.focus();
-      }
-    },
-    [isOpen],
-  );
+  // Focus management: move focus into modal on open, trap Tab/Escape, restore on close
+  const { handleKeyDown } = useDialogFocus({
+    isOpen,
+    containerRef: dialogRef,
+    initialFocusRef: closeButtonRef,
+    onClose,
+  });
 
   if (!isOpen) return null;
 

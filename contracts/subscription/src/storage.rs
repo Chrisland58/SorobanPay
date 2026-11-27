@@ -53,6 +53,21 @@ pub enum DataKey {
 
     /// Optional maximum subscription amount for this deployment.
     MaxAmount,
+
+    /// Pending schedule change: maps subscription key -> PendingScheduleChange (#1604)
+    PendingSchedule(BytesN<32>),
+
+    /// Subscriber-approved terms digest: maps subscription key -> BytesN<32> (#1603)
+    TermsDigest(BytesN<32>),
+}
+
+/// Scheduled subscription parameter change with explicit effective time (#1604).
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct PendingScheduleChange {
+    pub new_amount: i128,
+    pub new_interval: u64,
+    pub effective_time: u64,
 }
 
 /// Persistent on-chain record for a subscription.

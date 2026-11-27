@@ -416,6 +416,45 @@ function rtUsedKey(token: string): string {
 function rtFamilyRevokedKey(familyId: string): string {
   return `refresh:family:revoked:${familyId}`;
 }
+function rtUserRevokedKey(address: string): string {
+  return `refresh:user:revoked:${address}`;
+}
+
+/**
+ * Revoke a single refresh token and its entire family (e.g., during logout).
+ */
+export async function revokeRefreshToken(token: string): Promise<void> {
+  const client = requireRedis();
+  const rawRecord = await client.get(rtTokenKey(token));
+  if (rawRecord) {
+    try {
+      const record = JSON.parse(rawRecord) as RefreshTokenRecord;
+      await client.set(
+        rtFamilyRevokedKey(record.familyId),
+        '1',
+        'EX',
+        REFRESH_TOKEN_TTL_SECONDS * 2,
+      );
+      await client.del(rtTokenKey(token));
+    } catch {
+      await client.del(rtTokenKey(token));
+    }
+  }
+}
+
+/**
+ * Account-wide token revocation: invalidates all active sessions for this address.
+ */
+export async function revokeAllUserTokens(address: string): Promise<void> {
+  const client = requireRedis();
+  const now = Math.floor(Date.now() / 1000);
+  await client.set(
+    rtUserRevokedKey(address),
+    String(now),
+    'EX',
+    REFRESH_TOKEN_TTL_SECONDS * 2,
+  );
+}
 
 /**
  * Issue a new refresh token for `address`.
@@ -519,6 +558,18 @@ export async function rotateRefreshToken(token: string): Promise<RefreshTokenRec
       `[authService] Refresh token presented for revoked family ${record.familyId}`,
     );
     throw new RefreshTokenError();
+  }
+
+  // Check account-wide revocation
+  const userRevokedAt = await client.get(rtUserRevokedKey(record.address));
+  if (userRevokedAt) {
+    const issuedAt = record.expiresAt - REFRESH_TOKEN_TTL_SECONDS;
+    if (issuedAt <= Number(userRevokedAt)) {
+      console.warn(
+        `[authService] Refresh token presented after account-wide revocation for ${record.address}`,
+      );
+      throw new RefreshTokenError();
+    }
   }
 
   // Step 3: Store a used sentinel so a re-presentation of this token triggers replay detection

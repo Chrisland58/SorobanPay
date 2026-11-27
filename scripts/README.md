@@ -74,3 +74,13 @@ cargo install --locked stellar-cli --features opt
 **`PaymentNotDue` not returned on second payment**
 
 This is expected if the local node's ledger timestamp advanced more than `INTERVAL` seconds between the first and second payment. The test logs a warning but does not fail.
+
+## Preflight Deployment Configuration Validation
+
+`scripts/preflight-validate-env.ts` validates required network, contract, database, and public frontend environment variables before rollout using the shared rules in `backend/src/lib/config.ts` (`validateDeploymentConfig`), without echoing secret or variable values:
+
+```bash
+npx ts-node scripts/preflight-validate-env.ts
+```
+
+This check runs as the `preflight-config` job in `.github/workflows/deploy-testnet.yml` and `.github/workflows/promotion-pipeline.yml` to block rollouts on missing or inconsistent configuration.

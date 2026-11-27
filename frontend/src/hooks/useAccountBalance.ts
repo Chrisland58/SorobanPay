@@ -36,13 +36,21 @@ export interface UseAccountBalanceOptions {
   refreshTrigger?: number;
 }
 
+export type DataFreshness = 'current' | 'stale' | 'unavailable';
+
 export interface UseAccountBalanceResult {
-  /** Human-readable XLM balance string, e.g. "100.0000000". Null while loading. */
+  /** Human-readable XLM balance string, e.g. "100.0000000". Null while loading or unavailable. */
   balance: string | null;
   /** True while the RPC request is in flight. */
   isLoading: boolean;
   /** Error message if the fetch failed, null otherwise. */
   error: string | null;
+  /** True when cached balance is displayed but recent refresh failed (Issue #1581). */
+  isStale: boolean;
+  /** Data freshness classification: 'current' | 'stale' | 'unavailable' */
+  dataFreshness: DataFreshness;
+  /** Epoch milliseconds when the balance was last successfully fetched. */
+  lastUpdated: number | null;
   /** Manually trigger a re-fetch. */
   refetch: () => void;
 }
@@ -70,6 +78,8 @@ export function useAccountBalance({
   const [balance, setBalance] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [isStale, setIsStale] = useState(false);
+  const [lastUpdated, setLastUpdated] = useState<number | null>(null);
   // Internal counter incremented by refetch() to trigger the effect
   const [internalTrigger, setInternalTrigger] = useState(0);
 
@@ -81,6 +91,8 @@ export function useAccountBalance({
     if (!publicKey) {
       setBalance(null);
       setError(null);
+      setIsStale(false);
+      setLastUpdated(null);
       return;
     }
 
@@ -88,13 +100,15 @@ export function useAccountBalance({
 
     async function fetchBalance() {
       setIsLoading(true);
-      setError(null);
 
       try {
         const server = new SorobanRpc.Server(rpcUrl, { allowHttp: true });
         const account = await server.getAccount(publicKey!);
         if (!cancelled) {
           setBalance(extractNativeBalance(account));
+          setIsStale(false);
+          setError(null);
+          setLastUpdated(Date.now());
         }
       } catch (err: unknown) {
         if (cancelled) return;
@@ -107,9 +121,20 @@ export function useAccountBalance({
           msg.includes('account') // "account not found" variants
         ) {
           setBalance('0.0000000');
+          setIsStale(false);
+          setError(null);
+          setLastUpdated(Date.now());
         } else {
           setError(msg);
-          setBalance(null);
+          // If we already had a valid cached balance, mark stale instead of clearing to null/0 (Issue #1581)
+          setBalance((prev) => {
+            if (prev !== null) {
+              setIsStale(true);
+              return prev; // Retain cached value during transient outage
+            }
+            setIsStale(false);
+            return null;
+          });
         }
       } finally {
         if (!cancelled) setIsLoading(false);
@@ -125,5 +150,12 @@ export function useAccountBalance({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [publicKey, rpcUrl, refreshTrigger, internalTrigger]);
 
-  return { balance, isLoading, error, refetch };
+  const dataFreshness: DataFreshness =
+    balance === null
+      ? 'unavailable'
+      : isStale
+      ? 'stale'
+      : 'current';
+
+  return { balance, isLoading, error, isStale, dataFreshness, lastUpdated, refetch };
 }

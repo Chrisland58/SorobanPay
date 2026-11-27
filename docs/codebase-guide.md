@@ -47,7 +47,7 @@ The primary UI component. Responsibilities:
 - Guards on `CONTRACT_ID` — renders a `ContractConfigError` card with setup instructions if the env variable is missing.
 - Polls the RPC endpoint on mount and shows a `NetworkBadge` (reachable / unreachable / checking).
 - Owns all form state (`merchantAddress`, `tokenAddress`, `amount`, `interval`) and validation errors.
-- On submit: validates fields via `validateSubscriptionForm`, opens a `ConfirmModal`, then calls `buildAndSubmitSubscribe`.
+- On submit: validates fields via `validateSubscriptionForm`; if invalid, focuses `SubscriptionFormErrorSummary` (`role="alert"`, `tabIndex={-1}`) with anchor links to each invalid field (`#merchantAddress`, `#tokenAddress`, `#amount`, `#interval`) while keeping inline descriptions synchronized without duplicate `role="alert"` announcements; otherwise opens a `ConfirmModal`, then calls `buildAndSubmitSubscribe`.
 - Shows a `ProgressBar` while the transaction is in-flight, a `SuccessCard` on confirmation, and an inline error block on failure.
 
 ### `frontend/src/lib/transaction_builder.ts`

@@ -107,6 +107,20 @@ export const errorHandler: ErrorRequestHandler = (
     (err as { statusCode?: number })?.statusCode ??
     500;
 
+  // Transport body-size error (Issue #1591)
+  if (
+    statusCode === 413 ||
+    (err as { type?: string })?.type === 'entity.too.large'
+  ) {
+    res.status(413).json({
+      error: 'Payload Too Large: request body exceeds configured limit',
+      code: 'VALIDATION_ERROR' as ApiErrorCode,
+      correlationId,
+      details: { limit: (err as any)?.limit },
+    } satisfies ApiError);
+    return;
+  }
+
   res.status(statusCode).json({
     error: 'An internal error occurred',
     code: 'INTERNAL_ERROR' as ApiErrorCode,

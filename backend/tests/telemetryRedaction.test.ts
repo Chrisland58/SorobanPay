@@ -99,5 +99,48 @@ describe('Telemetry Redaction Suite', () => {
       expect(redactTelemetryPayload(42)).toBe(42);
       expect(redactTelemetryPayload('normal text')).toBe('normal text');
     });
+
+    it('redacts email addresses to prevent PII exposure (Issue #1593)', () => {
+      const payload = {
+        user: 'alice',
+        email: 'alice.merchant@example.com',
+      };
+      const sanitized = redactTelemetryPayload(payload);
+      expect(sanitized.email).toBe('a***t@example.com');
+      expect(sanitized.email).not.toContain('alice.merchant');
+    });
+
+    it('redacts embedded Bearer tokens and JWT strings (Issue #1593)', () => {
+      const payload = {
+        header: 'Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.doNotLeakSignature',
+        rawLog: 'Failed login with token eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.doNotLeakSignature',
+      };
+      const sanitized = redactTelemetryPayload(payload);
+      expect(sanitized.header).toBe('Bearer [REDACTED]');
+      expect(sanitized.rawLog).toContain('[REDACTED_JWT]');
+      expect(sanitized.rawLog).not.toContain('doNotLeakSignature');
+    });
+
+    it('sanitizes nested error objects while preserving correlationId and safe error codes (Issue #1593)', () => {
+      const nestedError = {
+        message: 'Request failed with 401: Bearer secret1234567890',
+        code: 'UNAUTHORIZED',
+        correlationId: 'req_xyz123',
+        status: 401,
+        config: {
+          headers: {
+            authorization: 'Bearer secret1234567890',
+            cookie: 'session=secret-session-id',
+          },
+        },
+      };
+
+      const sanitized = redactTelemetryPayload(nestedError);
+      expect(sanitized.code).toBe('UNAUTHORIZED');
+      expect(sanitized.correlationId).toBe('req_xyz123');
+      expect(sanitized.status).toBe(401);
+      expect(sanitized.config.headers.authorization).toBe('[REDACTED]');
+      expect(sanitized.config.headers.cookie).toBe('[REDACTED]');
+    });
   });
 });

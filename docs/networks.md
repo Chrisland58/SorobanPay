@@ -36,6 +36,10 @@ All variables that change between environments are listed here. Check every one 
 | `NEXT_PUBLIC_RPC_URL` | `https://soroban-testnet.stellar.org` | `https://mainnet.stellar.validationcloud.io/v1/<API_KEY>` |
 | `NEXT_PUBLIC_NETWORK_PASSPHRASE` | `Test SDF Network ; September 2015` | `Public Global Stellar Network ; September 2015` |
 | `NEXT_PUBLIC_CONTRACT_ID` | Your testnet contract address (starts with `C`) | Your mainnet contract address (starts with `C`) |
+| `NEXT_PUBLIC_MAX_OPERATIONS_PER_TX` | `100` (default) | `100` (default) |
+| `NEXT_PUBLIC_MAX_TX_BYTE_SIZE` | `71680` (default) | `71680` (default) |
+
+The last two variables control the **transaction size preflight check** that runs after `prepareTransaction` and before the Freighter signing prompt. If a transaction would exceed either limit, the user sees a specific error message with a correction path before any wallet interaction happens. The defaults match Stellar protocol values and rarely need to change; override them only when targeting a network with custom ledger resource settings.
 
 ### Deployment script (`deploy/deploy.sh`)
 

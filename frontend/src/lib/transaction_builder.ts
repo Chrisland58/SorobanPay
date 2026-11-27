@@ -36,7 +36,9 @@ export type { NormalizedRpcError, RpcErrorCategory } from './rpc_error_normalize
 export type { AllowanceResult } from './allowance_checker';
 
 // Re-export typed network API — callers can resolve network config here.
-export { getNetworkConfig, NETWORK_CONFIGS } from './network_config';
+import { getNetworkConfig, NETWORK_CONFIGS } from './network_config';
+import { createTransactionTelemetry } from './transaction_telemetry';
+export { getNetworkConfig, NETWORK_CONFIGS };
 export type { StellarNetwork, NetworkConfig } from './network_config';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -224,6 +226,18 @@ export async function buildSignAndSubmitSubscribe(
   };
 
   throwIfAborted();
+
+  // Assert consistent network passphrase (Issue #1580)
+  const canonicalCfg = getNetworkConfig();
+  if (networkPassphrase && canonicalCfg.networkPassphrase !== networkPassphrase) {
+    throw new Error(
+      `Network passphrase mismatch: expected "${canonicalCfg.networkPassphrase}", got "${networkPassphrase}". Transaction construction aborted.`,
+    );
+  }
+
+  const telemetry = createTransactionTelemetry('subscribe', canonicalCfg.name.toLowerCase());
+  telemetry.emit('build', { metadata: { merchant: params.merchant, token: params.token } });
+
   // 0. Normalize + validate addresses before making any network calls
   //    (non-retryable) — Issue #37: shared helper instead of a hand-rolled
   //    if/throw per field. Reassigning onto `params` means every downstream
@@ -404,6 +418,13 @@ export async function buildSignAndSubmitCancel(
   networkPassphrase: string,
   rpcUrl: string,
 ): Promise<SubmitResult> {
+  const canonicalCfg = getNetworkConfig();
+  if (networkPassphrase && canonicalCfg.networkPassphrase !== networkPassphrase) {
+    throw new Error(
+      `Network passphrase mismatch: expected "${canonicalCfg.networkPassphrase}", got "${networkPassphrase}". Transaction construction aborted.`,
+    );
+  }
+
   params.subscriber = assertValidGAddress(params.subscriber, 'subscriber');
   params.merchant = assertValidGAddress(params.merchant, 'merchant');
   params.token = assertValidCAddress(params.token, 'token');

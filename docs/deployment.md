@@ -913,3 +913,21 @@ This is why testnet validation and thorough testing are mandatory before every m
 | `NoActiveSubscription` on known pair | Entry TTL expired | Subscriber must re-subscribe; see [README Storage TTL](../README.md#storage-ttl) |
 | Pods stuck in `Pending` | Insufficient cluster resources | Increase node count or resource limits |
 | Pod `OOMKilled` | Memory limit too low | Increase `resources.limits.memory` in deployment manifest |
+
+---
+
+## Workflow Concurrency & Rollout Safety
+
+Deployment workflows use environment-scoped GitHub Actions `concurrency` groups to prevent out-of-order deployments and race conditions:
+
+| Workflow | Concurrency Group | `cancel-in-progress` | Behavior |
+|---|---|---|---|
+| `.github/workflows/deploy-testnet.yml` | `deploy-testnet-${{ github.ref }}` | `true` | Cancels superseded testnet preview/push runs on the same ref; `verify-rollout` fails the run if any upstream job was canceled or failed so partial rollouts are never marked successful. |
+| `.github/workflows/testnet-deploy.yml` | `testnet-deployment` | `false` | Queues concurrent testnet deployments instead of interrupting an active contract/frontend deploy. |
+| `.github/workflows/promotion-pipeline.yml` | `promotion-${{ github.ref }}` | `false` | Queues concurrent promotion runs so staging and production releases are never silently interrupted. |
+
+### Partial Rollout Protection
+In `deploy-testnet.yml`, the `verify-rollout` job runs with `if: ${{ always() }}` after `deploy-contract` and `deploy-frontend`. If either job is canceled or fails, `verify-rollout` exits non-zero, ensuring a canceled run cannot leave a partial rollout marked as successful.
+
+### Automated Verification
+Run `bash tests/workflow_concurrency_test.sh` (also executed in `.github/workflows/deployment-smoke.yml`) to verify that all deployment workflows maintain their expected concurrency groups, cancellation settings, and rollout guards.

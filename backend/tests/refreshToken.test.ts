@@ -38,6 +38,8 @@ jest.mock('../src/lib/redis', () => ({
 import {
   issueRefreshToken,
   rotateRefreshToken,
+  revokeRefreshToken,
+  revokeAllUserTokens,
   RefreshTokenError,
   REFRESH_TOKEN_TTL_SECONDS,
   _clearRefreshTokensForTesting,
@@ -190,5 +192,47 @@ describe('RefreshTokenError class', () => {
 
   it('is an instance of Error', () => {
     expect(new RefreshTokenError()).toBeInstanceOf(Error);
+  });
+});
+
+describe('Concurrent Refresh & Revocation Policies (Issue #1592)', () => {
+  afterEach(clearStore);
+
+  it('concurrent refresh attempts on the same token cannot create multiple valid successors', async () => {
+    const original = await issueRefreshToken(MERCHANT);
+
+    // Run 3 concurrent rotation attempts with the same token
+    const results = await Promise.allSettled([
+      rotateRefreshToken(original.token),
+      rotateRefreshToken(original.token),
+      rotateRefreshToken(original.token),
+    ]);
+
+    const fulfilled = results.filter((r) => r.status === 'fulfilled');
+    const rejected = results.filter((r) => r.status === 'rejected');
+
+    // Exactly one attempt must succeed; the others must be rejected
+    expect(fulfilled.length).toBe(1);
+    expect(rejected.length).toBe(2);
+  });
+
+  it('revokeRefreshToken invalidates the token family on logout', async () => {
+    const original = await issueRefreshToken(MERCHANT);
+    await revokeRefreshToken(original.token);
+
+    // Attempting to rotate a revoked token must fail
+    await expect(rotateRefreshToken(original.token)).rejects.toBeInstanceOf(RefreshTokenError);
+  });
+
+  it('revokeAllUserTokens invalidates all tokens previously issued to the account', async () => {
+    const session1 = await issueRefreshToken(MERCHANT);
+    const session2 = await issueRefreshToken(MERCHANT);
+
+    // Account-wide revocation
+    await revokeAllUserTokens(MERCHANT);
+
+    // Both sessions must now fail to rotate
+    await expect(rotateRefreshToken(session1.token)).rejects.toBeInstanceOf(RefreshTokenError);
+    await expect(rotateRefreshToken(session2.token)).rejects.toBeInstanceOf(RefreshTokenError);
   });
 });
