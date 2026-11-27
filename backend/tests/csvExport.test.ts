@@ -284,4 +284,49 @@ describe('CSV Export Endpoint (#1390)', () => {
       expect(toHuman('not-a-number')).toBe('not-a-number'); // fallback
     });
   });
+
+  describe('CSV Injection / Formula Neutralization & Escaping (Issue #1644)', () => {
+    const { sanitizeCsvCell, toCsvRow } = require('../src/utils/csv');
+
+    it('neutralizes formula injection characters (=, +, -, @, \\t, \\r) by prefixing with a single quote', () => {
+      expect(sanitizeCsvCell('=SUM(A1:A10)')).toBe("'=SUM(A1:A10)");
+      expect(sanitizeCsvCell('@SUM(1+1)')).toBe("'@SUM(1+1)");
+      expect(sanitizeCsvCell('+cmd|\' /C calc\'!A0')).toBe("'+cmd|' /C calc'!A0");
+      expect(sanitizeCsvCell('-cmd|\' /C calc\'!A0')).toBe("'-cmd|' /C calc'!A0");
+      expect(sanitizeCsvCell('\tmalicious')).toBe("'\tmalicious");
+      expect(sanitizeCsvCell('\rmalicious')).toBe("'\rmalicious");
+    });
+
+    it('preserves valid positive and negative numbers without prepending quotes', () => {
+      expect(sanitizeCsvCell('100')).toBe('100');
+      expect(sanitizeCsvCell('-100')).toBe('-100');
+      expect(sanitizeCsvCell('-12.345')).toBe('-12.345');
+      expect(sanitizeCsvCell('+50.5')).toBe('+50.5');
+      expect(sanitizeCsvCell('0')).toBe('0');
+      expect(sanitizeCsvCell(12345)).toBe('12345');
+    });
+
+    it('escapes cells with embedded quotes, commas, and newlines per RFC 4180', () => {
+      expect(sanitizeCsvCell('Hello, World')).toBe('"Hello, World"');
+      expect(sanitizeCsvCell('He said "Hello"')).toBe('"He said ""Hello"""');
+      expect(sanitizeCsvCell('Line1\nLine2')).toBe('"Line1\nLine2"');
+      expect(sanitizeCsvCell('Line1\r\nLine2')).toBe('"Line1\r\nLine2"');
+    });
+
+    it('neutralizes formula triggers and properly quotes when commas or quotes are also present', () => {
+      // Cell starts with = and contains quotes and commas
+      const malicious = '=HYPERLINK("http://attacker.com","Click Me")';
+      expect(sanitizeCsvCell(malicious)).toBe('"\'=HYPERLINK(""http://attacker.com"",""Click Me"")"');
+    });
+
+    it('handles unicode and special symbols seamlessly', () => {
+      expect(sanitizeCsvCell('Merchant ⚡ Pay €100')).toBe('Merchant ⚡ Pay €100');
+      expect(sanitizeCsvCell('日本語, テスト')).toBe('"日本語, テスト"');
+    });
+
+    it('formats an entire row terminated with CRLF', () => {
+      const row = toCsvRow(['2024-01-01', '=HYPERLINK(foo)', '-50', 'Test, Value']);
+      expect(row).toBe('2024-01-01,"\'=HYPERLINK(foo)",-50,"Test, Value"\r\n');
+    });
+  });
 });

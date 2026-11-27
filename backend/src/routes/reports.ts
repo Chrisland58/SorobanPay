@@ -65,18 +65,7 @@ const CSV_HEADERS = [
   'Status',
 ];
 
-/** Escape a single CSV cell value per RFC 4180. */
-function escapeCsvCell(value: string): string {
-  if (/[",\r\n]/.test(value)) {
-    return `"${value.replace(/"/g, '""')}"`;
-  }
-  return value;
-}
-
-/** Format a CSV row from an array of cell values. */
-function toCsvRow(cells: string[]): string {
-  return cells.map(escapeCsvCell).join(',') + '\r\n';
-}
+import { toCsvRow } from '../utils/csv';
 
 /**
  * Convert a raw amount string (BigInt-compatible) to a human-readable decimal.

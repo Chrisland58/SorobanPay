@@ -86,18 +86,7 @@ const CSV_COLUMNS = [
   'Nonce',
 ];
 
-/** Escape a single CSV cell per RFC 4180. */
-function escapeCsvCell(value: string): string {
-  if (/[",\r\n]/.test(value)) {
-    return `"${value.replace(/"/g, '""')}"`;
-  }
-  return value;
-}
-
-/** Produce a CRLF-terminated CSV row. */
-function toCsvRow(cells: string[]): string {
-  return cells.map(escapeCsvCell).join(',') + '\r\n';
-}
+import { toCsvRow } from '../utils/csv';
 
 /**
  * Convert a raw stroop amount (BigInt-compatible string) to a human-readable
