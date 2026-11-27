@@ -685,6 +685,8 @@ Complete table of all 17 error codes with trigger conditions, affected entry poi
 | 16 | `NotAdmin` | `migrate` | Caller ≠ stored admin address | Use the admin identity set during `initialize` |
 | 17 | `NotInitialized` | `migrate` | `initialize` not yet called | Call `initialize(admin)` first |
 | 19 | `GracePeriodNotElapsed` | `expire_subscription` | Overdue timestamp is absent or grace period has not elapsed | Wait until `overdue_since + grace_period` |
+| 20 | `InvalidConfig` | `initialize`, `set_admin`, `update_protocol_config` | Configuration violates invariants (e.g. admin or collector is contract address) | Provide a valid non-contract account address |
+| 21 | `FeeBpsTooHigh` | `set_protocol_fee`, `update_protocol_config` | `fee_bps > MAX_FEE_BPS` (500 bps = 5.00%) | Configure fee rate between 0 and 500 basis points |
 
 ### Errors returned per entry point
 
@@ -697,6 +699,19 @@ Complete table of all 17 error codes with trigger conditions, affected entry poi
 | `expire_subscription` | 4, 8, 19 |
 | `get_subscription` | _(none — returns `Option`)_ |
 | `migrate` | 15, 16, 17 |
+| `set_max_amount` | 2, 8, 16, 17, 20 |
+| `set_protocol_fee` | 8, 16, 17, 20, 21 |
+| `set_admin` | 8, 16, 17, 20 |
+| `update_protocol_config` | 2, 8, 16, 17, 20, 21 |
+
+### Protocol Configuration & Invariants
+
+Protocol configuration updates are strictly authenticated (`admin.require_auth()`) and validated against centralized invariant checks (`validate_protocol_config_invariants`) before any state change is written:
+- `admin`: Must be a valid account address (contract addresses rejected with `InvalidConfig = 20`).
+- `max_amount`: Must be strictly positive and `<= 10_000_000_000_000` (error `InvalidAmount = 2` or `InvalidConfig = 20`).
+- `fee_bps`: Must not exceed `MAX_FEE_BPS` (`500` basis points / 5%) (error `FeeBpsTooHigh = 21`).
+- `fee_collector`: When fees are non-zero, must be a valid account address (contract addresses rejected with `InvalidConfig = 20`).
+- Multi-parameter updates via `update_protocol_config(new_admin, new_max_amount, new_fee_bps, new_fee_collector)` validate all parameters together atomically, preventing partial/inconsistent configuration transitions. If any parameter fails validation, state remains untouched.
 
 ---
 
