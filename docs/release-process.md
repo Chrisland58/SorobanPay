@@ -384,15 +384,23 @@ git push origin main --follow-tags
 
 ### Smart contract releases
 
-Because Soroban contracts are immutable after deployment, any contract change requires a **new contract address**. Subscribers and merchants must be migrated to the new address — there is no in-place upgrade path. Before releasing a contract change:
+Because Soroban contracts require coordinated review when upgrading or redeploying, operators and reviewers must follow the [Contract Upgrade Approval and Verification Checklist](./contract-upgrade-approval-and-verification-checklist.md). This checklist covers:
 
-1. Document the migration path in `docs/versioning.md`.
-2. Plan a migration window: old contract remains accessible while subscribers re-subscribe.
-3. Bump `VERSION_MAJOR` for breaking changes (entry point signature changes, event schema changes, error code reassignments).
-4. Bump `VERSION_MINOR` for new entry points or new events.
-5. Bump `VERSION_PATCH` for internal fixes that do not affect the ABI.
+1. **Build & Artifact Identity**: Deterministic Wasm build, optimization, and SHA-256 digest computation.
+2. **Review Gates**: Storage layout backwards compatibility (`Option<T>` for new fields), authorization invariance, event schema stability, and rollback readiness.
+3. **Deployment Execution**: Installing Wasm on-chain and invoking `migrate(admin)`.
+4. **Post-Deployment Verification**: Cryptographic Wasm hash verification via Soroban RPC, verifying `contract_migrated` event emission, and smoke read checks (`get_config()`).
 
-See [docs/versioning.md](versioning.md) for the full versioning and upgrade strategy.
+Before releasing a contract change:
+1. Follow the [Contract Upgrade Approval and Verification Checklist](./contract-upgrade-approval-and-verification-checklist.md).
+2. Execute upgrade regression tests: `cargo test --manifest-path contracts/subscription/Cargo.toml --features upgrade-test -- upgrade`.
+3. Document the migration path in `docs/versioning.md`.
+4. Plan a migration window: old contract remains accessible while subscribers re-subscribe.
+5. Bump `VERSION_MAJOR` for breaking changes (entry point signature changes, event schema changes, error code reassignments).
+6. Bump `VERSION_MINOR` for new entry points or new events.
+7. Bump `VERSION_PATCH` for internal fixes that do not affect the ABI.
+
+See [docs/versioning.md](versioning.md) and [docs/contract-upgrade-approval-and-verification-checklist.md](./contract-upgrade-approval-and-verification-checklist.md) for the full versioning and upgrade strategy.
 
 ### Frontend releases
 

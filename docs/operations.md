@@ -1265,6 +1265,7 @@ payment window), configure a proactive TTL refresh using the procedure in
 
 ### See Also (updated)
 
+- [Contract Upgrade Approval and Verification Checklist](./contract-upgrade-approval-and-verification-checklist.md) — Repeatable checklist separating build, review, deployment, and post-deployment hash/migration verification
 - [Storage TTL Guide](./storage-ttl.md) — TTL constants, cost implications, and the emergency extension procedure
 - [Network Configuration Guide](./networks.md) — testnet vs. mainnet RPC and passphrase values
 - [Backend API Cookbook](./api-cookbook.md) — Recipe 8: Monitor subscription TTL health
