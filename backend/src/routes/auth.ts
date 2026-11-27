@@ -24,9 +24,15 @@ import {
   generateChallenge,
   verifyChallenge,
   issueMerchantJwt,
+  issueRefreshToken,
+  rotateRefreshToken,
+  revokeRefreshToken,
+  revokeAllUserTokens,
+  RefreshTokenError,
   AuthError,
   CHALLENGE_TTL_SECONDS,
   JWT_TTL_SECONDS,
+  REFRESH_TOKEN_TTL_SECONDS,
 } from '../services/authService';
 
 const router = Router();
@@ -161,10 +167,73 @@ router.post('/token', async (req: Request, res: Response) => {
 
   const token = issueMerchantJwt(address, jwtSecret);
 
+  // Issue refresh token along with initial access token
+  let refreshTokenRecord;
+  try {
+    refreshTokenRecord = await issueRefreshToken(address);
+  } catch {
+    // Non-fatal if Redis is not configured in some test environments
+  }
+
   res.json({
     token,
+    refreshToken: refreshTokenRecord?.token,
     expires_in: JWT_TTL_SECONDS,
   });
+});
+
+// ─── POST /api/v1/auth/refresh ────────────────────────────────────────────────
+
+router.post('/refresh', async (req: Request, res: Response) => {
+  const jwtSecret = process.env.JWT_SECRET;
+  if (!jwtSecret) {
+    res.status(503).json({ error: 'Authentication not configured (JWT_SECRET missing)' });
+    return;
+  }
+
+  const { refreshToken } = req.body as { refreshToken?: string };
+  if (!refreshToken || typeof refreshToken !== 'string') {
+    res.status(400).json({ error: 'refreshToken field is required' });
+    return;
+  }
+
+  try {
+    const rotated = await rotateRefreshToken(refreshToken.trim());
+    const token = issueMerchantJwt(rotated.address, jwtSecret);
+    res.json({
+      token,
+      refreshToken: rotated.token,
+      expires_in: JWT_TTL_SECONDS,
+    });
+  } catch (err) {
+    if (err instanceof RefreshTokenError) {
+      res.status(401).json({ error: err.message });
+      return;
+    }
+    throw err;
+  }
+});
+
+// ─── POST /api/v1/auth/logout ─────────────────────────────────────────────────
+
+router.post('/logout', async (req: Request, res: Response) => {
+  const { refreshToken } = req.body as { refreshToken?: string };
+  if (refreshToken && typeof refreshToken === 'string') {
+    await revokeRefreshToken(refreshToken.trim());
+  }
+  res.json({ message: 'Logged out successfully' });
+});
+
+// ─── POST /api/v1/auth/revoke-all ─────────────────────────────────────────────
+
+router.post('/revoke-all', async (req: Request, res: Response) => {
+  const { address } = req.body as { address?: string };
+  if (!address || typeof address !== 'string') {
+    res.status(400).json({ error: 'address field is required' });
+    return;
+  }
+  await revokeAllUserTokens(address.trim());
+  res.json({ message: 'All tokens revoked successfully' });
 });
 
 export default router;

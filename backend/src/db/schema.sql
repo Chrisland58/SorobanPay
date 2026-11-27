@@ -30,11 +30,14 @@ CREATE TABLE IF NOT EXISTS subscriptions (
     overdue_since TIMESTAMPTZ,
     created_at    TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
     updated_at    TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    tenant_id     VARCHAR(64)  NOT NULL DEFAULT 'default',
     CONSTRAINT uq_subscription UNIQUE (subscriber, merchant)
 );
 
 CREATE INDEX IF NOT EXISTS idx_subscriptions_merchant ON subscriptions (merchant);
 CREATE INDEX IF NOT EXISTS idx_subscriptions_status   ON subscriptions (status);
+CREATE INDEX IF NOT EXISTS idx_subscriptions_tenant_status_next_payment ON subscriptions (tenant_id, status, next_payment ASC);
+CREATE INDEX IF NOT EXISTS idx_subscriptions_tenant_merchant_status ON subscriptions (tenant_id, merchant, status);
 
 -- ---------------------------------------------------------------------------
 -- Payments — append-only event log
@@ -49,6 +52,7 @@ CREATE TABLE IF NOT EXISTS payments (
     amount          NUMERIC(38)  NOT NULL,
     payment_nonce   TEXT,
     ledger_seq      BIGINT,
+    tenant_id       VARCHAR(64)  NOT NULL DEFAULT 'default',
     occurred_at     TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
     CONSTRAINT uq_payment_tx UNIQUE (tx_hash, event_type, subscriber, merchant)
 );
@@ -56,6 +60,8 @@ CREATE TABLE IF NOT EXISTS payments (
 CREATE INDEX IF NOT EXISTS idx_payments_merchant    ON payments (merchant);
 CREATE INDEX IF NOT EXISTS idx_payments_event_type  ON payments (event_type);
 CREATE INDEX IF NOT EXISTS idx_payments_occurred_at ON payments (occurred_at);
+CREATE INDEX IF NOT EXISTS idx_payments_tenant_occurred_at ON payments (tenant_id, occurred_at DESC);
+CREATE INDEX IF NOT EXISTS idx_payments_tenant_event_occurred ON payments (tenant_id, event_type, occurred_at DESC);
 
 -- ---------------------------------------------------------------------------
 -- Webhook configurations — merchants register their endpoint here

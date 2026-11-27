@@ -9,7 +9,7 @@ use soroban_sdk::{contract, contractimpl, symbol_short, token, Address, BytesN, 
 use crate::error::ContractError;
 use crate::storage::{
     get_protocol_fee_config, has_execution_marker, set_protocol_fee_config, subscription_key,
-    write_execution_marker, DataKey, ProtocolFeeConfig, SubscriptionData, CONTRACT_VERSION,
+    write_execution_marker, DataKey, PendingScheduleChange, ProtocolFeeConfig, SubscriptionData, CONTRACT_VERSION,
     CURRENT_SCHEMA_VERSION, MAX_AMOUNT, MAX_FEE_BPS, MAX_TTL_LEDGERS, MIN_TTL_LEDGERS,
 };
 
@@ -555,6 +555,7 @@ impl SubscriptionProtocol {
             overdue_since: None,
             payment_nonce: 0,
             paused_until: None,
+            cancel_at_period_end: None,
         };
 
         // Compact key (#347): sha256(subscriber_xdr ++ merchant_xdr).
@@ -663,6 +664,142 @@ impl SubscriptionProtocol {
         );
 
         Ok(())
+    }
+
+    // =========================================================================
+    // Scheduled Subscription Changes (#1604)
+    // =========================================================================
+
+    /// Schedule an interval or amount change to take effect only at an explicit future time (#1604).
+    /// Prevents ambiguity or retroactive impact on already-paid periods.
+    pub fn schedule_subscription_change(
+        env: Env,
+        subscriber: Address,
+        merchant: Address,
+        new_amount: i128,
+        new_interval: u64,
+        effective_time: u64,
+    ) -> Result<(), ContractError> {
+        subscriber.require_auth();
+
+        let sub_hash = subscription_key(&env, &subscriber, &merchant);
+        let sub_key = DataKey::Subscription(sub_hash.clone());
+        let _sub: SubscriptionData = env
+            .storage()
+            .persistent()
+            .get(&sub_key)
+            .ok_or(ContractError::NoActiveSubscription)?;
+
+        if new_amount <= 0 {
+            return Err(ContractError::AmountMustBePositive);
+        }
+        if new_amount > MAX_AMOUNT {
+            return Err(ContractError::AmountTooLarge);
+        }
+        if new_interval < 86_400 {
+            return Err(ContractError::IntervalTooShort);
+        }
+        if new_interval > 31_536_000 {
+            return Err(ContractError::IntervalTooLong);
+        }
+
+        let now = ledger_timestamp(&env)?;
+        if effective_time <= now {
+            return Err(ContractError::EffectiveTimeInPast);
+        }
+
+        let pending = PendingScheduleChange {
+            new_amount,
+            new_interval,
+            effective_time,
+        };
+
+        let pending_key = DataKey::PendingSchedule(sub_hash);
+        env.storage().persistent().set(&pending_key, &pending);
+        env.storage()
+            .persistent()
+            .extend_ttl(&pending_key, MIN_TTL_LEDGERS, MAX_TTL_LEDGERS);
+
+        events::emit_schedule_change_requested(
+            &env,
+            &subscriber,
+            &merchant,
+            new_amount,
+            new_interval,
+            effective_time,
+        );
+
+        Ok(())
+    }
+
+    /// Retrieve any pending schedule change for a subscription.
+    pub fn get_pending_schedule(
+        env: Env,
+        subscriber: Address,
+        merchant: Address,
+    ) -> Option<PendingScheduleChange> {
+        let sub_hash = subscription_key(&env, &subscriber, &merchant);
+        env.storage()
+            .persistent()
+            .get(&DataKey::PendingSchedule(sub_hash))
+    }
+
+    /// Cancel a previously scheduled subscription change.
+    pub fn cancel_pending_schedule(
+        env: Env,
+        subscriber: Address,
+        merchant: Address,
+    ) -> Result<(), ContractError> {
+        subscriber.require_auth();
+        let sub_hash = subscription_key(&env, &subscriber, &merchant);
+        let pending_key = DataKey::PendingSchedule(sub_hash);
+        if !env.storage().persistent().has(&pending_key) {
+            return Err(ContractError::NoPendingSchedule);
+        }
+        env.storage().persistent().remove(&pending_key);
+        Ok(())
+    }
+
+    // =========================================================================
+    // Subscriber-Approved Terms Digest (#1603)
+    // =========================================================================
+
+    /// Store a subscriber-approved digest of subscription terms (#1603).
+    /// Stores an immutable 32-byte hash without exposing raw document data on-chain.
+    pub fn set_terms_digest(
+        env: Env,
+        subscriber: Address,
+        merchant: Address,
+        terms_hash: BytesN<32>,
+    ) -> Result<(), ContractError> {
+        subscriber.require_auth();
+
+        let sub_hash = subscription_key(&env, &subscriber, &merchant);
+        let sub_key = DataKey::Subscription(sub_hash.clone());
+        if !env.storage().persistent().has(&sub_key) {
+            return Err(ContractError::NoActiveSubscription);
+        }
+
+        let terms_key = DataKey::TermsDigest(sub_hash);
+        env.storage().persistent().set(&terms_key, &terms_hash);
+        env.storage()
+            .persistent()
+            .extend_ttl(&terms_key, MIN_TTL_LEDGERS, MAX_TTL_LEDGERS);
+
+        events::emit_terms_digest_stored(&env, &subscriber, &merchant, &terms_hash);
+        Ok(())
+    }
+
+    /// Retrieve the subscriber-approved terms digest.
+    pub fn get_terms_digest(
+        env: Env,
+        subscriber: Address,
+        merchant: Address,
+    ) -> Option<BytesN<32>> {
+        let sub_hash = subscription_key(&env, &subscriber, &merchant);
+        env.storage()
+            .persistent()
+            .get(&DataKey::TermsDigest(sub_hash))
     }
 
     /// Temporarily suspend an active subscription (issue #795).
@@ -853,6 +990,17 @@ impl SubscriptionProtocol {
             return Err(ContractError::PaymentNotDue);
         }
 
+        // Apply scheduled change if effective time has arrived (#1604)
+        let pending_key = DataKey::PendingSchedule(hash.clone());
+        if let Some(pending) = env.storage().persistent().get::<_, PendingScheduleChange>(&pending_key) {
+            if now >= pending.effective_time {
+                data.amount = pending.new_amount;
+                data.interval = pending.new_interval;
+                env.storage().persistent().remove(&pending_key);
+                events::emit_schedule_change_applied(&env, &subscriber, &merchant, data.amount, data.interval);
+            }
+        }
+
         // ── Duplicate execution guard (#1083) ────────────────────────────────
         // Check whether this (subscription_hash, payment_nonce) pair was already
         // executed.  The marker is written to temporary storage after a successful
@@ -989,6 +1137,16 @@ impl SubscriptionProtocol {
                 continue;
             }
 
+            // Cancel-at-period-end finalization (Issue #1605)
+            if data.will_cancel_at_period_end() {
+                env.storage().persistent().remove(&key);
+                index_remove(&env, &merchant, &hash);
+                roster_remove(&env, &merchant, &subscriber);
+                events::emit_cancel(&env, &subscriber, &merchant);
+                results.push_back((subscriber.clone(), false));
+                continue;
+            }
+
             let contract_address = env.current_contract_address();
             let token_client = token::Client::new(&env, &data.token);
 
@@ -1101,6 +1259,40 @@ impl SubscriptionProtocol {
         roster_remove(&env, &merchant, &subscriber);
 
         events::emit_cancel(&env, &subscriber, &merchant);
+
+        Ok(())
+    }
+
+    /// Schedule a subscription to cancel at the end of the current billing cycle (Issue #1605).
+    ///
+    /// Preserves access until `next_payment`, ensuring that no subsequent payment
+    /// will be collected and the subscription cleanly self-terminates at that boundary.
+    pub fn cancel_at_period_end(
+        env: Env,
+        subscriber: Address,
+        merchant: Address,
+    ) -> Result<(), ContractError> {
+        subscriber.require_auth();
+
+        let hash = subscription_key(&env, &subscriber, &merchant);
+        let key = DataKey::Subscription(hash);
+        let mut data: SubscriptionData = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .ok_or(ContractError::NoActiveSubscription)?;
+
+        if data.will_cancel_at_period_end() {
+            return Err(ContractError::SubscriptionCancelled);
+        }
+
+        data.cancel_at_period_end = Some(true);
+        env.storage().persistent().set(&key, &data);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, MIN_TTL_LEDGERS, MAX_TTL_LEDGERS);
+
+        events::emit_cancel_at_period_end(&env, &subscriber, &merchant, data.next_payment);
 
         Ok(())
     }
@@ -1272,4 +1464,4 @@ mod regression_tests;
 mod pause_resume_tests;
 
 #[cfg(test)]
-mod schedule_overflow_tests;
+mod schedule_change_and_terms_tests;

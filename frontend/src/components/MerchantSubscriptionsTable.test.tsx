@@ -151,3 +151,63 @@ describe('MerchantSubscriptionsTable filters', () => {
     expect(screen.getByRole('status', { name: /all subscriptions loaded/i })).toBeInTheDocument();
   });
 });
+
+describe('MerchantSubscriptionsTable touch targets and responsive actions', () => {
+  it('enforces 44px minimum touch targets on toolbar, checkbox wrappers, and row actions', () => {
+    renderTable();
+
+    expect(screen.getByRole('searchbox', { name: /search subscribers/i })).toHaveClass('min-h-[44px]');
+    expect(screen.getByRole('combobox', { name: /filter subscriptions by status/i })).toHaveClass('min-h-[44px]');
+    expect(screen.getByRole('button', { name: /collect all 1 due payments/i })).toHaveClass('min-h-[44px]');
+    expect(screen.getByRole('button', { name: /refresh subscription list/i })).toHaveClass('min-h-[44px]');
+
+    const selectAllCheckbox = screen.getByRole('checkbox', { name: /select all due subscriptions/i });
+    expect(selectAllCheckbox.closest('label')).toHaveClass('min-h-[44px]', 'min-w-[44px]');
+
+    const collectButton = screen.getByRole('button', { name: /collect payment from/i });
+    expect(collectButton).toHaveClass('min-h-[44px]', 'min-w-[44px]');
+  });
+
+  it('provides accessible 44px retry and refresh targets in error and empty states', () => {
+    const onRefresh = jest.fn();
+    const { rerender } = render(
+      <MerchantSubscriptionsTable
+        subscriptions={[]}
+        isLoading={false}
+        error="RPC timeout"
+        onCollect={jest.fn()}
+        onBatchCollect={jest.fn()}
+        collectingRows={new Set()}
+        rowResults={new Map()}
+        onRefresh={onRefresh}
+        hasMore={false}
+        onLoadMore={jest.fn()}
+      />,
+    );
+
+    const retryButton = screen.getByRole('button', { name: /retry/i });
+    expect(retryButton).toHaveClass('min-h-[44px]', 'min-w-[44px]');
+    fireEvent.click(retryButton);
+    expect(onRefresh).toHaveBeenCalledTimes(1);
+
+    rerender(
+      <MerchantSubscriptionsTable
+        subscriptions={[]}
+        isLoading={false}
+        error={null}
+        onCollect={jest.fn()}
+        onBatchCollect={jest.fn()}
+        collectingRows={new Set()}
+        rowResults={new Map()}
+        onRefresh={onRefresh}
+        hasMore={false}
+        onLoadMore={jest.fn()}
+      />,
+    );
+
+    const refreshButton = screen.getByRole('button', { name: /refresh/i });
+    expect(refreshButton).toHaveClass('min-h-[44px]', 'min-w-[44px]');
+    fireEvent.click(refreshButton);
+    expect(onRefresh).toHaveBeenCalledTimes(2);
+  });
+});

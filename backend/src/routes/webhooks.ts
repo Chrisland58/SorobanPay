@@ -26,6 +26,7 @@
 import { Router, Request, Response, NextFunction } from 'express';
 import * as crypto from 'crypto';
 import { webhookQueue } from '../services/webhookQueue';
+import { idempotencyMiddleware } from '../middleware/idempotency';
 
 // ─── Configuration ────────────────────────────────────────────────────────────
 
@@ -298,6 +299,8 @@ export function verifyWebhookSignature(
 // ─── Router ───────────────────────────────────────────────────────────────────
 
 const router = Router();
+
+router.use(idempotencyMiddleware());
 
 /**
  * POST /api/webhooks/ingest

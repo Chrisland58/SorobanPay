@@ -66,4 +66,59 @@ describe("SubscriptionFormInputs error summary", () => {
     );
     expect(screen.getByRole("alert")).toHaveFocus();
   });
+
+  it("synchronizes as errors are corrected and disappears when all are resolved", () => {
+    const { rerender } = render(
+      <SubscriptionFormInputs
+        {...baseProps}
+        fieldErrors={{
+          merchantAddress: "Enter a valid merchant address.",
+          tokenAddress: "Enter a valid token address.",
+          amount: "Amount must be greater than zero.",
+          interval: "Select a valid interval.",
+        }}
+      />,
+    );
+
+    expect(screen.getByRole("alert")).toHaveAttribute("tabIndex", "-1");
+    expect(screen.getAllByRole("link")).toHaveLength(4);
+    expect(screen.getByRole("link", { name: /token contract address/i })).toHaveAttribute(
+      "href",
+      "#tokenAddress",
+    );
+    expect(screen.getByRole("link", { name: /interval/i })).toHaveAttribute(
+      "href",
+      "#interval",
+    );
+
+    // Correct one error
+    rerender(
+      <SubscriptionFormInputs
+        {...baseProps}
+        fieldErrors={{
+          tokenAddress: "Enter a valid token address.",
+          amount: "Amount must be greater than zero.",
+        }}
+      />,
+    );
+
+    expect(screen.queryByRole("link", { name: /merchant address/i })).not.toBeInTheDocument();
+    expect(screen.getAllByRole("link")).toHaveLength(2);
+
+    // Clear all errors
+    rerender(<SubscriptionFormInputs {...baseProps} fieldErrors={{}} />);
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("does not render or throw when focus is requested with no errors", () => {
+    render(
+      <SubscriptionFormInputs
+        {...baseProps}
+        fieldErrors={{}}
+        focusErrorSummaryRequest={1}
+      />,
+    );
+
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
 });

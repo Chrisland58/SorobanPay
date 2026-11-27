@@ -20,8 +20,41 @@ import { Readable, Transform } from 'stream';
 import { pipeline } from 'stream/promises';
 import rateLimit from 'express-rate-limit';
 import prisma from '../lib/prisma';
+import { idempotencyMiddleware } from '../middleware/idempotency';
 
 const router = Router();
+
+router.use(idempotencyMiddleware());
+
+/**
+ * POST /api/v1/payments
+ * Standardized payment mutation route with idempotency support (#1583).
+ */
+router.post('/', async (req: Request, res: Response): Promise<void> => {
+  const { txHash, subscriber, merchant, amount, token, eventType } = req.body;
+  if (!subscriber || !merchant || !amount) {
+    res.status(400).json({ error: 'subscriber, merchant, and amount are required' });
+    return;
+  }
+
+  try {
+    const payment = await prisma.payment.create({
+      data: {
+        txHash: txHash || `tx_${Date.now()}`,
+        subscriber,
+        merchant,
+        amount: String(amount),
+        token: token || 'native',
+        eventType: eventType || 'executed',
+        occurredAt: new Date(),
+      },
+    });
+
+    res.status(201).json({ success: true, payment });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message || 'Failed to record payment' });
+  }
+});
 
 // ---------------------------------------------------------------------------
 // Rate limiter: 5 requests per minute per merchant address

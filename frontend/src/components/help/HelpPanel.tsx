@@ -1,5 +1,7 @@
 "use client";
 
+import { useDialogFocus } from "@/hooks/useDialogFocus";
+
 /**
  * HelpPanel — slide-out documentation panel.
  *
@@ -116,25 +118,17 @@ export function HelpPanel({
     }
   }, [initialArticleId, isOpen]);
 
-  // Focus search on open
-  useEffect(() => {
-    if (isOpen && !selectedArticle) {
-      setTimeout(() => searchRef.current?.focus(), 100);
-    }
-  }, [isOpen, selectedArticle]);
+  const panelRef = useRef<HTMLDivElement>(null);
 
-  // Close on Escape
-  useEffect(() => {
-    if (!isOpen) return;
-    function handleKey(e: KeyboardEvent) {
-      if (e.key === "Escape") {
-        if (selectedArticle) setSelectedArticle(null);
-        else onClose();
-      }
-    }
-    document.addEventListener("keydown", handleKey);
-    return () => document.removeEventListener("keydown", handleKey);
-  }, [isOpen, selectedArticle, onClose]);
+  const { handleKeyDown } = useDialogFocus({
+    isOpen,
+    containerRef: panelRef,
+    initialFocusRef: searchRef,
+    onClose: () => {
+      if (selectedArticle) setSelectedArticle(null);
+      else onClose();
+    },
+  });
 
   // Load saved feedback
   useEffect(() => {
@@ -170,6 +164,8 @@ export function HelpPanel({
       {/* Panel */}
       <div
         ref={panelRef}
+        ref={panelRef}
+        onKeyDown={handleKeyDown}
         role="dialog"
         aria-modal="true"
         aria-label="Help and documentation"

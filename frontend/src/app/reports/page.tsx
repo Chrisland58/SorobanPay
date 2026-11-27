@@ -20,6 +20,8 @@
 import { useCallback, useEffect, useState } from 'react';
 import Link from 'next/link';
 import { useWallet } from '@/hooks/useWallet';
+import { useMerchantContext } from '@/context/MerchantContext';
+import { MerchantContextSwitcher } from '@/components/MerchantContextSwitcher';
 import { NETWORK_NAME } from '@/constants/network';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
@@ -93,6 +95,8 @@ function Spinner() {
 
 export default function ReportsPage() {
   const { publicKey } = useWallet();
+  const { activeMerchant, registerCacheInvalidator } = useMerchantContext();
+  const effectiveMerchant = activeMerchant?.address ?? publicKey;
 
   const [from, setFrom] = useState('');
   const [to, setTo] = useState('');
@@ -104,14 +108,23 @@ export default function ReportsPage() {
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  useEffect(() => {
+    return registerCacheInvalidator(() => {
+      setRows([]);
+      setOffset(0);
+      setHasMore(false);
+      setError(null);
+    });
+  }, [registerCacheInvalidator]);
+
   const fetchPage = useCallback(
     async (nextOffset: number, replace: boolean) => {
-      if (!publicKey) return;
+      if (!effectiveMerchant) return;
       setIsLoading(true);
       setError(null);
       try {
         const url = buildReportUrl({
-          merchant: publicKey,
+          merchant: effectiveMerchant,
           from,
           to,
           status,
@@ -186,6 +199,10 @@ export default function ReportsPage() {
             />
             {NETWORK_NAME}
           </span>
+        </div>
+
+        <div className="mt-4">
+          <MerchantContextSwitcher />
         </div>
       </div>
 

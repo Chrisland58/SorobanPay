@@ -170,11 +170,25 @@ export const webhookRegisterBodySchema = z.object({
   url: webhookUrlSchema,
   events: z
     .array(z.string().min(1))
-    .min(1, 'At least one event type is required'),
+    .min(1, 'At least one event type is required')
+    .max(50, 'Cannot exceed 50 event types'),
   secret: z.string().min(16, 'Webhook secret must be at least 16 characters').optional(),
 });
 
 export type WebhookRegisterBody = z.infer<typeof webhookRegisterBodySchema>;
+
+/**
+ * Batch payment request body with collection-size enforcement (Issue #1591).
+ */
+export const batchPaymentBodySchema = z.object({
+  merchant: stellarAddressSchema,
+  subscribers: z
+    .array(stellarAddressSchema)
+    .min(1, 'At least one subscriber is required')
+    .max(100, 'Batch size cannot exceed 100 subscribers'),
+});
+
+export type BatchPaymentBody = z.infer<typeof batchPaymentBodySchema>;
 
 /**
  * POST /api/v1/auth/token — exchange a signed challenge for a JWT.

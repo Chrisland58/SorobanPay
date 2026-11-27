@@ -17,6 +17,7 @@ This document is the authoritative security reference for SorobanPay. It covers 
 9. [Dependency Security](#9-dependency-security)
 10. [Security Disclosure Policy](#10-security-disclosure-policy)
 11. [Pre-Deployment Security Checklist](#11-pre-deployment-security-checklist)
+12. [Data Retention and Privacy Compliance](#12-data-retention-and-privacy-compliance)
 
 ---
 
@@ -810,3 +811,11 @@ For questions about this policy, reach out via GitHub Discussions.
 - [ ] Frontend `timebounds` set on all transactions to prevent replay
 - [ ] Security advisory channel tested (can create a draft GitHub Security Advisory)
 - [ ] Incident response contacts identified and available
+
+---
+
+## 12. Data Retention and Privacy Compliance
+
+SorobanPay enforces strict separation between mutable off-chain application storage and immutable on-chain Stellar ledger data. For details on retention schedules, GDPR/CCPA deletion request workflows, and reconciliation protections, refer to:
+- [Data Retention and Deletion Policy](data-retention-and-deletion-policy.md)
+

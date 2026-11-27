@@ -19,6 +19,8 @@ import { slideUpVariants, reducedMotionVariants } from '@/lib/animations';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
+export type EmptyStateVariant = 'empty' | 'error' | 'filtered' | 'network-mismatch';
+
 export interface EmptyStateProps {
   /** SVG illustration element */
   illustration: ReactNode;
@@ -34,9 +36,18 @@ export interface EmptyStateProps {
   secondaryLabel?: string;
   /** Optional secondary CTA handler */
   onSecondaryCta?: () => void;
+  /** Semantic and visual state variant */
+  variant?: EmptyStateVariant;
   /** Additional className for the container */
   className?: string;
 }
+
+const VARIANT_STYLES: Record<EmptyStateVariant, string> = {
+  empty: '',
+  filtered: 'border border-dashed border-surface-border rounded-xl bg-surface-overlay/30',
+  error: 'border border-red-500/30 rounded-xl bg-red-500/5',
+  'network-mismatch': 'border border-amber-500/30 rounded-xl bg-amber-500/5',
+};
 
 // ─── Base Component ───────────────────────────────────────────────────────────
 
@@ -48,18 +59,22 @@ export function EmptyState({
   onCta,
   secondaryLabel,
   onSecondaryCta,
+  variant = 'empty',
   className = '',
 }: EmptyStateProps) {
   const prefersReducedMotion = useReducedMotion();
   const variants = prefersReducedMotion ? reducedMotionVariants : slideUpVariants;
+  const isAlert = variant === 'error' || variant === 'network-mismatch';
 
   return (
     <motion.div
       variants={variants}
       initial="hidden"
       animate="visible"
-      className={`flex flex-col items-center justify-center text-center px-6 py-12 ${className}`}
-      role="status"
+      data-state={variant}
+      className={`flex flex-col items-center justify-center text-center px-6 py-12 ${VARIANT_STYLES[variant]} ${className}`}
+      role={isAlert ? 'alert' : 'status'}
+      aria-live={isAlert ? 'assertive' : 'polite'}
       aria-label={title}
     >
       {/* Illustration */}
@@ -416,6 +431,85 @@ export function EmptyAnalyticsState({
       description="Analytics metrics will populate once payment volume and subscription events are recorded."
       ctaLabel="Integration Guide"
       onCta={onGetStarted}
+    />
+  );
+}
+
+/** Error state — request failed; offers retry without discarding filters/form state */
+export function ErrorState({
+  title = 'Failed to load data',
+  description = 'Something went wrong while fetching records. Your current filters and inputs have been preserved.',
+  onRetry,
+  retryLabel = 'Retry',
+  secondaryLabel,
+  onSecondaryCta,
+}: {
+  title?: string;
+  description?: string;
+  onRetry: () => void;
+  retryLabel?: string;
+  secondaryLabel?: string;
+  onSecondaryCta?: () => void;
+}) {
+  return (
+    <EmptyState
+      variant="error"
+      illustration={<IllustrationPaymentHistory />}
+      title={title}
+      description={description}
+      ctaLabel={retryLabel}
+      onCta={onRetry}
+      secondaryLabel={secondaryLabel}
+      onSecondaryCta={onSecondaryCta}
+    />
+  );
+}
+
+/** Filtered no-results state — distinct from true empty; offers filter reset */
+export function FilteredEmptyState({
+  title = 'No matching results',
+  description = 'No records match your current filters. Adjust or clear your filters to see all items.',
+  onResetFilters,
+  resetLabel = 'Clear Filters',
+}: {
+  title?: string;
+  description?: string;
+  onResetFilters: () => void;
+  resetLabel?: string;
+}) {
+  return (
+    <EmptyState
+      variant="filtered"
+      illustration={<IllustrationSearch />}
+      title={title}
+      description={description}
+      ctaLabel={resetLabel}
+      onCta={onResetFilters}
+    />
+  );
+}
+
+/** Network or account mismatch state — prompts user to switch network or reconnect */
+export function NetworkMismatchState({
+  expectedNetwork,
+  onSwitchNetwork,
+  onReconnect,
+}: {
+  expectedNetwork?: string;
+  onSwitchNetwork: () => void;
+  onReconnect?: () => void;
+}) {
+  const networkText = expectedNetwork ? ` (${expectedNetwork})` : '';
+  return (
+    <EmptyState
+      variant="network-mismatch"
+      illustration={<IllustrationWallet />}
+      title="Account or network mismatch"
+      description={`Your connected wallet does not match the expected network${networkText} or account. Switch networks to view your records.`}
+      ctaLabel="Switch Network"
+      onCta={onSwitchNetwork}
+      secondaryLabel={onReconnect ? 'Reconnect Wallet' : undefined}
+      onSecondaryCta={onReconnect}
     />
   );
 }

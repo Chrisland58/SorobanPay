@@ -68,10 +68,16 @@ export interface WalletContextValue {
   isCheckingFreighter: boolean;
   /** True when the active wallet session is no longer valid because Freighter is unavailable. */
   sessionInvalid: boolean;
+  /** True when the provider session has expired, been locked, or disconnected in the background. */
+  sessionExpired: boolean;
   /** Trigger wallet connection — opens Freighter permission dialog. */
   connect: () => Promise<void>;
   /** Clear publicKey and return to disconnected state. */
   disconnect: () => void;
+  /** Actively probe the provider to verify the session is alive (e.g. before write operations). */
+  checkSession: () => Promise<boolean>;
+  /** Safely recover an expired session without re-submitting transactions or clearing draft forms. */
+  recoverSession: () => Promise<boolean>;
 }
 
 // ─── Context ──────────────────────────────────────────────────────────────────
@@ -87,7 +93,9 @@ export function WalletProvider({ children }: { children: ReactNode }) {
   const [freighterInstalled, setFreighterInstalled] = useState(false);
   const [isCheckingFreighter, setIsCheckingFreighter] = useState(true);
   const [sessionInvalid, setSessionInvalid] = useState(false);
+  const [sessionExpired, setSessionExpired] = useState(false);
   const sessionActionRef = useRef(0);
+  const isRecoveringRef = useRef(false);
 
   useEffect(() => {
     if (publicKey && !freighterInstalled) {
@@ -95,11 +103,60 @@ export function WalletProvider({ children }: { children: ReactNode }) {
       setConnectError(
         "Freighter is no longer available. Disconnect and reconnect to restore your session.",
       );
-    } else if (publicKey && freighterInstalled) {
+    } else if (publicKey && freighterInstalled && !sessionExpired) {
       setSessionInvalid(false);
       setConnectError(null);
     }
-  }, [publicKey, freighterInstalled]);
+  }, [publicKey, freighterInstalled, sessionExpired]);
+
+  // Foreground recovery: check provider health when window regains focus or becomes visible
+  useEffect(() => {
+    if (!publicKey) return;
+
+    let cancelled = false;
+    const handleForeground = async () => {
+      if (cancelled || isRecoveringRef.current || typeof document === 'undefined') return;
+      if (document.visibilityState === 'hidden') return;
+
+      try {
+        const restoredKey = await restoreWalletSession().catch(() => null);
+        if (cancelled) return;
+
+        if (!restoredKey) {
+          // Provider session expired or wallet locked
+          setSessionInvalid(true);
+          setSessionExpired(true);
+          setConnectError(
+            'Freighter session has expired or the extension is locked. Reconnect to resume.',
+          );
+        } else if (restoredKey !== publicKey) {
+          // Active account changed in extension
+          setPublicKey(restoredKey);
+          writeCachedPublicKey(restoredKey);
+          setSessionInvalid(false);
+          setSessionExpired(false);
+          setConnectError(null);
+        } else {
+          setSessionInvalid(false);
+          setSessionExpired(false);
+        }
+      } catch {
+        if (!cancelled) {
+          setSessionInvalid(true);
+          setSessionExpired(true);
+        }
+      }
+    };
+
+    window.addEventListener('focus', handleForeground);
+    document.addEventListener('visibilitychange', handleForeground);
+
+    return () => {
+      cancelled = true;
+      window.removeEventListener('focus', handleForeground);
+      document.removeEventListener('visibilitychange', handleForeground);
+    };
+  }, [publicKey]);
 
   // Check Freighter availability and restore a cached session on mount
   // (Issues #110 and #1323).
@@ -187,12 +244,73 @@ export function WalletProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
+  const checkSession = useCallback(async (): Promise<boolean> => {
+    try {
+      const restoredKey = await restoreWalletSession().catch(() => null);
+      if (restoredKey && (!publicKey || restoredKey === publicKey)) {
+        if (!publicKey) {
+          setPublicKey(restoredKey);
+          writeCachedPublicKey(restoredKey);
+        }
+        setSessionInvalid(false);
+        setSessionExpired(false);
+        setConnectError(null);
+        return true;
+      }
+      setSessionInvalid(true);
+      setSessionExpired(true);
+      setConnectError('Freighter session has expired or is locked. Reconnect to resume.');
+      return false;
+    } catch {
+      setSessionInvalid(true);
+      setSessionExpired(true);
+      return false;
+    }
+  }, [publicKey]);
+
+  const recoverSession = useCallback(async (): Promise<boolean> => {
+    if (isRecoveringRef.current) return false;
+    isRecoveringRef.current = true;
+    setIsConnecting(true);
+    setConnectError(null);
+
+    try {
+      // First attempt silent restoration
+      const restoredKey = await restoreWalletSession().catch(() => null);
+      if (restoredKey) {
+        setPublicKey(restoredKey);
+        writeCachedPublicKey(restoredKey);
+        setSessionInvalid(false);
+        setSessionExpired(false);
+        setConnectError(null);
+        return true;
+      }
+
+      // If silent restoration fails, prompt user
+      const key = await connectWallet();
+      setPublicKey(key);
+      writeCachedPublicKey(key);
+      setSessionInvalid(false);
+      setSessionExpired(false);
+      setConnectError(null);
+      return true;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Session recovery failed.';
+      setConnectError(msg);
+      return false;
+    } finally {
+      setIsConnecting(false);
+      isRecoveringRef.current = false;
+    }
+  }, []);
+
   const disconnect = useCallback(() => {
     sessionActionRef.current += 1;
     setPublicKey(null); // Clears stored key (Req 9.6)
     clearCachedPublicKey();
     setConnectError(null);
     setSessionInvalid(false);
+    setSessionExpired(false);
     setIsConnecting(false);
   }, []);
 
@@ -205,8 +323,11 @@ export function WalletProvider({ children }: { children: ReactNode }) {
         freighterInstalled,
         isCheckingFreighter,
         sessionInvalid,
+        sessionExpired,
         connect,
         disconnect,
+        checkSession,
+        recoverSession,
       }}
     >
       {children}
