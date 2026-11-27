@@ -43,6 +43,12 @@ import { downloadReceipt, type ReceiptData } from "@/components/SubscriptionRece
 import { ShareQRCode } from "@/components/ShareQRCode";
 import { FeeEstimate } from "@/components/FeeEstimate";
 import {
+  useSimulateFee,
+  stroopsToXlm,
+  type SimulateFeeStatus,
+  type SimulateFeeBreakdown,
+} from "@/hooks/useSimulateFee";
+import {
   getPersistedFormData,
   persistFormData,
   clearPersistedFormData,
@@ -769,37 +775,61 @@ function AllowanceWarning({
 
 // ─── Confirmation modal ────────────────────────────────────────────────────────
 
-function ConfirmModal({
-  merchantAddress,
-  tokenAddress,
-  amount,
-  interval,
-  allowanceResult,
-  onConfirm,
-  onCancel,
-}: {
+export interface ConfirmModalProps {
+  subscriberAddress: string;
   merchantAddress: string;
   tokenAddress: string;
   amount: string;
   interval: string;
+  networkPassphrase?: string;
+  feeStatus: SimulateFeeStatus;
+  minResourceFee: string | null;
+  feeBreakdown: SimulateFeeBreakdown | null;
+  feeError: string | null;
   allowanceResult: AllowanceResult | null;
+  onRetrySimulation: () => void;
   onConfirm: () => void;
   onCancel: () => void;
-}) {
+}
+
+export function ConfirmModal({
+  subscriberAddress,
+  merchantAddress,
+  tokenAddress,
+  amount,
+  interval,
+  networkPassphrase = NETWORK_PASSPHRASE,
+  feeStatus,
+  minResourceFee,
+  feeBreakdown,
+  feeError,
+  allowanceResult,
+  onRetrySimulation,
+  onConfirm,
+  onCancel,
+}: ConfirmModalProps) {
   // Issue #21 — truncate long addresses for mobile-friendly display
   const truncate = (addr: string) =>
-    addr.length > 16 ? `${addr.slice(0, 8)}…${addr.slice(-6)}` : addr;
+    addr && addr.length > 16 ? `${addr.slice(0, 8)}…${addr.slice(-6)}` : addr;
 
   const days = Math.round(Number(interval) / 86400);
+
+  const isSimulationLoading = feeStatus === 'loading';
+  const isSimulationError = feeStatus === 'error';
+  const isSimulationSuccess = feeStatus === 'success';
+
+  // Signing is allowed ONLY when simulation succeeds
+  const canConfirm = isSimulationSuccess;
+
   return (
     <div
       role="dialog"
       aria-modal="true"
       aria-labelledby="confirm-title"
       aria-describedby="confirm-subtitle"
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4 overflow-y-auto"
     >
-      <div className="w-full max-w-md bg-gray-900 border border-gray-700 rounded-2xl shadow-2xl p-6 space-y-5 text-white">
+      <div className="w-full max-w-lg bg-gray-900 border border-gray-700 rounded-2xl shadow-2xl p-6 space-y-5 text-white my-8">
         {/* Issue #21 — header with icon for clarity */}
         <div className="flex items-center gap-3">
           <span className="text-2xl flex-shrink-0" aria-hidden="true">📋</span>
@@ -815,19 +845,10 @@ function ConfirmModal({
               Review your subscription
             </h3>
             <p id="confirm-subtitle" className="text-sm text-gray-400 mt-0.5">
-              Confirm the details below before calling Freighter.
+              Review transaction details and simulated network fees before signing.
             </p>
           </div>
         </div>
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4"
-    >
-      <div className="w-full max-w-md bg-gray-900 border border-gray-700 rounded-2xl shadow-2xl p-6 space-y-5 text-white">
-        <h3 id="confirm-title" className="text-lg font-bold">
-          Confirm subscription
-        </h3>
-        <p className="text-sm text-gray-400">
-          Review the details before authorizing the on-chain transaction.
-        </p>
 
         {/* Low-allowance warning inside the confirmation dialog */}
         {allowanceResult && !allowanceResult.sufficient && (
@@ -837,51 +858,154 @@ function ConfirmModal({
           />
         )}
 
-        {/* Issue #21 — full summary: merchant, token, amount, interval */}
-        <dl className="bg-gray-800/60 rounded-lg divide-y divide-gray-700 text-sm">
-          {[
-            { label: "Merchant address", value: merchantAddress, truncated: truncate(merchantAddress), full: merchantAddress },
-            { label: "Token address",    value: tokenAddress,    truncated: truncate(tokenAddress),    full: tokenAddress },
-            { label: "Amount",           value: `${amount} tokens`, truncated: `${amount} tokens`,       full: null },
-            { label: "Interval",         value: `Every ${days} day${days !== 1 ? "s" : ""}`, truncated: `Every ${days} day${days !== 1 ? "s" : ""} (${Number(interval).toLocaleString()} s)`, full: null },
-          ].map(({ label, truncated, full }) => (
-            <div key={label} className="flex flex-col gap-0.5 px-4 py-3">
-              <dt className="text-xs text-gray-400 font-medium">{label}</dt>
-              <dd
-                className="font-mono text-xs text-gray-100 break-all"
-                title={full ?? undefined}
-              >
-                {truncated}
-        <dl className="bg-gray-800/60 rounded-lg divide-y divide-gray-700 text-sm">
-          {[
-            ["Merchant", merchantAddress],
-            ["Token", tokenAddress],
-            ["Amount", `${amount} tokens`],
-            ["Interval", `${days} day${days !== 1 ? "s" : ""} (${interval} s)`],
-          ].map(([label, value]) => (
-            <div key={label} className="flex flex-col gap-0.5 px-4 py-3">
-              <dt className="text-xs text-gray-400 font-medium">{label}</dt>
-              <dd className="break-all font-mono text-xs text-gray-100">
-                {value}
-              </dd>
+        {/* Issue #21 — full summary: subscriber, network, merchant, token, amount, interval */}
+        <div className="space-y-1.5">
+          <span className="text-xs font-semibold text-gray-400 uppercase tracking-wider">
+            Transaction Details
+          </span>
+          <dl className="bg-gray-800/60 rounded-lg divide-y divide-gray-700 text-sm">
+            {[
+              { label: "Account (Subscriber)", value: subscriberAddress, truncated: truncate(subscriberAddress), full: subscriberAddress },
+              { label: "Network",              value: networkPassphrase, truncated: networkPassphrase,            full: networkPassphrase },
+              { label: "Merchant address",     value: merchantAddress,   truncated: truncate(merchantAddress),    full: merchantAddress },
+              { label: "Token address",        value: tokenAddress,      truncated: truncate(tokenAddress),       full: tokenAddress },
+              { label: "Amount",               value: `${amount} tokens`, truncated: `${amount} tokens`,          full: null },
+              { label: "Billing Interval",     value: `Every ${days} day${days !== 1 ? "s" : ""}`, truncated: `Every ${days} day${days !== 1 ? "s" : ""} (${Number(interval).toLocaleString()} s)`, full: null },
+            ].map(({ label, truncated, full }) => (
+              <div key={label} className="flex flex-col gap-0.5 px-4 py-2.5">
+                <dt className="text-xs text-gray-400 font-medium">{label}</dt>
+                <dd
+                  className="font-mono text-xs text-gray-100 break-all"
+                  title={full ?? undefined}
+                >
+                  {truncated}
+                </dd>
+              </div>
+            ))}
+          </dl>
+        </div>
+
+        {/* Simulation Preview Section */}
+        <div className="space-y-2">
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-semibold text-gray-400 uppercase tracking-wider">
+              Simulation Preview
+            </span>
+            {isSimulationSuccess && (
+              <span className="inline-flex items-center text-xs font-medium text-emerald-400 gap-1">
+                <span className="w-2 h-2 rounded-full bg-emerald-400" />
+                Simulation Passed
+              </span>
+            )}
+          </div>
+
+          {isSimulationLoading && (
+            <div
+              data-testid="simulation-loading"
+              className="p-4 bg-gray-800/40 border border-blue-500/30 rounded-lg flex items-center gap-3 text-sm text-blue-300"
+            >
+              <div className="w-4 h-4 border-2 border-blue-400 border-t-transparent rounded-full animate-spin" />
+              <span>Simulating transaction on Soroban RPC...</span>
             </div>
-          ))}
-        </dl>
+          )}
+
+          {isSimulationError && (
+            <div
+              data-testid="simulation-error"
+              className="p-4 bg-red-950/40 border border-red-500/50 rounded-lg space-y-3"
+            >
+              <div className="flex items-start gap-2 text-red-300 text-sm">
+                <span className="text-red-400 text-base font-bold" aria-hidden="true">⚠️</span>
+                <div className="flex-1">
+                  <p className="font-semibold text-red-200">Simulation Failed</p>
+                  <p className="text-xs text-red-300 mt-1 break-words">
+                    {feeError || 'The transaction simulation failed. Signing is blocked to protect your account.'}
+                  </p>
+                  <p className="text-xs text-red-400/80 mt-1">
+                    Signing is blocked until simulation succeeds. You can retry simulation without losing entered form data.
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={onRetrySimulation}
+                data-testid="retry-simulation-btn"
+                className="w-full py-2 px-3 text-xs font-semibold bg-red-900/60 hover:bg-red-800/70 active:bg-red-950 border border-red-600/60 rounded-md text-red-100 transition-colors flex items-center justify-center gap-2 cursor-pointer"
+              >
+                <span>🔄</span>
+                <span>Retry Simulation</span>
+              </button>
+            </div>
+          )}
+
+          {isSimulationSuccess && minResourceFee && (
+            <div
+              data-testid="simulation-success"
+              className="p-4 bg-gray-800/60 border border-gray-700 rounded-lg space-y-2 text-sm"
+            >
+              <div className="flex justify-between items-baseline">
+                <span className="text-xs text-gray-400">Estimated Resource Fee:</span>
+                <span className="font-mono text-sm font-semibold text-emerald-400">
+                  {stroopsToXlm(minResourceFee)} XLM
+                  <span className="text-xs text-gray-400 ml-1">
+                    ({Number(minResourceFee).toLocaleString()} stroops)
+                  </span>
+                </span>
+              </div>
+              {feeBreakdown && (
+                <div className="pt-2 border-t border-gray-700/60 grid grid-cols-3 gap-2 text-xs">
+                  <div>
+                    <span className="text-gray-400 block text-[11px]">Instructions</span>
+                    <span className="font-mono text-gray-200">
+                      {feeBreakdown.instructions.toLocaleString()}
+                    </span>
+                  </div>
+                  <div>
+                    <span className="text-gray-400 block text-[11px]">Read Bytes</span>
+                    <span className="font-mono text-gray-200">
+                      {feeBreakdown.readBytes.toLocaleString()} B
+                    </span>
+                  </div>
+                  <div>
+                    <span className="text-gray-400 block text-[11px]">Write Bytes</span>
+                    <span className="font-mono text-gray-200">
+                      {feeBreakdown.writeBytes.toLocaleString()} B
+                    </span>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {feeStatus === 'idle' && (
+            <div className="p-3 bg-gray-800/30 border border-gray-700/50 rounded-lg text-xs text-gray-400">
+              Awaiting transaction simulation before signing can proceed.
+            </div>
+          )}
+        </div>
 
         {/* Issue #21 — Go Back first in tab order (logical: cancel before confirm) */}
-        <div className="flex gap-3 pt-1">
+        <div className="flex gap-3 pt-2">
           <button
+            type="button"
             onClick={onCancel}
-            className="flex-1 rounded-lg border border-gray-600 bg-gray-800/50 text-gray-300 hover:bg-gray-700 active:bg-gray-800 py-3 text-sm font-semibold transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-500"
+            data-testid="confirm-go-back-btn"
+            className="flex-1 rounded-lg border border-gray-600 bg-gray-800/50 text-gray-300 hover:bg-gray-700 active:bg-gray-800 py-3 text-sm font-semibold transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-500 cursor-pointer"
           >
             Go Back
           </button>
           <button
+            type="button"
             onClick={onConfirm}
-            className="flex-1 rounded-lg bg-blue-600 hover:bg-blue-500 active:bg-blue-700 py-3 text-sm font-semibold transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400"
+            disabled={!canConfirm}
+            data-testid="confirm-authorize-btn"
+            className={`flex-1 rounded-lg py-3 text-sm font-semibold transition-colors focus:outline-none focus-visible:ring-2 ${
+              canConfirm
+                ? 'bg-blue-600 hover:bg-blue-500 active:bg-blue-700 text-white focus-visible:ring-blue-400 cursor-pointer'
+                : 'bg-gray-700/60 text-gray-400 cursor-not-allowed border border-gray-600/40'
+            }`}
           >
             Confirm &amp; Authorize
-            Confirm & Authorize
           </button>
         </div>
       </div>
@@ -1570,6 +1694,7 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
     minResourceFee,
     breakdown: feeBreakdown,
     error: feeError,
+    retry: retryFeeSimulation,
   } = useSimulateFee({
     subscriber: publicKey ?? '',
     merchant: merchantAddress,
@@ -1605,10 +1730,6 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
   // ── Cancel subscription state ──────────────────────────────────────────────
   const [cancelMerchant, setCancelMerchant]       = useState('');
   const [cancelToken, setCancelToken]             = useState('');
-  const [showCancelConfirm, setShowCancelConfirm] = useState(false);
-  const [isCancelling, setIsCancelling]           = useState(false);
-  const [cancelSuccess, setCancelSuccess]         = useState<{ txHash: string; merchant: string } | null>(null);
-  const [cancelError, setCancelError]             = useState<TxErrorInfo | null>(null);
 
   const labelCls = 'block text-sm font-semibold text-gray-100 mb-2.5';
   const hintCls = 'text-xs text-gray-300 leading-relaxed';
@@ -1860,11 +1981,14 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
     setIsCancelling(true);
     setCancelError(null);
     try {
+      const merchantToCancel = successData ? successData.merchant : cancelMerchant.trim();
+      const tokenToCancel = successData ? successData.token : cancelToken.trim();
+
       const result = await buildAndSubmitCancel(
         {
           subscriber: publicKey,
-          merchant: cancelMerchant.trim(),
-          token: cancelToken.trim(),
+          merchant: merchantToCancel,
+          ...(tokenToCancel ? { token: tokenToCancel } : {}),
         },
         CONTRACT_ID,
         publicKey,
@@ -1874,49 +1998,15 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
 
       setCancelSuccess({
         txHash: result.txHash,
-        merchant: cancelMerchant.trim(),
-      });
-      setCancelMerchant('');
-      setCancelToken('');
-    } catch (err) {
-      setCancelError(classifyError(err));
-    } finally {
-      setIsCancelling(false);
-    }
-  }
-
-  /**
-   * handleConfirmCancel — execute the on-chain cancel() call.
-   *
-   * #765: Previously this was a setTimeout(resolve, 300) placeholder.
-   * Now calls buildAndSubmitCancel() from cancel_builder.ts which
-   * builds, signs (via Freighter), and submits the real cancel transaction.
-   */
-  async function handleConfirmCancel() {
-    setShowCancelConfirm(false);
-    if (!publicKey || !successData) return;
-
-    setIsCancelling(true);
-    setCancelError(null);
-    try {
-      const result = await buildAndSubmitCancel(
-        {
-          subscriber: publicKey,
-          merchant: successData.merchant,
-        },
-        CONTRACT_ID,
-        publicKey,
-        NETWORK_PASSPHRASE,
-        RPC_URL,
-      );
-
-      setCancelSuccess({
-        txHash: result.txHash,
-        merchant: successData.merchant,
+        merchant: merchantToCancel,
         subscriber: publicKey,
       });
-      // Clear the subscription success state since it has now been cancelled
-      setSuccessData(null);
+      if (successData) {
+        setSuccessData(null);
+      } else {
+        setCancelMerchant('');
+        setCancelToken('');
+      }
     } catch (err) {
       setCancelError(classifyError(err));
     } finally {
@@ -1929,11 +2019,18 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
     <div className="w-full min-w-0 max-w-lg mx-auto bg-gray-900 rounded-2xl shadow-xl p-4 sm:p-8 text-white">
       {showConfirm && (
         <ConfirmModal
+          subscriberAddress={publicKey ?? ''}
           merchantAddress={merchantAddress}
           tokenAddress={tokenAddress}
           amount={amount}
           interval={interval}
+          networkPassphrase={NETWORK_PASSPHRASE}
+          feeStatus={feeStatus}
+          minResourceFee={minResourceFee}
+          feeBreakdown={feeBreakdown}
+          feeError={feeError}
           allowanceResult={isCheckingAllowance ? null : allowanceResult}
+          onRetrySimulation={retryFeeSimulation}
           onConfirm={confirmAndSubmit}
           onCancel={() => setShowConfirm(false)}
         />
