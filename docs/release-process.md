@@ -147,6 +147,8 @@ The GraphQL schema follows the same compatibility rules as the REST API.
 
 Database migrations are applied with `npx prisma migrate deploy` (never auto-applied on startup in production).
 
+> For the comprehensive compatibility matrix, expand-and-contract rollout phases, and release checklists, see [docs/database-migrations.md](./database-migrations.md).
+
 #### Rules for migration authoring
 
 | Rule | Rationale |
