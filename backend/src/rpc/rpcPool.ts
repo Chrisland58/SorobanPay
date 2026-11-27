@@ -33,6 +33,8 @@ export interface RpcPoolConfig {
   recoveryTimeoutMs?: number;
   /** Per-request HTTP timeout in milliseconds (default: 10 000) */
   requestTimeoutMs?: number;
+  /** Maximum number of failover retries for read requests (default: endpoints.length - 1) */
+  maxRetries?: number;
 }
 
 export interface RpcRequest {
@@ -48,6 +50,27 @@ export interface RpcResponse<T = unknown> {
   error?: { code: number; message: string; data?: unknown };
 }
 
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+const WRITE_RPC_METHODS = new Set(['sendTransaction']);
+
+/**
+ * Strip userinfo, query parameters, and fragments from an RPC URL so
+ * credentials or API keys are never written to logs or error diagnostics.
+ */
+export function redactUrl(rawUrl: string): string {
+  try {
+    const parsed = new URL(rawUrl);
+    parsed.username = '';
+    parsed.password = '';
+    parsed.search = '';
+    parsed.hash = '';
+    return parsed.toString();
+  } catch {
+    return rawUrl.replace(/\/\/[^@/]+@/, '//').split('?')[0].split('#')[0];
+  }
+}
+
 // ── RPC Pool ─────────────────────────────────────────────────────────────────
 
 export class RpcConnectionPool {
@@ -57,6 +80,7 @@ export class RpcConnectionPool {
   private readonly failureThreshold: number;
   private readonly recoveryTimeoutMs: number;
   private readonly requestTimeoutMs: number;
+  private readonly maxRetries: number | undefined;
 
   constructor(config: RpcPoolConfig) {
     const rawUrls = Array.isArray(config.urls)
@@ -73,6 +97,7 @@ export class RpcConnectionPool {
     this.failureThreshold = config.failureThreshold ?? 3;
     this.recoveryTimeoutMs = config.recoveryTimeoutMs ?? 60_000;
     this.requestTimeoutMs = config.requestTimeoutMs ?? 10_000;
+    this.maxRetries = config.maxRetries;
 
     this.endpoints = urls.map((url) => ({
       url,
@@ -85,24 +110,33 @@ export class RpcConnectionPool {
     }));
 
     logger.info(
-      `[RpcPool] Initialized with ${this.endpoints.length} endpoint(s): ${urls.join(', ')}`,
+      `[RpcPool] Initialized with ${this.endpoints.length} endpoint(s): ${urls.map(redactUrl).join(', ')}`,
     );
   }
 
   // ── Public API ─────────────────────────────────────────────────────────────
 
   /**
-   * Send a JSON-RPC request. Automatically retries on unhealthy/failing
-   * endpoints until all are exhausted.
+   * Send a JSON-RPC request. Automatically retries read operations on
+   * unhealthy/failing endpoints within the configured retry budget.
+   * Write submissions (e.g. sendTransaction) are never replayed automatically.
    */
   async request<T = unknown>(req: RpcRequest): Promise<RpcResponse<T>> {
+    const isWrite = WRITE_RPC_METHODS.has(req.method);
+    const maxAttempts = isWrite
+      ? 1
+      : this.maxRetries !== undefined
+        ? Math.min(1 + Math.max(0, this.maxRetries), this.endpoints.length)
+        : this.endpoints.length;
+
     const tried = new Set<string>();
     const startIndex = this.currentIndex;
+    let attempts = 0;
 
     // Try the current endpoint first, then the next healthy endpoints.
     // A failed initial endpoint should not rotate the pointer until a later
     // request succeeds, which preserves the circuit-breaker behavior.
-    for (let offset = 0; offset < this.endpoints.length; offset++) {
+    for (let offset = 0; offset < this.endpoints.length && attempts < maxAttempts; offset++) {
       this.maybeRecoverEndpoints();
 
       const idx = (startIndex + offset) % this.endpoints.length;
@@ -111,6 +145,7 @@ export class RpcConnectionPool {
         continue;
       }
       tried.add(endpoint.url);
+      attempts++;
 
       try {
         const response = await this.sendRequest<T>(endpoint, req);
@@ -124,7 +159,7 @@ export class RpcConnectionPool {
         return response;
       } catch (err) {
         logger.warn(
-          `[RpcPool] Request failed on ${endpoint.url}: ${(err as Error).message}`,
+          `[RpcPool] Request failed on ${redactUrl(endpoint.url)}: ${(err as Error).message}`,
         );
         this.recordFailure(endpoint);
       }
@@ -196,7 +231,7 @@ export class RpcConnectionPool {
       ) {
         ep.state = 'healthy';
         ep.consecutiveFailures = 0;
-        logger.info(`[RpcPool] Endpoint recovered: ${ep.url}`);
+        logger.info(`[RpcPool] Endpoint recovered: ${redactUrl(ep.url)}`);
       }
     }
   }
@@ -207,7 +242,7 @@ export class RpcConnectionPool {
     ep.lastCheckedAt = Date.now();
     if (ep.state !== 'healthy') {
       ep.state = 'healthy';
-      logger.info(`[RpcPool] Endpoint back to healthy: ${ep.url}`);
+      logger.info(`[RpcPool] Endpoint back to healthy: ${redactUrl(ep.url)}`);
     }
   }
 
@@ -221,7 +256,7 @@ export class RpcConnectionPool {
     if (ep.consecutiveFailures >= this.failureThreshold) {
       ep.state = 'unhealthy';
       logger.warn(
-        `[RpcPool] Circuit breaker OPEN for ${ep.url} ` +
+        `[RpcPool] Circuit breaker OPEN for ${redactUrl(ep.url)} ` +
           `(${ep.consecutiveFailures} consecutive failures). ` +
           `Will retry after ${this.recoveryTimeoutMs / 1000}s`,
       );
@@ -260,14 +295,21 @@ export class RpcConnectionPool {
 
     // Treat HTTP 429 (rate-limited) as a failure to trigger failover
     if (res.status === 429) {
-      throw new Error(`HTTP 429 rate-limited by ${ep.url}`);
+      throw new Error(`HTTP 429 rate-limited by ${redactUrl(ep.url)}`);
     }
 
     if (!res.ok) {
-      throw new Error(`HTTP ${res.status} from ${ep.url}`);
+      throw new Error(`HTTP ${res.status} from ${redactUrl(ep.url)}`);
     }
 
     const json = (await res.json()) as RpcResponse<T>;
+    if (
+      !json ||
+      typeof json !== 'object' ||
+      (json.result === undefined && json.error === undefined)
+    ) {
+      throw new Error(`Malformed JSON-RPC response from ${redactUrl(ep.url)}`);
+    }
 
     // JSON-RPC level errors are NOT considered connection failures —
     // the endpoint responded correctly, just with an application error.
@@ -299,6 +341,10 @@ export function getRpcPool(): RpcConnectionPool {
     requestTimeoutMs: Number(
       process.env.RPC_REQUEST_TIMEOUT_MS ?? 10_000,
     ),
+    maxRetries:
+      process.env.RPC_MAX_RETRIES !== undefined
+        ? Number(process.env.RPC_MAX_RETRIES)
+        : undefined,
   });
 
   return _pool;

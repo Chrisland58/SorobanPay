@@ -20,7 +20,8 @@
  *   - Shows the transaction hash with a Stellar Expert explorer link on success.
  */
 
-import { useEffect, useState, type FormEvent } from 'react';
+import { useState, type FormEvent } from 'react';
+import DisabledActionReason, { getFirstDisabledReason } from '@/components/DisabledActionReason';
 import { useWallet } from '@/hooks/useWallet';
 import { buildExplorerUrl } from '@/hooks/useTransactionPoller';
 import { buildAndSubmitTransferSubscription } from '@/lib/transaction_builder';
@@ -261,6 +262,34 @@ export default function TransferSubscriptionForm({
     !!newMerchant.trim() &&
     oldMerchant.trim() !== newMerchant.trim();
 
+  const submitDisabledInfo = getFirstDisabledReason([
+    {
+      when: isSubmitting,
+      reason: 'Transfer is currently submitting.',
+      nextStep: 'Wait for wallet confirmation or network settlement to finish.',
+    },
+    {
+      when: !publicKey,
+      reason: 'Wallet not connected.',
+      nextStep: 'Connect your Stellar wallet to transfer this subscription.',
+    },
+    {
+      when: !oldMerchant.trim(),
+      reason: 'Current merchant address is required.',
+      nextStep: 'Enter the current merchant Stellar address above.',
+    },
+    {
+      when: !newMerchant.trim(),
+      reason: 'New merchant address is required.',
+      nextStep: 'Enter the destination merchant Stellar address above.',
+    },
+    {
+      when: oldMerchant.trim() === newMerchant.trim(),
+      reason: 'New merchant address must differ from the current merchant.',
+      nextStep: 'Enter a different destination merchant address.',
+    },
+  ]);
+
   return (
     <div className="w-full max-w-lg mx-auto bg-gray-900 rounded-2xl shadow-xl p-5 sm:p-8 text-white">
       {showConfirm && (
@@ -480,10 +509,16 @@ export default function TransferSubscriptionForm({
         <button
           type="submit"
           disabled={!canSubmit || isSubmitting}
+          aria-describedby={submitDisabledInfo ? 'transfer-subscription-disabled-reason' : undefined}
           className="w-full rounded-lg bg-blue-600 hover:bg-blue-500 active:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed py-3 text-sm font-semibold text-white transition-all duration-150 min-h-[48px] hover:shadow-lg focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400 focus-visible:ring-offset-2 focus-visible:ring-offset-gray-900"
         >
           {isSubmitting ? 'Submitting…' : 'Transfer Subscription'}
         </button>
+        <DisabledActionReason
+          id="transfer-subscription-disabled-reason"
+          reason={submitDisabledInfo?.reason}
+          nextStep={submitDisabledInfo?.nextStep}
+        />
       </form>
     </div>
   );

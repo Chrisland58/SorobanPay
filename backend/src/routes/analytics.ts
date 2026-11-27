@@ -269,7 +269,21 @@ router.get(
         direction: query.direction,
       });
 
-      return res.json(page);
+      return res.json({
+        data: page.items,
+        pagination: {
+          limit: page.pageSize,
+          hasMore: page.nextCursor !== null,
+          nextCursor: page.nextCursor,
+          prevCursor: page.prevCursor,
+          total: page.total,
+        },
+        items: page.items,
+        nextCursor: page.nextCursor,
+        prevCursor: page.prevCursor,
+        total: page.total,
+        pageSize: page.pageSize,
+      });
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Unknown error';
       if (message === 'Invalid cursor') {

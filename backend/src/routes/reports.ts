@@ -65,18 +65,7 @@ const CSV_HEADERS = [
   'Status',
 ];
 
-/** Escape a single CSV cell value per RFC 4180. */
-function escapeCsvCell(value: string): string {
-  if (/[",\r\n]/.test(value)) {
-    return `"${value.replace(/"/g, '""')}"`;
-  }
-  return value;
-}
-
-/** Format a CSV row from an array of cell values. */
-function toCsvRow(cells: string[]): string {
-  return cells.map(escapeCsvCell).join(',') + '\r\n';
-}
+import { toCsvRow } from '../utils/csv';
 
 /**
  * Convert a raw amount string (BigInt-compatible) to a human-readable decimal.
@@ -391,5 +380,86 @@ router.get(
     }
   },
 );
+
+import {
+  createSnapshotExportJob,
+  getExportStatus,
+  downloadExportSnapshot,
+  ExportError,
+} from '../services/snapshotExportService';
+
+// ── Async Snapshot Export Flow (Issue #1600) ──────────────────────────────────
+
+router.post('/export/async', async (req: Request, res: Response) => {
+  const merchant = (req.body.merchant || req.query.merchant || (req as any).tenantId) as string;
+  if (!merchant) {
+    return res.status(400).json({ error: 'merchant is required for export' });
+  }
+
+  try {
+    const job = await createSnapshotExportJob(merchant, async (snapshotAt) => {
+      // Query bounded to snapshotAt timestamp
+      const payments = await prisma.payment.findMany({
+        where: {
+          merchant,
+          createdAt: { lte: snapshotAt },
+        },
+        orderBy: { createdAt: 'desc' },
+        take: 50000,
+      });
+      return payments;
+    });
+
+    res.status(202).json({
+      jobId: job.jobId,
+      status: job.status,
+      snapshotAt: job.snapshotAt,
+      downloadToken: job.downloadToken,
+      expiresAt: job.expiresAt,
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message || 'Failed to start export job' });
+  }
+});
+
+router.get('/export/status/:jobId', (req: Request, res: Response) => {
+  const { jobId } = req.params;
+  const merchant = (req.query.merchant || (req as any).tenantId) as string;
+  if (!merchant) {
+    return res.status(400).json({ error: 'merchant query parameter is required' });
+  }
+
+  try {
+    const status = getExportStatus(jobId, merchant);
+    res.json(status);
+  } catch (err: any) {
+    if (err instanceof ExportError) {
+      return res.status(err.statusCode).json({ error: err.message });
+    }
+    res.status(500).json({ error: 'Failed to retrieve export status' });
+  }
+});
+
+router.get('/export/download/:jobId', (req: Request, res: Response) => {
+  const { jobId } = req.params;
+  const merchant = (req.query.merchant || (req as any).tenantId) as string;
+  const token = req.query.token as string;
+
+  if (!merchant || !token) {
+    return res.status(400).json({ error: 'merchant and token are required for download' });
+  }
+
+  try {
+    const { filename, csv } = downloadExportSnapshot(jobId, merchant, token);
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.send(csv);
+  } catch (err: any) {
+    if (err instanceof ExportError) {
+      return res.status(err.statusCode).json({ error: err.message });
+    }
+    res.status(500).json({ error: 'Download failed' });
+  }
+});
 
 export default router;

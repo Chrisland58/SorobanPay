@@ -53,6 +53,21 @@ pub enum DataKey {
 
     /// Optional maximum subscription amount for this deployment.
     MaxAmount,
+
+    /// Pending schedule change: maps subscription key -> PendingScheduleChange (#1604)
+    PendingSchedule(BytesN<32>),
+
+    /// Subscriber-approved terms digest: maps subscription key -> BytesN<32> (#1603)
+    TermsDigest(BytesN<32>),
+}
+
+/// Scheduled subscription parameter change with explicit effective time (#1604).
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct PendingScheduleChange {
+    pub new_amount: i128,
+    pub new_interval: u64,
+    pub effective_time: u64,
 }
 
 /// Persistent on-chain record for a subscription.
@@ -88,6 +103,10 @@ pub struct SubscriptionData {
     pub paused_until: Option<u64>,
     /// Timestamp when the subscription first became overdue.
     pub overdue_since: Option<u64>,
+    /// Incremental nonce tracking execution count for this subscription.
+    pub payment_nonce: u32,
+    /// Whether the subscription is scheduled to cancel at the end of the current billing period.
+    pub cancel_at_period_end: Option<bool>,
 }
 
 /// Subscription layout stored before schema version 2.
@@ -120,6 +139,11 @@ impl SubscriptionData {
     /// Return the timestamp when the subscription became overdue, or zero if current.
     pub fn overdue_since_ts(&self) -> u64 {
         self.overdue_since.unwrap_or(0)
+    }
+
+    /// Return whether the subscription is scheduled to cancel at the current period end.
+    pub fn will_cancel_at_period_end(&self) -> bool {
+        self.cancel_at_period_end.unwrap_or(false)
     }
 
     /// Return whether the subscription is paused at `now`.

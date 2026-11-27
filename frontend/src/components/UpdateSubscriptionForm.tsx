@@ -22,6 +22,7 @@
  */
 
 import { useState, useCallback, useEffect, type FormEvent } from 'react';
+import DisabledActionReason, { getFirstDisabledReason } from '@/components/DisabledActionReason';
 import { useWallet } from '@/hooks/useWallet';
 import { buildExplorerUrl } from '@/hooks/useTransactionPoller';
 import { buildAndSubmitUpdateSubscription } from '@/lib/transaction_builder';
@@ -352,6 +353,34 @@ export default function UpdateSubscriptionForm({
     !!amount.trim() &&
     !!interval.trim();
 
+  const submitDisabledInfo = getFirstDisabledReason([
+    {
+      when: isSubmitting,
+      reason: 'Transaction is currently submitting.',
+      nextStep: 'Wait for wallet confirmation or network settlement to finish.',
+    },
+    {
+      when: !publicKey,
+      reason: 'Wallet not connected.',
+      nextStep: 'Connect your Stellar wallet to update this subscription.',
+    },
+    {
+      when: !merchantAddress.trim(),
+      reason: 'Merchant address is required.',
+      nextStep: 'Enter the merchant Stellar address above.',
+    },
+    {
+      when: !amount.trim(),
+      reason: 'New amount is required.',
+      nextStep: 'Enter the updated subscription amount.',
+    },
+    {
+      when: !interval.trim(),
+      reason: 'Billing interval is required.',
+      nextStep: 'Enter the billing interval in seconds.',
+    },
+  ]);
+
   const showLoadCurrent = !!publicKey && !!tokenAddress.trim();
 
   return (
@@ -615,10 +644,16 @@ export default function UpdateSubscriptionForm({
         <button
           type="submit"
           disabled={!canSubmit || isSubmitting}
+          aria-describedby={submitDisabledInfo ? 'update-subscription-disabled-reason' : undefined}
           className="w-full rounded-lg bg-blue-600 hover:bg-blue-500 active:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed py-3 text-sm font-semibold text-white transition-all duration-150 min-h-[48px] hover:shadow-lg focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400 focus-visible:ring-offset-2 focus-visible:ring-offset-gray-900"
         >
           {isSubmitting ? 'Submitting…' : 'Update Subscription'}
         </button>
+        <DisabledActionReason
+          id="update-subscription-disabled-reason"
+          reason={submitDisabledInfo?.reason}
+          nextStep={submitDisabledInfo?.nextStep}
+        />
       </form>
     </div>
   );

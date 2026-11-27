@@ -44,7 +44,8 @@ export type JobStatus =
   | 'delivering'
   | 'delivered'
   | 'failed'
-  | 'dead_lettered';
+  | 'dead_lettered'
+  | 'quarantined';
 
 /** A webhook delivery job. */
 export interface WebhookJob {
@@ -82,6 +83,25 @@ export interface DeadLetterEntry {
   lastReplayedAt?: string;
 }
 
+/** Quarantine audit entry tracking lifecycle events (#1641). */
+export interface QuarantineAuditRecord {
+  action: 'quarantined' | 'replay_attempted' | 'released' | 'resolved';
+  timestamp: string;
+  actor?: string;
+  details?: Record<string, unknown>;
+}
+
+/** Quarantined job record preserving delivery failure history and isolation (#1641). */
+export interface QuarantineEntry {
+  job: WebhookJob;
+  reason: string;
+  reasonCode: string;
+  quarantinedAt: string;
+  auditHistory: QuarantineAuditRecord[];
+  replayCount: number;
+  lastReplayedAt?: string;
+}
+
 /** Result of a single delivery attempt. */
 export interface DeliveryResult {
   success: boolean;
@@ -107,6 +127,9 @@ export interface JobStore {
   listDeadLetters(): DeadLetterEntry[];
   saveDeadLetter(entry: DeadLetterEntry): void;
   getDeadLetter(id: string): DeadLetterEntry | undefined;
+  listQuarantined(merchantAddress?: string): QuarantineEntry[];
+  saveQuarantined(entry: QuarantineEntry): void;
+  getQuarantined(id: string): QuarantineEntry | undefined;
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -143,6 +166,7 @@ const log = {
 export class InMemoryJobStore implements JobStore {
   private readonly jobs = new Map<string, WebhookJob>();
   private readonly deadLetters = new Map<string, DeadLetterEntry>();
+  private readonly quarantined = new Map<string, QuarantineEntry>();
 
   get(id: string): WebhookJob | undefined {
     return this.jobs.get(id);
@@ -170,10 +194,26 @@ export class InMemoryJobStore implements JobStore {
     return this.deadLetters.get(id);
   }
 
+  listQuarantined(merchantAddress?: string): QuarantineEntry[] {
+    const list = [...this.quarantined.values()];
+    return merchantAddress
+      ? list.filter((e) => e.job.merchantAddress === merchantAddress)
+      : list;
+  }
+
+  saveQuarantined(entry: QuarantineEntry): void {
+    this.quarantined.set(entry.job.id, { ...entry });
+  }
+
+  getQuarantined(id: string): QuarantineEntry | undefined {
+    return this.quarantined.get(id);
+  }
+
   /** Test helper: clear all state. */
   clear(): void {
     this.jobs.clear();
     this.deadLetters.clear();
+    this.quarantined.clear();
   }
 }
 
@@ -319,26 +359,47 @@ export class WebhookQueue {
     };
 
     if (updatedJob.attempts >= MAX_ATTEMPTS) {
-      // Dead-letter the job
-      const deadJob: WebhookJob = {
+      // Exceeded retry policy: quarantine and dead-letter the job (#1641)
+      const terminalJob: WebhookJob = {
         ...failedJob,
-        status: 'dead_lettered',
+        status: 'quarantined',
         resolvedAt: new Date().toISOString(),
       };
-      this.store.save(deadJob);
+      this.store.save(terminalJob);
 
+      const reason = `Exhausted ${MAX_ATTEMPTS} delivery attempts. Last error: ${terminalJob.lastError ?? 'unknown'}`;
       const entry: DeadLetterEntry = {
-        job: deadJob,
-        reason: `Exhausted ${MAX_ATTEMPTS} delivery attempts. Last error: ${deadJob.lastError ?? 'unknown'}`,
+        job: terminalJob,
+        reason,
         deadLetteredAt: new Date().toISOString(),
         replayCount: 0,
       };
       this.store.saveDeadLetter(entry);
 
-      log.error('job dead-lettered', {
+      const quarantineEntry: QuarantineEntry = {
+        job: terminalJob,
+        reason,
+        reasonCode: 'EXCEEDED_MAX_RETRIES',
+        quarantinedAt: new Date().toISOString(),
+        auditHistory: [
+          {
+            action: 'quarantined',
+            timestamp: new Date().toISOString(),
+            actor: 'system.retry_policy',
+            details: {
+              attempts: terminalJob.attempts,
+              lastError: terminalJob.lastError,
+            },
+          },
+        ],
+        replayCount: 0,
+      };
+      this.store.saveQuarantined(quarantineEntry);
+
+      log.error('job quarantined and dead-lettered', {
         id,
         merchant: job.merchantAddress,
-        attempts: deadJob.attempts,
+        attempts: terminalJob.attempts,
       });
 
       // Alert operators asynchronously — do not let alerter failures block
@@ -346,7 +407,7 @@ export class WebhookQueue {
         log.warn('operator alerter threw', { error: sanitiseError(alertErr) });
       });
 
-      return { kind: 'dead_lettered', id, attempts: deadJob.attempts, reason: entry.reason };
+      return { kind: 'dead_lettered', id, attempts: terminalJob.attempts, reason: entry.reason };
     }
 
     this.store.save(failedJob);
@@ -455,6 +516,124 @@ export class WebhookQueue {
    */
   getDeadLetter(id: string): DeadLetterEntry | undefined {
     return this.store.getDeadLetter(id);
+  }
+
+  // ── Quarantine operations (#1641) ─────────────────────────────────────────
+
+  /**
+   * Manually or automatically quarantine a problematic job.
+   */
+  quarantineJob(
+    id: string,
+    reason: string,
+    reasonCode: string = 'MANUAL_QUARANTINE',
+    actor: string = 'operator',
+  ): QuarantineEntry | null {
+    const job = this.store.get(id);
+    if (!job) return null;
+
+    const quarantinedJob: WebhookJob = {
+      ...job,
+      status: 'quarantined',
+      resolvedAt: new Date().toISOString(),
+      lastError: reason,
+    };
+    this.store.save(quarantinedJob);
+
+    const existingQuarantine = this.store.getQuarantined(id);
+    const auditRecord: QuarantineAuditRecord = {
+      action: 'quarantined',
+      timestamp: new Date().toISOString(),
+      actor,
+      details: { reason, reasonCode },
+    };
+
+    const quarantineEntry: QuarantineEntry = existingQuarantine
+      ? {
+          ...existingQuarantine,
+          job: quarantinedJob,
+          reason,
+          reasonCode,
+          auditHistory: [...existingQuarantine.auditHistory, auditRecord],
+        }
+      : {
+          job: quarantinedJob,
+          reason,
+          reasonCode,
+          quarantinedAt: new Date().toISOString(),
+          auditHistory: [auditRecord],
+          replayCount: 0,
+        };
+
+    this.store.saveQuarantined(quarantineEntry);
+    log.info('job quarantined', { id, merchant: job.merchantAddress, reasonCode });
+    return quarantineEntry;
+  }
+
+  /**
+   * Replay a quarantined job after remediation.
+   * Resets attempts to 0 and re-enqueues as pending, recording audit history.
+   */
+  replayQuarantinedJob(id: string, actor: string = 'operator'): ReplayResult {
+    const quarantineEntry = this.store.getQuarantined(id);
+    if (!quarantineEntry) {
+      return { replayed: false, reason: 'quarantine entry not found' };
+    }
+
+    const existing = this.store.get(id);
+    if (existing && existing.status !== 'quarantined' && existing.status !== 'dead_lettered') {
+      return { replayed: false, reason: 'live job already active' };
+    }
+
+    const replayedJob: WebhookJob = {
+      ...quarantineEntry.job,
+      attempts: 0,
+      status: 'pending',
+      lastError: undefined,
+      lastAttemptAt: undefined,
+      resolvedAt: undefined,
+      createdAt: new Date().toISOString(),
+    };
+    this.store.save(replayedJob);
+
+    const updatedQuarantine: QuarantineEntry = {
+      ...quarantineEntry,
+      job: replayedJob,
+      replayCount: quarantineEntry.replayCount + 1,
+      lastReplayedAt: new Date().toISOString(),
+      auditHistory: [
+        ...quarantineEntry.auditHistory,
+        {
+          action: 'replay_attempted',
+          timestamp: new Date().toISOString(),
+          actor,
+          details: { replayCount: quarantineEntry.replayCount + 1 },
+        },
+      ],
+    };
+    this.store.saveQuarantined(updatedQuarantine);
+
+    log.info('quarantined job replayed', {
+      id,
+      merchant: quarantineEntry.job.merchantAddress,
+      replayCount: updatedQuarantine.replayCount,
+    });
+
+    return { replayed: true, jobId: id };
+  }
+
+  /**
+   * List all quarantined entries, optionally filtered by merchant.
+   */
+  listQuarantined(merchantAddress?: string): QuarantineEntry[] {
+    return this.store.listQuarantined(merchantAddress);
+  }
+
+  /**
+   * Get quarantine entry by job ID.
+   */
+  getQuarantined(id: string): QuarantineEntry | undefined {
+    return this.store.getQuarantined(id);
   }
 }
 

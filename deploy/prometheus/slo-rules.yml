@@ -1,0 +1,87 @@
+groups:
+  - name: sorobanpay.slo.recording
+    interval: 15s
+    rules:
+      # API availability: ratio of non-5xx HTTP requests over 5m
+      - record: sorobanpay:api_availability:ratio_rate5m
+        expr: |
+          sum(rate(http_requests_total{service="api",status!~"5.."}[5m]))
+          /
+          clamp_min(sum(rate(http_requests_total{service="api"}[5m])), 1)
+
+      # API latency: p95 and p99 request duration in seconds
+      - record: sorobanpay:api_latency:p95_seconds5m
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum(rate(http_request_duration_seconds_bucket{service="api"}[5m])) by (le)
+          )
+
+      - record: sorobanpay:api_latency:p99_seconds5m
+        expr: |
+          histogram_quantile(
+            0.99,
+            sum(rate(http_request_duration_seconds_bucket{service="api"}[5m])) by (le)
+          )
+
+      # Indexer freshness: seconds since last indexed ledger
+      - record: sorobanpay:indexer_freshness:lag_seconds
+        expr: max(sorobanpay_indexer_ledger_lag_seconds{service="indexer"})
+
+      # Webhook delivery lag: p95 delivery lag in seconds
+      - record: sorobanpay:webhook_delivery:p95_lag_seconds5m
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum(rate(sorobanpay_webhook_delivery_lag_seconds_bucket{service="webhook-worker"}[5m])) by (le)
+          )
+
+  - name: sorobanpay.slo.alerts
+    rules:
+      - alert: APIAvailabilitySLOBreach
+        expr: sorobanpay:api_availability:ratio_rate5m < 0.999
+        for: 5m
+        labels:
+          severity: critical
+          service: api
+          slo: api-availability-99.9
+        annotations:
+          summary: "API availability below 99.9% SLO"
+          description: "API 5m availability ratio is {{ $value | humanizePercentage }} (SLO target >= 99.9%)."
+          runbook_url: "docs/runbooks/slo-alerts.md#apiavailabilityslobreach"
+
+      - alert: APILatencySLOBreach
+        expr: sorobanpay:api_latency:p95_seconds5m > 0.5
+        for: 5m
+        labels:
+          severity: warning
+          service: api
+          slo: api-latency-p95-500ms
+        annotations:
+          summary: "API p95 latency exceeds 500ms SLO"
+          description: "API 5m p95 latency is {{ $value }}s (SLO target <= 0.5s)."
+          runbook_url: "docs/runbooks/slo-alerts.md#apilatencyslobreach"
+
+      - alert: IndexerFreshnessSLOBreach
+        expr: sorobanpay:indexer_freshness:lag_seconds > 60
+        for: 3m
+        labels:
+          severity: critical
+          service: indexer
+          slo: indexer-freshness-60s
+        annotations:
+          summary: "Indexer freshness lag exceeds 60s SLO"
+          description: "Indexer ledger lag is {{ $value }}s (SLO target <= 60s)."
+          runbook_url: "docs/runbooks/slo-alerts.md#indexerfreshnessslobreach"
+
+      - alert: WebhookDeliveryLagSLOBreach
+        expr: sorobanpay:webhook_delivery:p95_lag_seconds5m > 30
+        for: 5m
+        labels:
+          severity: warning
+          service: webhook-worker
+          slo: webhook-delivery-lag-p95-30s
+        annotations:
+          summary: "Webhook p95 delivery lag exceeds 30s SLO"
+          description: "Webhook 5m p95 delivery lag is {{ $value }}s (SLO target <= 30s)."
+          runbook_url: "docs/runbooks/slo-alerts.md#webhookdeliverylagslobreach"

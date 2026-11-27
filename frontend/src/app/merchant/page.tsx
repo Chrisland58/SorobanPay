@@ -23,9 +23,11 @@
  *   ✓ Warning shown when no subscriptions found for the connected merchant
  */
 
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import Link from 'next/link';
 import { useWallet } from '@/hooks/useWallet';
+import { useMerchantContext } from '@/context/MerchantContext';
+import { MerchantContextSwitcher } from '@/components/MerchantContextSwitcher';
 import { useMerchantSubscriptions } from '@/hooks/useMerchantSubscriptions';
 import MerchantSubscriptionsTable, {
   type RowResult,
@@ -38,6 +40,9 @@ import { mapError } from '@/lib/errors';
 import { CONTRACT_ID, NETWORK_PASSPHRASE, NETWORK_NAME, RPC_URL } from '@/constants/network';
 import { truncateAddress, stroopsToTokens } from '@/lib/utils';
 import { ErrorBoundary } from '@/components/ErrorBoundary';
+import BatchPaymentReviewModal, {
+  type BatchReviewItem,
+} from '@/components/BatchPaymentReviewModal';
 
 export interface BatchSummaryState {
   currentBatch: number;
@@ -65,14 +70,28 @@ export default function MerchantPage() {
     disconnect,
   } = useWallet();
 
+  const { activeMerchant, registerCacheInvalidator } = useMerchantContext();
+  const effectiveMerchantKey = activeMerchant?.address ?? publicKey;
+
   const { subscriptions, isLoading, error, hasMore, loadMore, refresh } = useMerchantSubscriptions({
-    publicKey,
+    publicKey: effectiveMerchantKey,
   });
 
   // Per-row collection state
   const [collectingRows, setCollectingRows] = useState<Set<string>>(new Set());
   const [rowResults, setRowResults] = useState<Map<string, RowResult>>(new Map());
   const [batchSummary, setBatchSummary] = useState<BatchSummaryState | null>(null);
+  const [pendingBatchSubscribers, setPendingBatchSubscribers] = useState<string[] | null>(null);
+  const [showFailuresOnly, setShowFailuresOnly] = useState(false);
+
+  useEffect(() => {
+    return registerCacheInvalidator(() => {
+      setCollectingRows(new Set());
+      setRowResults(new Map());
+      setBatchSummary(null);
+      refresh();
+    });
+  }, [registerCacheInvalidator, refresh]);
 
   // ── Single collect ──────────────────────────────────────────────────────────
   const handleCollect = useCallback(
@@ -121,9 +140,11 @@ export default function MerchantPage() {
   );
 
   // ── Batch collect ───────────────────────────────────────────────────────────
-  const handleBatchCollect = useCallback(
+  const executeBatchCollect = useCallback(
     async (subscribers: string[]) => {
       if (!publicKey || !CONTRACT_ID || subscribers.length === 0) return;
+
+      setShowFailuresOnly(false);
 
       const merchant = publicKey;
       const BATCH_SIZE = 50;
@@ -232,6 +253,25 @@ export default function MerchantPage() {
     [publicKey, refresh, subscriptions],
   );
 
+  const handleBatchCollect = useCallback(
+    (subscribers: string[]) => {
+      if (!publicKey || !CONTRACT_ID || subscribers.length === 0) return;
+      setPendingBatchSubscribers(subscribers);
+    },
+    [publicKey],
+  );
+
+  const pendingReviewItems: BatchReviewItem[] = (pendingBatchSubscribers ?? []).map(
+    (subscriber) => {
+      const subObj = subscriptions.find((s) => s.subscriber === subscriber);
+      return {
+        subscriber,
+        amount: subObj?.amount ?? BigInt(0),
+        token: subObj?.token,
+      };
+    },
+  );
+
   // ── Render ─────────────────────────────────────────────────────────────────
   const shortKey = publicKey
     ? `${publicKey.slice(0, 6)}…${publicKey.slice(-4)}`
@@ -282,6 +322,10 @@ export default function MerchantPage() {
             />
             {NETWORK_NAME}
           </span>
+        </div>
+
+        <div className="mt-4">
+          <MerchantContextSwitcher />
         </div>
       </div>
 

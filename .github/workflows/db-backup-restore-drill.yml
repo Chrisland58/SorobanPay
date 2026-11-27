@@ -1,0 +1,118 @@
+name: Database Backup & Restore Drill
+
+on:
+  schedule:
+    # Daily at 03:00 UTC
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+    inputs:
+      rto_max_seconds:
+        description: 'Maximum allowed restore duration in seconds (RTO)'
+        required: false
+        default: '900'
+      rpo_max_seconds:
+        description: 'Maximum allowed backup age in seconds (RPO)'
+        required: false
+        default: '86400'
+
+permissions:
+  contents: read
+
+jobs:
+  backup-and-restore-drill:
+    name: Encrypted Backup & Isolated Restore Drill
+    runs-on: ubuntu-latest
+    services:
+      postgres-source:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_USER: sorobanpay
+          POSTGRES_PASSWORD: drill_source_password
+          POSTGRES_DB: sorobanpay_source
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+      postgres-isolated-drill:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_USER: sorobanpay
+          POSTGRES_PASSWORD: drill_target_password
+          POSTGRES_DB: sorobanpay_drill
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install PostgreSQL client
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client
+
+      - name: Seed isolated source database schema & representative records
+        env:
+          PGPASSWORD: drill_source_password
+        run: |
+          psql -h 127.0.0.1 -p 5432 -U sorobanpay -d sorobanpay_source -v ON_ERROR_STOP=1 <<'SQL'
+          CREATE TABLE IF NOT EXISTS "_prisma_migrations" (
+            id TEXT PRIMARY KEY,
+            migration_name TEXT NOT NULL
+          );
+          CREATE TABLE IF NOT EXISTS "Subscription" (
+            id TEXT PRIMARY KEY,
+            status TEXT NOT NULL
+          );
+          CREATE TABLE IF NOT EXISTS "Payment" (
+            id TEXT PRIMARY KEY,
+            amount BIGINT NOT NULL
+          );
+          CREATE TABLE IF NOT EXISTS "AuditLog" (
+            id TEXT PRIMARY KEY,
+            action TEXT NOT NULL
+          );
+          INSERT INTO "_prisma_migrations" (id, migration_name) VALUES ('m1', 'init') ON CONFLICT DO NOTHING;
+          INSERT INTO "Subscription" (id, status) VALUES ('sub_drill_1', 'ACTIVE') ON CONFLICT DO NOTHING;
+          INSERT INTO "Payment" (id, amount) VALUES ('pay_drill_1', 1000000) ON CONFLICT DO NOTHING;
+          INSERT INTO "AuditLog" (id, action) VALUES ('aud_drill_1', 'SUBSCRIPTION_CREATED') ON CONFLICT DO NOTHING;
+          SQL
+
+      - name: Run encrypted database backup
+        env:
+          DATABASE_URL: postgresql://sorobanpay:drill_source_password@127.0.0.1:5432/sorobanpay_source
+          BACKUP_DIR: ${{ runner.temp }}/backups
+          BACKUP_ENCRYPTION_KEY: ${{ secrets.BACKUP_ENCRYPTION_KEY || 'ci-drill-ephemeral-encryption-key' }}
+          BACKUP_RETENTION_DAYS: '30'
+          BACKUP_RETENTION_MIN_COUNT: '7'
+          ALERT_WEBHOOK_URL: ${{ secrets.OPS_ALERT_WEBHOOK_URL }}
+          ALERT_CHANNEL: '#ops-alerts'
+        run: ./scripts/db-backup.sh
+
+      - name: Run isolated restore drill and verify RTO/RPO
+        env:
+          RESTORE_DRILL_DATABASE_URL: postgresql://sorobanpay:drill_target_password@127.0.0.1:5433/sorobanpay_drill
+          BACKUP_DIR: ${{ runner.temp }}/backups
+          BACKUP_ENCRYPTION_KEY: ${{ secrets.BACKUP_ENCRYPTION_KEY || 'ci-drill-ephemeral-encryption-key' }}
+          RTO_MAX_SECONDS: ${{ github.event.inputs.rto_max_seconds || '900' }}
+          RPO_MAX_SECONDS: ${{ github.event.inputs.rpo_max_seconds || '86400' }}
+          MIN_REPRESENTATIVE_ROWS: '1'
+          ALERT_WEBHOOK_URL: ${{ secrets.OPS_ALERT_WEBHOOK_URL }}
+          ALERT_CHANNEL: '#ops-alerts'
+        run: ./scripts/db-restore-drill.sh
+
+      - name: Upload restore drill verification report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: restore-drill-report
+          path: ${{ runner.temp }}/backups/restore-drill-report.json
+          if-no-files-found: warn

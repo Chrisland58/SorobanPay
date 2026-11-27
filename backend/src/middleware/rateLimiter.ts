@@ -215,6 +215,59 @@ export const authLimiter = makeLimiter(60 * 1000, 10);
 /** 1 request per minute — export/reporting endpoints */
 export const exportLimiter = makeLimiter(60 * 1000, 1);
 
+// ---------------------------------------------------------------------------
+// Tenant-level rate limiters for expensive operations (Issue #1594)
+// ---------------------------------------------------------------------------
+
+/**
+ * Tenant-level rate limiter for expensive API operations.
+ *
+ * Enforces per-tenant isolation across multiple server instances (via Redis)
+ * and provides a stable 429 response with a bounded Retry-After hint and
+ * operation class metadata.
+ */
+export function makeTenantLimiter(
+  operationClass: 'export' | 'analytics' | 'import' | 'expensive',
+  windowMs: number = 60 * 1000,
+  maxRequests: number = 10,
+): RateLimitRequestHandler {
+  return rateLimit({
+    windowMs,
+    max: maxRequests,
+    standardHeaders: 'draft-7',
+    legacyHeaders: false,
+    keyGenerator: (req: Request) => {
+      const tenantId =
+        (req as any).tenantId ??
+        (req.headers['x-tenant-id'] as string) ??
+        (req.query.merchant as string);
+      return tenantId ? `tenant:${tenantId}:${operationClass}` : `ip:${req.ip}:${operationClass}`;
+    },
+    store: buildStore(windowMs, maxRequests),
+    skip: (req) => isAllowlisted(req),
+    handler: (req: Request, res: Response): void => {
+      logLimitReached(req);
+      const retryAfterSec = Math.ceil(windowMs / 1000);
+      res.setHeader('Retry-After', String(retryAfterSec));
+      res.status(429).json({
+        error: 'Too Many Requests',
+        operationClass,
+        retryAfter: retryAfterSec,
+        message: `Tenant rate limit exceeded for ${operationClass} operations. Please wait ${retryAfterSec} seconds before retrying.`,
+      });
+    },
+  });
+}
+
+/** 5 requests per minute per tenant — expensive exports */
+export const tenantExportLimiter = makeTenantLimiter('export', 60 * 1000, 5);
+
+/** 15 requests per minute per tenant — expensive analytics aggregates */
+export const tenantAnalyticsLimiter = makeTenantLimiter('analytics', 60 * 1000, 15);
+
+/** 2 requests per minute per tenant — expensive data imports */
+export const tenantImportLimiter = makeTenantLimiter('import', 60 * 1000, 2);
+
 /**
  * Legacy export — kept for backwards compat with existing index.ts usage.
  * Behaves like publicLimiter.

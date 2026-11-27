@@ -23,8 +23,6 @@ import {
   useState,
   useEffect,
   useRef,
-  useCallback,
-  type KeyboardEvent,
   type ReactNode,
 } from 'react';
 import { motion, AnimatePresence, useReducedMotion } from 'framer-motion';
@@ -33,6 +31,7 @@ import {
   scaleInVariants,
   reducedMotionVariants,
 } from '@/lib/animations';
+import { useDialogFocus } from '@/hooks/useDialogFocus';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -55,12 +54,6 @@ export interface ConfirmationModalProps {
   onCancel: () => void;
 }
 
-// ─── Focusable elements selector ─────────────────────────────────────────────
-
-const FOCUSABLE =
-  'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), ' +
-  'textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
-
 // ─── Component ────────────────────────────────────────────────────────────────
 
 export function ConfirmationModal({
@@ -75,8 +68,6 @@ export function ConfirmationModal({
 }: ConfirmationModalProps) {
   const [countdown, setCountdown] = useState(delaySeconds);
   const dialogRef = useRef<HTMLDivElement>(null);
-  // Remember element that had focus before modal opened so we can restore it
-  const priorFocusRef = useRef<HTMLElement | null>(null);
   const prefersReducedMotion = useReducedMotion();
 
   // ── Countdown timer ──────────────────────────────────────────────────────
@@ -87,52 +78,10 @@ export function ConfirmationModal({
   }, [countdown]);
 
   // ── Focus management — trap focus on mount, restore on unmount ───────────
-  useEffect(() => {
-    priorFocusRef.current = document.activeElement as HTMLElement;
-
-    // Move focus into modal on open
-    const firstFocusable = dialogRef.current?.querySelector<HTMLElement>(FOCUSABLE);
-    firstFocusable?.focus();
-
-    return () => {
-      priorFocusRef.current?.focus();
-    };
-  }, []);
-
-  // ── Keyboard handling ────────────────────────────────────────────────────
-  const handleKeyDown = useCallback(
-    (e: KeyboardEvent<HTMLDivElement>) => {
-      if (e.key === 'Escape') {
-        onCancel();
-        return;
-      }
-
-      if (e.key === 'Tab') {
-        const dialog = dialogRef.current;
-        if (!dialog) return;
-        const focusables = Array.from(dialog.querySelectorAll<HTMLElement>(FOCUSABLE));
-        if (focusables.length === 0) return;
-
-        const first = focusables[0];
-        const last = focusables[focusables.length - 1];
-
-        if (e.shiftKey) {
-          // Shift+Tab — wrap backward
-          if (document.activeElement === first) {
-            e.preventDefault();
-            last.focus();
-          }
-        } else {
-          // Tab — wrap forward
-          if (document.activeElement === last) {
-            e.preventDefault();
-            first.focus();
-          }
-        }
-      }
-    },
-    [onCancel],
-  );
+  const { handleKeyDown } = useDialogFocus({
+    containerRef: dialogRef,
+    onClose: onCancel,
+  });
 
   const isDestructiveEnabled = countdown <= 0;
   const panelVariants = prefersReducedMotion ? reducedMotionVariants : scaleInVariants;

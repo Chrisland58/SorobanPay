@@ -72,8 +72,49 @@ const INITIAL_DELAY_MS = 2_000;
 const BACKOFF_FACTOR = 1.5;
 /** Maximum polling interval in milliseconds */
 const MAX_DELAY_MS = 10_000;
-/** Total polling timeout in milliseconds */
+/** Total active polling timeout in milliseconds (excludes offline time) */
 const POLL_TIMEOUT_MS = 60_000;
+/** Storage key for persisted pending transaction resume state */
+export const PENDING_TX_STORAGE_KEY = 'sorobanpay:pending-tx';
+
+export interface PersistedPendingTx {
+  txHash: string;
+  startedAt: number;
+}
+
+export function getPersistedPendingTx(): PersistedPendingTx | null {
+  try {
+    if (typeof window === 'undefined' || !window.localStorage) return null;
+    const raw = window.localStorage.getItem(PENDING_TX_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<PersistedPendingTx>;
+    if (typeof parsed.txHash === 'string' && typeof parsed.startedAt === 'number') {
+      return { txHash: parsed.txHash, startedAt: parsed.startedAt };
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+export function persistPendingTx(txHash: string): void {
+  try {
+    if (typeof window === 'undefined' || !window.localStorage) return;
+    const payload: PersistedPendingTx = { txHash, startedAt: Date.now() };
+    window.localStorage.setItem(PENDING_TX_STORAGE_KEY, JSON.stringify(payload));
+  } catch {
+    // Ignore storage errors (e.g., private browsing quota)
+  }
+}
+
+export function clearPersistedPendingTx(): void {
+  try {
+    if (typeof window === 'undefined' || !window.localStorage) return;
+    window.localStorage.removeItem(PENDING_TX_STORAGE_KEY);
+  } catch {
+    // Ignore storage errors
+  }
+}
 
 // ── Explorer URL helper ───────────────────────────────────────────────────────
 

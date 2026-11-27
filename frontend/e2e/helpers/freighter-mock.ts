@@ -23,14 +23,48 @@ export const MOCK_PUBLIC_KEY =
 /** Sentinel signed XDR returned by SUBMIT_TRANSACTION mocks. */
 export const MOCK_SIGNED_XDR = 'AAAA_MOCK_SIGNED_XDR_E2E==';
 
+export interface FreighterMockOptions {
+  /** Initial network name returned by GET_NETWORK / GET_NETWORK_DETAILS (default: 'TESTNET'). */
+  network?: string;
+  /** Initial network passphrase (default: 'Test SDF Network ; September 2015'). */
+  networkPassphrase?: string;
+}
+
 /**
- * Init script injected before page scripts run.
- * Patches window.postMessage to respond to all Freighter API message types.
+ * Build an init script injected before page scripts run.
+ * Patches window.postMessage to respond to all Freighter API message types
+ * and exposes `window.__freighterMock` for dynamic network-switch testing.
  */
-export const freighterInitScript = `
+export function buildFreighterInitScript(options: FreighterMockOptions = {}): string {
+  const initialNetwork = options.network ?? 'TESTNET';
+  const initialPassphrase = options.networkPassphrase ?? 'Test SDF Network ; September 2015';
+
+  return `
 (function () {
   const MOCK_KEY = "${MOCK_PUBLIC_KEY}";
   const MOCK_XDR = "${MOCK_SIGNED_XDR}";
+
+  const state = {
+    network: ${JSON.stringify(initialNetwork)},
+    networkPassphrase: ${JSON.stringify(initialPassphrase)},
+    signCalls: [],
+  };
+
+  window.__freighterMock = {
+    setNetwork(network, networkPassphrase) {
+      state.network = network;
+      state.networkPassphrase = networkPassphrase || '';
+    },
+    getNetwork() {
+      return { network: state.network, networkPassphrase: state.networkPassphrase };
+    },
+    getSignCalls() {
+      return state.signCalls.slice();
+    },
+    clearSignCalls() {
+      state.signCalls.length = 0;
+    },
+  };
 
   // isConnected() checks window.freighter directly
   window.freighter = true;
@@ -53,8 +87,16 @@ export const freighterInitScript = `
         case 'REQUEST_ACCESS':            resp = { ...resp, publicKey: MOCK_KEY };                                        break;
         case 'REQUEST_PUBLIC_KEY':        resp = { ...resp, publicKey: MOCK_KEY };                                        break;
         case 'GET_ADDRESS':               resp = { ...resp, address: MOCK_KEY };                                          break;
-        case 'SUBMIT_TRANSACTION':        resp = { ...resp, signedTransaction: MOCK_XDR, signerAddress: MOCK_KEY };       break;
-        case 'SIGN_TRANSACTION':          resp = { ...resp, signedTransaction: MOCK_XDR };                                break;
+        case 'GET_NETWORK':               resp = { ...resp, network: state.network, networkPassphrase: state.networkPassphrase }; break;
+        case 'GET_NETWORK_DETAILS':       resp = { ...resp, network: state.network, networkPassphrase: state.networkPassphrase, networkUrl: 'https://soroban-testnet.stellar.org' }; break;
+        case 'SUBMIT_TRANSACTION':
+          state.signCalls.push({ type, network: state.network, networkPassphrase: data.networkPassphrase || (data.opts && data.opts.networkPassphrase) || state.networkPassphrase });
+          resp = { ...resp, signedTransaction: MOCK_XDR, signerAddress: MOCK_KEY };
+          break;
+        case 'SIGN_TRANSACTION':
+          state.signCalls.push({ type, network: state.network, networkPassphrase: data.networkPassphrase || (data.opts && data.opts.networkPassphrase) || state.networkPassphrase });
+          resp = { ...resp, signedTransaction: MOCK_XDR };
+          break;
         default:                          resp = { ...resp };
       }
 
@@ -67,13 +109,22 @@ export const freighterInitScript = `
   };
 })();
 `;
+}
+
+/**
+ * Default init script injected before page scripts run.
+ */
+export const freighterInitScript = buildFreighterInitScript();
 
 /**
  * Inject the Freighter mock into the page before navigation.
  * Call this before page.goto() to ensure the script runs before any page code.
  */
-export async function injectFreighterMock(page: Page): Promise<void> {
-  await page.addInitScript(freighterInitScript);
+export async function injectFreighterMock(
+  page: Page,
+  options: FreighterMockOptions = {},
+): Promise<void> {
+  await page.addInitScript(buildFreighterInitScript(options));
 }
 
 /**

@@ -1,5 +1,5 @@
 /**
- * #1386 — Structured logging with Pino and correlation IDs.
+ * #1386 & #1682 — Structured logging with Pino, correlation IDs, and policy-driven redaction.
  *
  * Features:
  *  - JSON output to stdout (Pino)
@@ -7,6 +7,7 @@
  *  - SERVICE_ROLE env var included in every log line (e.g. "indexer", "api",
  *    "webhook-worker") — set by the Kubernetes deployment as an env var
  *  - Sensitive Stellar addresses redacted to first-8 + last-8 chars
+ *  - Automatic field-name and known-secret redaction matching organizational policy
  *  - pino-pretty transport in development (NODE_ENV !== "production"),
  *    falls back to plain JSON if pino-pretty is not installed
  *  - createServiceLogger(service) — factory for child loggers with a stable
@@ -14,6 +15,7 @@
  */
 
 import pino from 'pino';
+import { SENSITIVE_FIELD_PATTERN } from './logPolicy';
 
 // ---------------------------------------------------------------------------
 // Redaction helpers (exported for use in middleware and services)
@@ -25,6 +27,14 @@ export function redactAddress(address: string): string {
   const prefix = address.slice(0, 8);
   const suffix = address.slice(-8);
   return `${prefix}...${suffix}`;
+}
+
+/** Redact an email address: keep first char and domain, mask the rest. */
+export function redactEmail(email: string): string {
+  if (!email || !email.includes('@')) return email;
+  const [local, domain] = email.split('@');
+  if (local.length <= 2) return `*@${domain}`;
+  return `${local[0]}***${local[local.length - 1]}@${domain}`;
 }
 
 /** Redact a Stellar secret seed or private token. */
@@ -41,16 +51,26 @@ export function redactSecret(secret: string): string {
 }
 
 const SENSITIVE_KEY_PATTERN =
-  /^(password|secret|seed|authorization|token|apikey|privatekey|webhooksecret)$/i;
+  /^(password|secret|seed|authorization|token|refreshtoken|accesstoken|apikey|api_key|privatekey|private_key|webhooksecret|webhook_secret|cookie|signature|ssn|card|cvv|creditcard|email)$/i;
+
+const STRING_SECRET_PATTERNS = [
+  { regex: /S[A-Z2-7]{55}/g, replace: 'S...[REDACTED_SEED]' },
+  { regex: /Bearer\s+[A-Za-z0-9._~+/-]+=*/gi, replace: 'Bearer [REDACTED]' },
+  { regex: /ey[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/g, replace: '[REDACTED_JWT]' },
+];
 
 /** Recursively redact sensitive fields from telemetry or log payload objects. */
 export function redactTelemetryPayload<T>(payload: T): T {
   if (payload === null || payload === undefined) return payload;
   if (typeof payload === 'string') {
-    if (/^S[A-Z2-7]{55}$/.test(payload)) {
-      return redactSecret(payload) as unknown as T;
+    let str = payload;
+    for (const { regex, replace } of STRING_SECRET_PATTERNS) {
+      str = str.replace(regex, replace);
     }
-    return payload;
+    if (/^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/.test(str)) {
+      return redactEmail(str) as unknown as T;
+    }
+    return str as unknown as T;
   }
   if (Array.isArray(payload)) {
     return payload.map((item) => redactTelemetryPayload(item)) as unknown as T;
@@ -60,13 +80,18 @@ export function redactTelemetryPayload<T>(payload: T): T {
     for (const [key, value] of Object.entries(
       payload as Record<string, unknown>,
     )) {
-      if (SENSITIVE_KEY_PATTERN.test(key)) {
+      if (SENSITIVE_FIELD_PATTERN.test(key)) {
         output[key] = '[REDACTED]';
       } else if (
         key.toLowerCase().includes('address') &&
         typeof value === 'string'
       ) {
         output[key] = redactAddress(value);
+      } else if (
+        key.toLowerCase().includes('email') &&
+        typeof value === 'string'
+      ) {
+        output[key] = redactEmail(value);
       } else {
         output[key] = redactTelemetryPayload(value);
       }
@@ -112,15 +137,49 @@ function buildTransport(): pino.TransportSingleOptions | undefined {
 
 const transport = buildTransport();
 
+function sanitizeError(err: unknown) {
+  const serialized = pino.stdSerializers.err(err as any);
+  return redactTelemetryPayload(serialized);
+}
+
 /** Root application logger. */
 export const logger = pino(
   {
     level: logLevel,
     base: { service: serviceRole },
     timestamp: pino.stdTimeFunctions.isoTime,
+    redact: {
+      paths: [
+        'password',
+        '*.password',
+        '*.*.password',
+        'secret',
+        '*.secret',
+        '*.*.secret',
+        'seed',
+        '*.seed',
+        '*.*.seed',
+        'token',
+        '*.token',
+        '*.*.token',
+        'refreshToken',
+        '*.refreshToken',
+        'accessToken',
+        '*.accessToken',
+        'authorization',
+        '*.authorization',
+        'headers.authorization',
+        'headers.cookie',
+        'req.headers.authorization',
+        'req.headers.cookie',
+        'signature',
+        '*.signature',
+      ],
+      censor: '[REDACTED]',
+    },
     serializers: {
-      err: pino.stdSerializers.err,
-      error: pino.stdSerializers.err,
+      err: sanitizeError,
+      error: sanitizeError,
     },
   },
   transport ? pino.transport(transport) : undefined,

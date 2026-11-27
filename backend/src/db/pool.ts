@@ -1,4 +1,11 @@
 import { Pool, PoolClient } from 'pg';
+import {
+  setGauge,
+  incrementCounter,
+  recordQueryWaitDuration,
+  recordQueryExecutionDuration,
+  syncDbPoolMetrics,
+} from '../services/metricsService';
 
 // ---------------------------------------------------------------------------
 // Connection pool configuration
@@ -18,7 +25,79 @@ export const MIN_CONNECTIONS = 2;
  */
 export const MAX_CONNECTIONS = 10;
 
+/** Default timeout waiting to acquire a connection from the pool (5 seconds). */
+export const CONNECTION_TIMEOUT_MS = 5_000;
+
 let pool: Pool | null = null;
+
+export interface PoolStats {
+  size: number;
+  active: number;
+  idle: number;
+  waiting: number;
+  utilization: number;
+  saturation: number;
+  timeouts: number;
+}
+
+// In-process telemetry counters (bounded / global, never tenant-partitioned)
+let poolAcquireTimeouts = 0;
+let queryTimeouts = 0;
+
+/**
+ * Returns current snapshot of database connection pool stats.
+ */
+export function getPoolStats(): PoolStats {
+  const currentPool = pool;
+  if (!currentPool) {
+    return {
+      size: MAX_CONNECTIONS,
+      active: 0,
+      idle: 0,
+      waiting: 0,
+      utilization: 0,
+      saturation: 0,
+      timeouts: poolAcquireTimeouts,
+    };
+  }
+
+  const total = currentPool.totalCount ?? 0;
+  const idle = currentPool.idleCount ?? 0;
+  const active = Math.max(0, total - idle);
+  const waiting = currentPool.waitingCount ?? 0;
+  const size = MAX_CONNECTIONS;
+  const utilization = size > 0 ? (active / size) * 100 : 0;
+  // Saturation: ratio of (active + queued callers) to max pool capacity
+  const saturation = size > 0 ? ((active + waiting) / size) * 100 : 0;
+
+  return {
+    size,
+    active,
+    idle,
+    waiting,
+    utilization,
+    saturation,
+    timeouts: poolAcquireTimeouts,
+  };
+}
+
+/**
+ * Records an acquire or connection timeout.
+ */
+export function recordPoolTimeout(): void {
+  poolAcquireTimeouts++;
+  incrementCounter('db_pool_timeouts_total');
+  incrementCounter('sorobanpay_db_pool_timeouts_total');
+}
+
+/**
+ * Records a query execution timeout.
+ */
+export function recordQueryTimeout(): void {
+  queryTimeouts++;
+  incrementCounter('db_query_timeouts_total');
+  incrementCounter('sorobanpay_db_query_timeouts_total');
+}
 
 /**
  * Returns the shared pg connection pool, creating it on first call.
@@ -41,7 +120,7 @@ export function getPool(): Pool {
       min: MIN_CONNECTIONS,
       max: MAX_CONNECTIONS,
       idleTimeoutMillis: 30_000,
-      connectionTimeoutMillis: 5_000,
+      connectionTimeoutMillis: CONNECTION_TIMEOUT_MS,
     });
 
     // Surface unexpected pool errors to stderr so they appear in structured logs
@@ -51,7 +130,40 @@ export function getPool(): Pool {
       );
     });
   }
+
+  // Sync latest pool telemetry gauges to metrics registry
+  const stats = getPoolStats();
+  syncDbPoolMetrics(stats);
+
   return pool;
+}
+
+/**
+ * Connects to the pool with query wait-duration tracking and timeout observation.
+ */
+export async function connectWithMetrics(): Promise<PoolClient> {
+  const currentPool = getPool();
+  const startTime = Date.now();
+
+  try {
+    const client = await currentPool.connect();
+    const waitSeconds = Math.max(0, (Date.now() - startTime) / 1000);
+    recordQueryWaitDuration(waitSeconds);
+
+    // Update gauge snapshots
+    const stats = getPoolStats();
+    syncDbPoolMetrics(stats);
+
+    return client;
+  } catch (err: unknown) {
+    const errorMsg = (err instanceof Error) ? err.message : String(err);
+    if (errorMsg.includes('timeout') || errorMsg.includes('Connection terminated') || (Date.now() - startTime >= CONNECTION_TIMEOUT_MS)) {
+      recordPoolTimeout();
+    }
+    const stats = getPoolStats();
+    syncDbPoolMetrics(stats);
+    throw err;
+  }
 }
 
 /**
@@ -61,17 +173,24 @@ export function getPool(): Pool {
 export async function withTransaction<T>(
   fn: (client: PoolClient) => Promise<T>,
 ): Promise<T> {
-  const client = await getPool().connect();
+  const client = await connectWithMetrics();
+  const txStart = Date.now();
   try {
     await client.query('BEGIN');
     const result = await fn(client);
     await client.query('COMMIT');
+    const execDuration = Math.max(0, (Date.now() - txStart) / 1000);
+    recordQueryExecutionDuration(execDuration, 'success');
     return result;
   } catch (err) {
     await client.query('ROLLBACK');
+    const execDuration = Math.max(0, (Date.now() - txStart) / 1000);
+    recordQueryExecutionDuration(execDuration, 'error');
     throw err;
   } finally {
     client.release();
+    const stats = getPoolStats();
+    syncDbPoolMetrics(stats);
   }
 }
 
@@ -85,4 +204,6 @@ export async function closePool(): Promise<void> {
     await pool.end();
     pool = null;
   }
+  const stats = getPoolStats();
+  syncDbPoolMetrics(stats);
 }

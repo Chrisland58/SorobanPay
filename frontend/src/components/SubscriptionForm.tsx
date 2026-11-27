@@ -42,6 +42,9 @@ import { SkeletonForm } from "@/components/Skeleton";
 import { downloadReceipt, type ReceiptData } from "@/components/SubscriptionReceipt";
 import { ShareQRCode } from "@/components/ShareQRCode";
 import { FeeEstimate } from "@/components/FeeEstimate";
+import { stroopsToXlm } from "@/hooks/useSimulateFee";
+import { useSubmissionGuard } from "@/hooks/useSubmissionGuard";
+import { assertContractConfigForNetwork, resolveActiveNetwork } from "@/lib/network_config";
 import {
   getPersistedFormData,
   persistFormData,
@@ -775,6 +778,9 @@ function ConfirmModal({
   amount,
   interval,
   allowanceResult,
+  feeEstimate,
+  feeChangedMessage,
+  isSubmitting = false,
   onConfirm,
   onCancel,
 }: {
@@ -783,6 +789,9 @@ function ConfirmModal({
   amount: string;
   interval: string;
   allowanceResult: AllowanceResult | null;
+  feeEstimate?: string | null;
+  feeChangedMessage?: string | null;
+  isSubmitting?: boolean;
   onConfirm: () => void;
   onCancel: () => void;
 }) {
@@ -800,11 +809,10 @@ function ConfirmModal({
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4"
     >
       <div className="w-full max-w-md bg-gray-900 border border-gray-700 rounded-2xl shadow-2xl p-6 space-y-5 text-white">
-        {/* Issue #21 — header with icon for clarity */}
+        {/* Header */}
         <div className="flex items-center gap-3">
           <span className="text-2xl flex-shrink-0" aria-hidden="true">📋</span>
           <div>
-            {/* autoFocus moves keyboard focus into the dialog on open */}
             <h3
               id="confirm-title"
               className="text-lg font-bold leading-tight"
@@ -819,15 +827,22 @@ function ConfirmModal({
             </p>
           </div>
         </div>
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4"
-    >
-      <div className="w-full max-w-md bg-gray-900 border border-gray-700 rounded-2xl shadow-2xl p-6 space-y-5 text-white">
-        <h3 id="confirm-title" className="text-lg font-bold">
-          Confirm subscription
-        </h3>
-        <p className="text-sm text-gray-400">
-          Review the details before authorizing the on-chain transaction.
-        </p>
+
+        {/* Changed fee notification alert (Issue #1574) */}
+        {feeChangedMessage && (
+          <div
+            role="alert"
+            className="rounded-lg bg-amber-950/70 border border-amber-500/70 p-3 text-xs text-amber-200"
+          >
+            <div className="flex items-center gap-2 font-semibold text-amber-100">
+              <span aria-hidden="true">⚠️</span>
+              <span>Network Fee Updated</span>
+            </div>
+            <p className="mt-1 text-amber-200/90 leading-relaxed">
+              {feeChangedMessage}
+            </p>
+          </div>
+        )}
 
         {/* Low-allowance warning inside the confirmation dialog */}
         {allowanceResult && !allowanceResult.sufficient && (
@@ -837,13 +852,14 @@ function ConfirmModal({
           />
         )}
 
-        {/* Issue #21 — full summary: merchant, token, amount, interval */}
+        {/* Summary */}
         <dl className="bg-gray-800/60 rounded-lg divide-y divide-gray-700 text-sm">
           {[
             { label: "Merchant address", value: merchantAddress, truncated: truncate(merchantAddress), full: merchantAddress },
             { label: "Token address",    value: tokenAddress,    truncated: truncate(tokenAddress),    full: tokenAddress },
             { label: "Amount",           value: `${amount} tokens`, truncated: `${amount} tokens`,       full: null },
             { label: "Interval",         value: `Every ${days} day${days !== 1 ? "s" : ""}`, truncated: `Every ${days} day${days !== 1 ? "s" : ""} (${Number(interval).toLocaleString()} s)`, full: null },
+            ...(feeEstimate ? [{ label: "Estimated network fee", value: `~${feeEstimate} XLM`, truncated: `~${feeEstimate} XLM`, full: null }] : []),
           ].map(({ label, truncated, full }) => (
             <div key={label} className="flex flex-col gap-0.5 px-4 py-3">
               <dt className="text-xs text-gray-400 font-medium">{label}</dt>
@@ -852,36 +868,29 @@ function ConfirmModal({
                 title={full ?? undefined}
               >
                 {truncated}
-        <dl className="bg-gray-800/60 rounded-lg divide-y divide-gray-700 text-sm">
-          {[
-            ["Merchant", merchantAddress],
-            ["Token", tokenAddress],
-            ["Amount", `${amount} tokens`],
-            ["Interval", `${days} day${days !== 1 ? "s" : ""} (${interval} s)`],
-          ].map(([label, value]) => (
-            <div key={label} className="flex flex-col gap-0.5 px-4 py-3">
-              <dt className="text-xs text-gray-400 font-medium">{label}</dt>
-              <dd className="break-all font-mono text-xs text-gray-100">
-                {value}
               </dd>
             </div>
           ))}
         </dl>
 
-        {/* Issue #21 — Go Back first in tab order (logical: cancel before confirm) */}
+        {/* Action buttons */}
         <div className="flex gap-3 pt-1">
           <button
+            type="button"
             onClick={onCancel}
-            className="flex-1 rounded-lg border border-gray-600 bg-gray-800/50 text-gray-300 hover:bg-gray-700 active:bg-gray-800 py-3 text-sm font-semibold transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-500"
+            disabled={isSubmitting}
+            className="flex-1 rounded-lg border border-gray-600 bg-gray-800/50 text-gray-300 hover:bg-gray-700 active:bg-gray-800 py-3 text-sm font-semibold transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-500 disabled:opacity-50"
           >
             Go Back
           </button>
           <button
+            type="button"
             onClick={onConfirm}
-            className="flex-1 rounded-lg bg-blue-600 hover:bg-blue-500 active:bg-blue-700 py-3 text-sm font-semibold transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400"
+            disabled={isSubmitting}
+            aria-busy={isSubmitting}
+            className="flex-1 rounded-lg bg-blue-600 hover:bg-blue-500 active:bg-blue-700 py-3 text-sm font-semibold transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400 disabled:opacity-50"
           >
-            Confirm &amp; Authorize
-            Confirm & Authorize
+            {isSubmitting ? "Submitting…" : "Confirm & Authorize"}
           </button>
         </div>
       </div>
@@ -1518,6 +1527,7 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
   // ── Transaction poller ──────────────────────────────────────────────────────
   const { state: pollerState, startPolling, refresh: refreshTransactionStatus } = useTransactionPoller({
     onSuccess: (txHash) => {
+      releaseLock('create_subscription');
       setIsConfirming(false);
       setSuccessData({
         txHash,
@@ -1530,6 +1540,7 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
       });
     },
     onFailed: (errorMessage, txHash) => {
+      releaseLock('create_subscription');
       setIsConfirming(false);
       const explorerUrl = buildExplorerUrl(txHash);
       setTxErrorExplorerUrl(explorerUrl);
@@ -1543,6 +1554,7 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
       });
     },
     onTimeout: (txHash, explorerUrl) => {
+      releaseLock('create_subscription');
       showToast({
         variant: 'error',
         message: `Transaction status is unknown. Check ${txHash} before retrying.`,
@@ -1565,11 +1577,21 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
     !!interval.trim() &&
     subscriptionFormIsValid;
 
+  const [feeChangedMessage, setFeeChangedMessage] = useState<string | null>(null);
+  const {
+    isSubmitting: isSubmissionGuarded,
+    acquireLock,
+    releaseLock,
+  } = useSubmissionGuard();
+
   const {
     status: feeStatus,
     minResourceFee,
     breakdown: feeBreakdown,
     error: feeError,
+    isExpired: isFeeExpired,
+    estimatedAt: feeEstimatedAt,
+    refreshFee,
   } = useSimulateFee({
     subscriber: publicKey ?? '',
     merchant: merchantAddress,
@@ -1771,8 +1793,43 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
   }
 
   async function confirmAndSubmit() {
+    if (!acquireLock('create_subscription')) {
+      return;
+    }
+    if (!publicKey) {
+      releaseLock('create_subscription');
+      return;
+    }
+
+    try {
+      assertContractConfigForNetwork(resolveActiveNetwork(), CONTRACT_ID);
+    } catch (configErr) {
+      releaseLock('create_subscription');
+      setTxError(classifyError(configErr));
+      return;
+    }
+
+    // Refresh expired fee estimate before opening the wallet signing prompt (Issue #1574)
+    if (feeStatus === 'success' && isFeeExpired) {
+      try {
+        const feeResult = await refreshFee();
+        if (feeResult.changed && feeResult.previousFee && feeResult.newFee) {
+          releaseLock('create_subscription');
+          const prevXlm = stroopsToXlm(feeResult.previousFee);
+          const newXlm = stroopsToXlm(feeResult.newFee);
+          setFeeChangedMessage(
+            `Estimated transaction fee changed from ~${prevXlm} XLM to ~${newXlm} XLM due to current network conditions. Please review and confirm before signing.`
+          );
+          setShowConfirm(true);
+          return;
+        }
+      } catch {
+        // Non-blocking: proceed if simulation refresh fails
+      }
+    }
+
     setShowConfirm(false);
-    if (!publicKey) return;
+    setFeeChangedMessage(null);
 
     const attempt = beginSubmitAttempt(publicKey);
     setIsSubmitting(true);
@@ -1795,7 +1852,10 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
         RPC_URL,
         attempt.controller.signal,
       );
-      if (!isCurrentSubmitAttempt(attempt)) return;
+      if (!isCurrentSubmitAttempt(attempt)) {
+        releaseLock('create_subscription');
+        return;
+      }
       activeSubmitRef.current = null;
 
       // Transition to confirming state — show spinner with explorer link
@@ -1805,6 +1865,7 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
       // Phase 2: poll for confirmation (handled by useTransactionPoller callbacks above)
       cancelPollingRef.current = startPolling(txHash, server);
     } catch (err) {
+      releaseLock('create_subscription');
       if (!isCurrentSubmitAttempt(attempt)) return;
       activeSubmitRef.current = null;
       // Submission itself failed (signing rejected, RPC error, etc.)
@@ -1934,8 +1995,14 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
           amount={amount}
           interval={interval}
           allowanceResult={isCheckingAllowance ? null : allowanceResult}
+          feeEstimate={minResourceFee ? stroopsToXlm(minResourceFee) : null}
+          feeChangedMessage={feeChangedMessage}
+          isSubmitting={isSubmitting || isSubmissionGuarded}
           onConfirm={confirmAndSubmit}
-          onCancel={() => setShowConfirm(false)}
+          onCancel={() => {
+            setShowConfirm(false);
+            setFeeChangedMessage(null);
+          }}
         />
       )}
       {/* Cancel confirmation modal — Issue #791 */}
@@ -2345,6 +2412,9 @@ export default function SubscriptionForm({ initialValues }: SubscriptionFormProp
             minResourceFee={minResourceFee}
             breakdown={feeBreakdown}
             error={feeError}
+            isExpired={isFeeExpired}
+            estimatedAt={feeEstimatedAt}
+            onRefresh={refreshFee}
           />
 
           {/* Submit */}

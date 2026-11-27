@@ -79,6 +79,16 @@ export interface DataTableProps<T> {
   skeletonRowCount?: number;
   /** Message shown when rows is empty and not loading */
   emptyMessage?: string;
+  /** Optional recovery action for the true empty state */
+  emptyAction?: { label: string; onClick: () => void };
+  /** Error message or Error instance when data fetching fails */
+  error?: string | Error | null;
+  /** Retry callback for error state (should preserve active filters/form data) */
+  onRetry?: () => void;
+  /** Whether active filters/search are applied (distinguishes filtered-no-results from empty) */
+  isFiltered?: boolean;
+  /** Callback to clear active filters when filtered-no-results is shown */
+  onResetFilters?: () => void;
   /** Additional className on the outer wrapper */
   className?: string;
 }
@@ -155,28 +165,92 @@ function SkeletonCard({ colCount }: { colCount: number }) {
   );
 }
 
-// ── Empty state ───────────────────────────────────────────────────────────────
+// ── Empty / Error / Filtered states ──────────────────────────────────────────
 
-function EmptyState({ message }: { message: string }) {
+interface TableStateProps {
+  emptyMessage: string;
+  emptyAction?: { label: string; onClick: () => void };
+  error?: string | Error | null;
+  onRetry?: () => void;
+  isFiltered?: boolean;
+  onResetFilters?: () => void;
+}
+
+function TableStateContent({
+  emptyMessage,
+  emptyAction,
+  error,
+  onRetry,
+  isFiltered,
+  onResetFilters,
+}: TableStateProps) {
+  if (error) {
+    const errorMessage = error instanceof Error ? error.message : error;
+    return (
+      <div role="alert" data-state="error" className="flex flex-col items-center gap-3">
+        <p className="text-sm font-medium text-red-400">
+          {errorMessage || 'Failed to load data.'}
+        </p>
+        {onRetry && (
+          <button
+            type="button"
+            onClick={onRetry}
+            className="rounded-lg bg-red-500/20 border border-red-500/40 px-4 py-1.5 text-xs font-semibold text-red-200 hover:bg-red-500/30 transition-colors"
+          >
+            Retry
+          </button>
+        )}
+      </div>
+    );
+  }
+
+  if (isFiltered) {
+    return (
+      <div role="status" data-state="filtered" className="flex flex-col items-center gap-3">
+        <p className="text-sm text-gray-400">No records match your current filters.</p>
+        {onResetFilters && (
+          <button
+            type="button"
+            onClick={onResetFilters}
+            className="rounded-lg border border-gray-600 px-4 py-1.5 text-xs font-semibold text-gray-200 hover:bg-gray-800 transition-colors"
+          >
+            Clear Filters
+          </button>
+        )}
+      </div>
+    );
+  }
+
+  return (
+    <div role="status" data-state="empty" className="flex flex-col items-center gap-3">
+      <p className="text-sm text-gray-500">{emptyMessage}</p>
+      {emptyAction && (
+        <button
+          type="button"
+          onClick={emptyAction.onClick}
+          className="rounded-lg border border-gray-600 px-4 py-1.5 text-xs font-semibold text-gray-200 hover:bg-gray-800 transition-colors"
+        >
+          {emptyAction.label}
+        </button>
+      )}
+    </div>
+  );
+}
+
+function EmptyState(props: TableStateProps) {
   return (
     <tr>
-      <td
-        colSpan={999}
-        className="px-4 py-12 text-center text-gray-500 text-sm"
-      >
-        {message}
+      <td colSpan={999} className="px-4 py-12 text-center">
+        <TableStateContent {...props} />
       </td>
     </tr>
   );
 }
 
-function EmptyCardState({ message }: { message: string }) {
+function EmptyCardState(props: TableStateProps) {
   return (
-    <div
-      role="status"
-      className="rounded-xl border border-dashed border-gray-700 bg-gray-900/30 p-10 text-center"
-    >
-      <p className="text-gray-500 text-sm">{message}</p>
+    <div className="rounded-xl border border-dashed border-gray-700 bg-gray-900/30 p-10 text-center">
+      <TableStateContent {...props} />
     </div>
   );
 }
@@ -194,6 +268,11 @@ export function DataTable<T>({
   isLoading = false,
   skeletonRowCount = 5,
   emptyMessage = 'No data to display.',
+  emptyAction,
+  error = null,
+  onRetry,
+  isFiltered = false,
+  onResetFilters,
   className = '',
 }: DataTableProps<T>) {
   // ── Sort state ──────────────────────────────────────────────────────────────
@@ -356,7 +435,14 @@ export function DataTable<T>({
                 <SkeletonTableRow key={i} colCount={colCount} />
               ))
             ) : sortedRows.length === 0 ? (
-              <EmptyState message={emptyMessage} />
+              <EmptyState
+                emptyMessage={emptyMessage}
+                emptyAction={emptyAction}
+                error={error}
+                onRetry={onRetry}
+                isFiltered={isFiltered}
+                onResetFilters={onResetFilters}
+              />
             ) : (
               sortedRows.map((row) => {
                 const id = getRowId(row);
@@ -412,7 +498,14 @@ export function DataTable<T>({
             <SkeletonCard key={i} colCount={columns.length} />
           ))
         ) : sortedRows.length === 0 ? (
-          <EmptyCardState message={emptyMessage} />
+          <EmptyCardState
+            emptyMessage={emptyMessage}
+            emptyAction={emptyAction}
+            error={error}
+            onRetry={onRetry}
+            isFiltered={isFiltered}
+            onResetFilters={onResetFilters}
+          />
         ) : (
           sortedRows.map((row) => {
             const id = getRowId(row);

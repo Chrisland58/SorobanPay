@@ -32,6 +32,9 @@ export interface FeeEstimateProps {
   minResourceFee: string | null;
   breakdown: SimulateFeeBreakdown | null;
   error: string | null;
+  isExpired?: boolean;
+  estimatedAt?: number | null;
+  onRefresh?: () => void;
 }
 
 // ── Sub-components ─────────────────────────────────────────────────────────────
@@ -84,6 +87,9 @@ export function FeeEstimate({
   minResourceFee,
   breakdown,
   error,
+  isExpired = false,
+  estimatedAt,
+  onRefresh,
 }: FeeEstimateProps) {
   const [detailsOpen, setDetailsOpen] = useState(false);
 
@@ -122,7 +128,11 @@ export function FeeEstimate({
 
     return (
       <div
-        className="rounded-lg bg-blue-900/20 border border-blue-700/40 px-3 py-2.5 text-xs"
+        className={`rounded-lg border px-3 py-2.5 text-xs transition-colors ${
+          isExpired
+            ? 'bg-amber-900/20 border-amber-700/50'
+            : 'bg-blue-900/20 border-blue-700/40'
+        }`}
         aria-label="Estimated transaction fee"
       >
         {/* Fee summary row */}
@@ -130,7 +140,7 @@ export function FeeEstimate({
           {/* Info icon */}
           <svg
             xmlns="http://www.w3.org/2000/svg"
-            className="h-4 w-4 text-blue-400 shrink-0"
+            className={`h-4 w-4 shrink-0 ${isExpired ? 'text-amber-400' : 'text-blue-400'}`}
             viewBox="0 0 20 20"
             fill="currentColor"
             aria-hidden="true"
@@ -142,23 +152,42 @@ export function FeeEstimate({
             />
           </svg>
 
-          <span className="text-blue-300 font-medium">Estimated fee</span>
+          <span className={`font-medium ${isExpired ? 'text-amber-300' : 'text-blue-300'}`}>
+            Estimated fee {isExpired && '(Stale)'}
+          </span>
 
           <span
             aria-label={`Estimated fee: ${xlm} XLM`}
-            className="ml-auto font-mono text-blue-100 font-semibold tabular-nums"
+            className={`ml-auto font-mono font-semibold tabular-nums ${
+              isExpired ? 'text-amber-100' : 'text-blue-100'
+            }`}
           >
             ~{xlm} XLM
           </span>
         </div>
 
-        {/* Buffer note */}
-        <p className="mt-1 text-blue-300/70 leading-snug">
-          Minimum resource fee from simulation.{" "}
-          <span className="text-blue-300/50">
-            With +15% safety buffer: ~{bufferedXlm} XLM.
-          </span>
-        </p>
+        {/* Buffer note or expiry notification */}
+        {isExpired ? (
+          <div className="mt-1 flex items-center justify-between text-amber-300/80">
+            <span>Estimate may be outdated. Will recheck before signing.</span>
+            {onRefresh && (
+              <button
+                type="button"
+                onClick={onRefresh}
+                className="underline hover:text-amber-200 ml-2 font-medium"
+              >
+                Refresh now
+              </button>
+            )}
+          </div>
+        ) : (
+          <p className="mt-1 text-blue-300/70 leading-snug">
+            Minimum resource fee from simulation.{" "}
+            <span className="text-blue-300/50">
+              With +15% safety buffer: ~{bufferedXlm} XLM.
+            </span>
+          </p>
+        )}
 
         {/* Collapsible breakdown */}
         <button
