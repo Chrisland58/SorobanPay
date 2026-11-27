@@ -555,6 +555,7 @@ impl SubscriptionProtocol {
             overdue_since: None,
             payment_nonce: 0,
             paused_until: None,
+            cancel_at_period_end: None,
         };
 
         // Compact key (#347): sha256(subscriber_xdr ++ merchant_xdr).
@@ -610,7 +611,8 @@ impl SubscriptionProtocol {
         subscriber.require_auth();
 
         // 2. Verify subscription exists.
-        let key = DataKey::Subscription(subscriber.clone(), merchant.clone());
+        let hash = subscription_key(&env, &subscriber, &merchant);
+        let key = DataKey::Subscription(hash);
         let mut data: SubscriptionData = env
             .storage()
             .persistent()
@@ -1054,7 +1056,7 @@ impl SubscriptionProtocol {
         // Advance next_payment from now (actual collection time), not from next_payment.
         // This slides the billing window forward from the actual transfer, preventing
         // drift accumulation for merchants who collect consistently late.
-        data.next_payment = now + data.interval;
+        data.next_payment = checked_next_payment(now, data.interval)?;
         data.overdue_since = None;
         data.payment_nonce = data.payment_nonce.checked_add(1).ok_or(ContractError::InvalidTimestamp)?;
         env.storage().persistent().set(&key, &data);
@@ -1135,6 +1137,16 @@ impl SubscriptionProtocol {
                 continue;
             }
 
+            // Cancel-at-period-end finalization (Issue #1605)
+            if data.will_cancel_at_period_end() {
+                env.storage().persistent().remove(&key);
+                index_remove(&env, &merchant, &hash);
+                roster_remove(&env, &merchant, &subscriber);
+                events::emit_cancel(&env, &subscriber, &merchant);
+                results.push_back((subscriber.clone(), false));
+                continue;
+            }
+
             let contract_address = env.current_contract_address();
             let token_client = token::Client::new(&env, &data.token);
 
@@ -1176,7 +1188,14 @@ impl SubscriptionProtocol {
 
             // Advance next_payment from now (actual collection time), consistent
             // with execute_payment behaviour.
-            data.next_payment = now + data.interval;
+            let next_payment = match checked_next_payment(now, data.interval) {
+                Ok(np) => np,
+                Err(_) => {
+                    results.push_back((subscriber.clone(), false));
+                    continue;
+                }
+            };
+            data.next_payment = next_payment;
             data.overdue_since = None;
             data.payment_nonce = data.payment_nonce.checked_add(1).ok_or(ContractError::InvalidTimestamp)?;
             env.storage().persistent().set(&key, &data);
@@ -1240,6 +1259,40 @@ impl SubscriptionProtocol {
         roster_remove(&env, &merchant, &subscriber);
 
         events::emit_cancel(&env, &subscriber, &merchant);
+
+        Ok(())
+    }
+
+    /// Schedule a subscription to cancel at the end of the current billing cycle (Issue #1605).
+    ///
+    /// Preserves access until `next_payment`, ensuring that no subsequent payment
+    /// will be collected and the subscription cleanly self-terminates at that boundary.
+    pub fn cancel_at_period_end(
+        env: Env,
+        subscriber: Address,
+        merchant: Address,
+    ) -> Result<(), ContractError> {
+        subscriber.require_auth();
+
+        let hash = subscription_key(&env, &subscriber, &merchant);
+        let key = DataKey::Subscription(hash);
+        let mut data: SubscriptionData = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .ok_or(ContractError::NoActiveSubscription)?;
+
+        if data.will_cancel_at_period_end() {
+            return Err(ContractError::SubscriptionCancelled);
+        }
+
+        data.cancel_at_period_end = Some(true);
+        env.storage().persistent().set(&key, &data);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, MIN_TTL_LEDGERS, MAX_TTL_LEDGERS);
+
+        events::emit_cancel_at_period_end(&env, &subscriber, &merchant, data.next_payment);
 
         Ok(())
     }
