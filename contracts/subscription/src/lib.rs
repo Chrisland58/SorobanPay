@@ -9,9 +9,12 @@ use soroban_sdk::{contract, contractimpl, symbol_short, token, Address, BytesN, 
 use crate::error::ContractError;
 use crate::storage::{
     get_protocol_fee_config, has_execution_marker, set_protocol_fee_config, subscription_key,
-    write_execution_marker, DataKey, ProtocolFeeConfig, SubscriptionData, CONTRACT_VERSION,
-    CURRENT_SCHEMA_VERSION, MAX_AMOUNT, MAX_FEE_BPS, MAX_TTL_LEDGERS, MIN_TTL_LEDGERS,
+    write_execution_marker, BatchItemEligibility, BatchPreviewItem, DataKey, ProtocolFeeConfig,
+    SubscriptionData, CONTRACT_VERSION, CURRENT_SCHEMA_VERSION, MAX_AMOUNT, MAX_FEE_BPS,
+    MAX_TTL_LEDGERS, MIN_TTL_LEDGERS,
 };
+
+pub use crate::storage::{BatchItemEligibility, BatchPreviewItem};
 
 /// Maximum number of subscribers allowed in a single `batch_execute_payment` call.
 pub const BATCH_MAX_SIZE: u32 = 50;
@@ -922,6 +925,10 @@ impl SubscriptionProtocol {
         write_execution_marker(&env, &hash, data.payment_nonce);
 
         events::emit_executed(&env, &subscriber, &merchant, &data.token, data.amount, data.payment_nonce);
+
+        Ok(())
+    }
+
     /// Attempt payment collection for each subscriber in one merchant-authorized call.
     ///
     /// Subscribers without an active, due, sufficiently funded subscription are
@@ -1046,6 +1053,156 @@ impl SubscriptionProtocol {
             env.storage()
                 .persistent()
                 .extend_ttl(&key, MIN_TTL_LEDGERS, MAX_TTL_LEDGERS);
+        }
+
+        Ok(results)
+    }
+
+    /// Read-only preview of a batch payment collection, reporting per-item eligibility
+    /// and failure reasons without mutating contract state or executing token transfers.
+    ///
+    /// Preserves input ordering and accurately identifies ineligible items, duplicate
+    /// identifiers, un-due periods, paused status, or insufficient balances/allowances.
+    ///
+    /// # Parameters
+    /// - `merchant`: Merchant whose subscriptions are previewed.
+    /// - `token`: Token address retained for consistent batch interface.
+    /// - `subscribers`: Ordered list of subscriber addresses (1 to 50 items).
+    ///
+    /// # Returns
+    /// A vector of [`BatchPreviewItem`] structs preserving the input ordering.
+    ///
+    /// # Errors
+    /// - `ContractError::EmptyBatch` if `subscribers` is empty.
+    /// - `ContractError::BatchTooLarge` if `subscribers.len() > 50`.
+    /// - `ContractError::InvalidTimestamp` if the ledger timestamp is invalid.
+    pub fn preview_batch_payment(
+        env: Env,
+        merchant: Address,
+        _token: Address,
+        subscribers: Vec<Address>,
+    ) -> Result<Vec<BatchPreviewItem>, ContractError> {
+        if subscribers.is_empty() {
+            return Err(ContractError::EmptyBatch);
+        }
+        if subscribers.len() > BATCH_MAX_SIZE {
+            return Err(ContractError::BatchTooLarge);
+        }
+
+        let now = ledger_timestamp(&env)?;
+        let contract_address = env.current_contract_address();
+
+        let mut results = Vec::new(&env);
+        let mut seen = Vec::new(&env);
+
+        for subscriber in subscribers.iter() {
+            // Check for duplicate in batch
+            let mut is_dup = false;
+            for prev in seen.iter() {
+                if prev == subscriber {
+                    is_dup = true;
+                    break;
+                }
+            }
+
+            if is_dup {
+                let hash = subscription_key(&env, &subscriber, &merchant);
+                let key = DataKey::Subscription(hash);
+                let amount = env
+                    .storage()
+                    .persistent()
+                    .get::<_, SubscriptionData>(&key)
+                    .map(|d| d.amount)
+                    .unwrap_or(0);
+                results.push_back(BatchPreviewItem {
+                    subscriber: subscriber.clone(),
+                    eligible: false,
+                    reason: BatchItemEligibility::DuplicateInBatch,
+                    amount,
+                });
+                continue;
+            }
+
+            seen.push_back(subscriber.clone());
+
+            let hash = subscription_key(&env, &subscriber, &merchant);
+            let key = DataKey::Subscription(hash);
+            let data_opt: Option<SubscriptionData> = env.storage().persistent().get(&key);
+
+            let data = match data_opt {
+                Some(d) => d,
+                None => {
+                    results.push_back(BatchPreviewItem {
+                        subscriber: subscriber.clone(),
+                        eligible: false,
+                        reason: BatchItemEligibility::NoActiveSubscription,
+                        amount: 0,
+                    });
+                    continue;
+                }
+            };
+
+            // Check paused
+            if data.is_paused {
+                let still_paused = match data.paused_until {
+                    Some(until) => now < until,
+                    None => true,
+                };
+                if still_paused {
+                    results.push_back(BatchPreviewItem {
+                        subscriber: subscriber.clone(),
+                        eligible: false,
+                        reason: BatchItemEligibility::SubscriptionPaused,
+                        amount: data.amount,
+                    });
+                    continue;
+                }
+            }
+
+            // Check due
+            if now < data.next_payment {
+                results.push_back(BatchPreviewItem {
+                    subscriber: subscriber.clone(),
+                    eligible: false,
+                    reason: BatchItemEligibility::PaymentNotDue,
+                    amount: data.amount,
+                });
+                continue;
+            }
+
+            let token_client = token::Client::new(&env, &data.token);
+
+            // Check allowance
+            let allowance = token_client.allowance(&subscriber, &contract_address);
+            if allowance < data.amount {
+                results.push_back(BatchPreviewItem {
+                    subscriber: subscriber.clone(),
+                    eligible: false,
+                    reason: BatchItemEligibility::InsufficientAllowance,
+                    amount: data.amount,
+                });
+                continue;
+            }
+
+            // Check balance
+            let balance = token_client.balance(&subscriber);
+            if balance < data.amount {
+                results.push_back(BatchPreviewItem {
+                    subscriber: subscriber.clone(),
+                    eligible: false,
+                    reason: BatchItemEligibility::InsufficientBalance,
+                    amount: data.amount,
+                });
+                continue;
+            }
+
+            // Eligible
+            results.push_back(BatchPreviewItem {
+                subscriber: subscriber.clone(),
+                eligible: true,
+                reason: BatchItemEligibility::Eligible,
+                amount: data.amount,
+            });
         }
 
         Ok(results)
@@ -1262,3 +1419,6 @@ mod regression_tests;
 
 #[cfg(test)]
 mod pause_resume_tests;
+
+#[cfg(test)]
+mod batch_preview_tests;

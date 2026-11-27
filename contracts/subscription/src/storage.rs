@@ -88,6 +88,32 @@ pub struct SubscriptionData {
     pub paused_until: Option<u64>,
     /// Timestamp when the subscription first became overdue.
     pub overdue_since: Option<u64>,
+    /// Monotonically increasing sequence number for successful payments.
+    pub payment_nonce: u32,
+}
+
+/// Status code describing eligibility of an item in a batch payment preview.
+#[contracttype]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[repr(u32)]
+pub enum BatchItemEligibility {
+    Eligible = 0,
+    NoActiveSubscription = 1,
+    PaymentNotDue = 2,
+    SubscriptionPaused = 3,
+    InsufficientAllowance = 4,
+    InsufficientBalance = 5,
+    DuplicateInBatch = 6,
+}
+
+/// Outcome mapping for a single item in a batch payment preview.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BatchPreviewItem {
+    pub subscriber: Address,
+    pub eligible: bool,
+    pub reason: BatchItemEligibility,
+    pub amount: i128,
 }
 
 /// Subscription layout stored before schema version 2.

@@ -15,6 +15,7 @@ Full reference for all `SubscriptionProtocol` entry points, types, and error cod
    - [subscribe](#subscribe)
    - [execute_payment](#execute_payment)
    - [batch_execute_payment](#batch_execute_payment)
+   - [preview_batch_payment](#preview_batch_payment)
    - [cancel](#cancel)
   - [expire_subscription](#expire_subscription)
    - [get_subscription](#get_subscription)
@@ -43,6 +44,26 @@ The on-chain record persisted under `DataKey::Subscription(sha256(subscriber_xdr
 | `interval` | `u64` | `[86400, 31536000]` | Seconds between successive payments (1 day – 365 days) |
 | `next_payment` | `u64` | `> 0`, no overflow | Unix timestamp of the next valid payment window |
 | `is_paused` | `bool` | — | `true` when subscription payments are suspended (reserved for future use) |
+
+### `BatchPreviewItem` and `BatchItemEligibility`
+
+Types returned by [`preview_batch_payment`](#preview_batch_payment) to describe candidate batch payment outcomes off-chain without mutating state.
+
+`BatchItemEligibility` variants:
+- `Eligible`: Subscription is active, payment is due, and subscriber has sufficient token balance and allowance.
+- `PaymentNotDue`: Ledger timestamp < `next_payment`.
+- `NoActiveSubscription`: No subscription record exists for `(subscriber, merchant)`.
+- `SubscriptionPaused`: Subscription is marked paused (`is_paused == true`).
+- `InsufficientBalance`: Subscriber's token balance < `amount`.
+- `InsufficientAllowance`: Subscriber's token allowance for contract < `amount`.
+- `DuplicateInBatch`: Subscriber address appeared earlier in the input batch.
+
+`BatchPreviewItem` fields:
+| Field | Type | Description |
+|---|---|---|
+| `subscriber` | `Address` | Subscriber address corresponding to the input element |
+| `eligibility` | `BatchItemEligibility` | Eligibility classification outcome |
+| `amount` | `i128` | Due payment amount in base units (`0` if not found or invalid) |
 
 **Amount units:** All `amount` values are in the token's smallest unit (stroops for USDC-equivalent tokens with 7 decimals: divide by `10_000_000` to get the display value). See [docs/token-decimals.md](token-decimals.md) for full guidance.
 
@@ -372,6 +393,47 @@ const op = contract.call(
 
 // After submission, decode the return value to see per-subscriber results:
 // Vec<(Address, bool)> → [ [sub1, true], [sub2, false], [sub3, true] ]
+```
+
+---
+
+### `preview_batch_payment`
+
+Read-only entry point to inspect payment eligibility for up to 50 subscribers in a batch. Preserves the exact input ordering, detects duplicates, evaluates balance/allowance/due state, and returns itemized outcome mappings without mutating contract state or executing token transfers.
+
+**Authorization:** None (read-only call).
+
+**Hard cap:** 50 subscribers per call (`BATCH_MAX_SIZE = 50`).
+
+#### Parameters
+
+| Parameter | Type | Constraints | Description |
+|-----------|------|-------------|-------------|
+| `merchant` | `Address` | — | Target merchant account |
+| `subscribers` | `Vec<Address>` | length `[1, 50]` | Ordered list of subscriber addresses to preview |
+
+#### Return value
+
+`Result<Vec<BatchPreviewItem>, ContractError>` — a vector of preview outcome items matching input order 1-to-1.
+
+#### Error codes
+
+| Error | Code | Trigger |
+|-------|------|---------|
+| `EmptyBatch` | 12 | `subscribers` vector is empty |
+| `BatchTooLarge` | 13 | `subscribers.len() > 50` |
+| `InvalidTimestamp` | 8 | Ledger timestamp is zero |
+
+#### CLI example
+
+```bash
+stellar contract invoke \
+  --id $CONTRACT_ID \
+  --source caller-key \
+  --network testnet \
+  -- preview_batch_payment \
+  --merchant   GXYZ5678...MERCHANT \
+  --subscribers '[{"address":"GABC...SUB1"},{"address":"GDEF...SUB2"}]'
 ```
 
 ---
