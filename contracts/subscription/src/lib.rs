@@ -8,9 +8,11 @@ use soroban_sdk::{contract, contractimpl, symbol_short, token, Address, BytesN, 
 
 use crate::error::ContractError;
 use crate::storage::{
-    get_protocol_fee_config, has_execution_marker, set_protocol_fee_config, subscription_key,
-    write_execution_marker, DataKey, ProtocolFeeConfig, SubscriptionData, CONTRACT_VERSION,
-    CURRENT_SCHEMA_VERSION, MAX_AMOUNT, MAX_FEE_BPS, MAX_TTL_LEDGERS, MIN_TTL_LEDGERS,
+    clear_proposed_fee_config, get_proposed_fee_config, get_protocol_fee_config,
+    has_execution_marker, set_proposed_fee_config, set_protocol_fee_config, subscription_key,
+    write_execution_marker, DataKey, ProposedFeeConfig, ProtocolFeeConfig, SubscriptionData,
+    CONTRACT_VERSION, CURRENT_SCHEMA_VERSION, MAX_AMOUNT, MAX_FEE_BPS, MAX_TTL_LEDGERS,
+    MIN_TTL_LEDGERS,
 };
 
 /// Maximum number of subscribers allowed in a single `batch_execute_payment` call.
@@ -383,6 +385,133 @@ impl SubscriptionProtocol {
     /// Read-only; no authorization required.
     pub fn get_protocol_fee(env: Env) -> Option<ProtocolFeeConfig> {
         get_protocol_fee_config(&env)
+    }
+
+    /// Submit a proposed protocol fee configuration (#1611).
+    ///
+    /// The proposed values are validated at submission time. The existing protocol
+    /// fee configuration and active payment behavior remain completely unchanged
+    /// until the proposal is explicitly activated via [`activate_protocol_fee`].
+    ///
+    /// If an unactivated proposal already exists, this call replaces it with the
+    /// new validated parameters.
+    pub fn propose_protocol_fee(
+        env: Env,
+        admin: Address,
+        fee_bps: u32,
+        fee_collector: Address,
+        activation_time: u64,
+    ) -> Result<(), ContractError> {
+        admin.require_auth();
+
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(ContractError::NotInitialized)?;
+
+        if admin != stored_admin {
+            return Err(ContractError::NotAdmin);
+        }
+
+        if fee_bps > MAX_FEE_BPS {
+            return Err(ContractError::FeeBpsTooHigh);
+        }
+
+        let now = ledger_timestamp(&env)?;
+        if activation_time < now {
+            return Err(ContractError::InvalidActivationTime);
+        }
+
+        let is_replacement = get_proposed_fee_config(&env).is_some();
+
+        let proposal = ProposedFeeConfig {
+            fee_bps,
+            fee_collector: fee_collector.clone(),
+            activation_time,
+            proposed_at: now,
+        };
+
+        set_proposed_fee_config(&env, &proposal);
+
+        if is_replacement {
+            events::emit_fee_proposal_replaced(&env, &admin, fee_bps, &fee_collector, activation_time);
+        } else {
+            events::emit_fee_proposal_created(&env, &admin, fee_bps, &fee_collector, activation_time);
+        }
+
+        Ok(())
+    }
+
+    /// Cancel a pending protocol fee proposal (#1611).
+    pub fn cancel_protocol_fee_proposal(
+        env: Env,
+        admin: Address,
+    ) -> Result<(), ContractError> {
+        admin.require_auth();
+
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(ContractError::NotInitialized)?;
+
+        if admin != stored_admin {
+            return Err(ContractError::NotAdmin);
+        }
+
+        if get_proposed_fee_config(&env).is_none() {
+            return Err(ContractError::NoPendingFeeProposal);
+        }
+
+        clear_proposed_fee_config(&env);
+        events::emit_fee_proposal_cancelled(&env, &admin);
+
+        Ok(())
+    }
+
+    /// Activate a proposed protocol fee configuration after its activation time (#1611).
+    pub fn activate_protocol_fee(
+        env: Env,
+        admin: Address,
+    ) -> Result<(), ContractError> {
+        admin.require_auth();
+
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(ContractError::NotInitialized)?;
+
+        if admin != stored_admin {
+            return Err(ContractError::NotAdmin);
+        }
+
+        let proposal = get_proposed_fee_config(&env)
+            .ok_or(ContractError::NoPendingFeeProposal)?;
+
+        let now = ledger_timestamp(&env)?;
+        if now < proposal.activation_time {
+            return Err(ContractError::FeeActivationTimeNotReached);
+        }
+
+        set_protocol_fee_config(
+            &env,
+            ProtocolFeeConfig {
+                fee_bps: proposal.fee_bps,
+                fee_collector: proposal.fee_collector.clone(),
+            },
+        );
+
+        clear_proposed_fee_config(&env);
+        events::emit_fee_proposal_activated(&env, &admin, proposal.fee_bps, &proposal.fee_collector);
+
+        Ok(())
+    }
+
+    /// Read the currently pending protocol fee proposal, if one exists.
+    pub fn get_proposed_protocol_fee(env: Env) -> Option<ProposedFeeConfig> {
+        get_proposed_fee_config(&env)
     }
 
     // =========================================================================
@@ -921,7 +1050,10 @@ impl SubscriptionProtocol {
         // until its TTL expires, preventing late-arriving duplicate transactions.
         write_execution_marker(&env, &hash, data.payment_nonce);
 
-        events::emit_executed(&env, &subscriber, &merchant, &data.token, data.amount, data.payment_nonce);
+        events::emit_executed(&env, &subscriber, &merchant, &data.token, data.amount, data.payment_nonce as u32);
+
+        Ok(())
+    }
     /// Attempt payment collection for each subscriber in one merchant-authorized call.
     ///
     /// Subscribers without an active, due, sufficiently funded subscription are
@@ -1036,7 +1168,7 @@ impl SubscriptionProtocol {
             hashes_to_extend.push_back(hash);
 
             events::emit_payment_transfer_success(&env, &subscriber, &merchant, data.amount);
-            events::emit_executed(&env, &subscriber, &merchant, &data.token, data.amount, data.payment_nonce);
+            events::emit_executed(&env, &subscriber, &merchant, &data.token, data.amount, data.payment_nonce as u32);
 
             results.push_back((subscriber.clone(), true));
         }
@@ -1262,3 +1394,6 @@ mod regression_tests;
 
 #[cfg(test)]
 mod pause_resume_tests;
+
+#[cfg(test)]
+mod protocol_fee_update_tests;

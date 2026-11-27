@@ -35,6 +35,7 @@ pub fn subscription_key(env: &Env, subscriber: &Address, merchant: &Address) -> 
 
 /// Storage keys used by the contract.
 #[contracttype]
+#[derive(Clone)]
 pub enum DataKey {
     /// Per-subscription record, keyed by sha256(subscriber_xdr ++ merchant_xdr).
     /// Compact 32-byte key instead of the old two-Address tuple (~70 bytes).
@@ -53,6 +54,35 @@ pub enum DataKey {
 
     /// Optional maximum subscription amount for this deployment.
     MaxAmount,
+
+    /// Optional admin configuration (rate limits, caps).
+    AdminConfig,
+
+    /// Per-merchant active subscriber count.
+    MerchantSubscriberCount(Address),
+
+    /// Temporary nonce execution marker.
+    ExecutionMarker(BytesN<32>, u64),
+
+    /// Active protocol fee configuration.
+    ProtocolFeeConfig,
+
+    /// Proposed protocol fee configuration pending activation (#1611).
+    ProposedFeeConfig,
+}
+
+/// Proposed protocol fee configuration awaiting time-delayed activation (#1611).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProposedFeeConfig {
+    /// Proposed fee rate in basis points (0..=MAX_FEE_BPS).
+    pub fee_bps: u32,
+    /// Proposed address to receive fee portions.
+    pub fee_collector: Address,
+    /// Ledger Unix timestamp at or after which the proposed fee may be activated.
+    pub activation_time: u64,
+    /// Ledger Unix timestamp when this proposal was submitted.
+    pub proposed_at: u64,
 }
 
 /// Persistent on-chain record for a subscription.
@@ -177,4 +207,54 @@ pub fn set_subscriber_count(env: &Env, merchant: &Address, count: u32) {
             MIN_TTL_LEDGERS,
             MAX_TTL_LEDGERS,
         );
+}
+
+// ─── ProtocolFeeConfig helpers ────────────────────────────────────────────────
+
+pub const MAX_FEE_BPS: u32 = 500;
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProtocolFeeConfig {
+    pub fee_bps: u32,
+    pub fee_collector: Address,
+}
+
+pub fn get_protocol_fee_config(env: &Env) -> Option<ProtocolFeeConfig> {
+    env.storage().instance().get(&DataKey::ProtocolFeeConfig)
+}
+
+pub fn set_protocol_fee_config(env: &Env, config: ProtocolFeeConfig) {
+    env.storage().instance().set(&DataKey::ProtocolFeeConfig, &config);
+}
+
+// ─── ProposedFeeConfig helpers (#1611) ────────────────────────────────────────
+
+pub fn get_proposed_fee_config(env: &Env) -> Option<ProposedFeeConfig> {
+    env.storage().instance().get(&DataKey::ProposedFeeConfig)
+}
+
+pub fn set_proposed_fee_config(env: &Env, config: &ProposedFeeConfig) {
+    env.storage().instance().set(&DataKey::ProposedFeeConfig, config);
+}
+
+pub fn clear_proposed_fee_config(env: &Env) {
+    env.storage().instance().remove(&DataKey::ProposedFeeConfig);
+}
+
+// ─── Execution marker helpers ────────────────────────────────────────────────
+
+pub const MARKER_TTL_LEDGERS: u32 = MAX_TTL_LEDGERS * 2;
+
+pub fn has_execution_marker(env: &Env, hash: &BytesN<32>, nonce: u64) -> bool {
+    let key = DataKey::ExecutionMarker(hash.clone(), nonce);
+    env.storage().temporary().has(&key)
+}
+
+pub fn write_execution_marker(env: &Env, hash: &BytesN<32>, nonce: u64) {
+    let key = DataKey::ExecutionMarker(hash.clone(), nonce);
+    env.storage().temporary().set(&key, &true);
+    env.storage()
+        .temporary()
+        .extend_ttl(&key, MARKER_TTL_LEDGERS, MARKER_TTL_LEDGERS);
 }

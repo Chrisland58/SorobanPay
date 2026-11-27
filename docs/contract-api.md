@@ -559,6 +559,75 @@ stellar contract invoke \
 
 ---
 
+### `propose_protocol_fee`
+
+Initiates a two-phase update to the protocol fee configuration (#1611). Validates proposed parameters at submission time without altering active payment execution behavior until explicit activation after the specified activation timestamp. If a proposal already exists, this call replaces it with new validated parameters.
+
+**Authorization:** `admin` must sign.
+
+#### Parameters
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `admin` | `Address` | Must match the stored contract admin |
+| `fee_bps` | `u32` | Proposed fee rate in basis points (`0..=500` bps, where 500 = 5%) |
+| `fee_collector` | `Address` | Address designated to collect the protocol fee |
+| `activation_time` | `u64` | Ledger timestamp at or after which activation can occur (`>= now`) |
+
+#### Return value
+
+`Result<(), ContractError>`
+
+#### Error codes
+
+| Error | Code | Trigger |
+|-------|------|---------|
+| `NotAdmin` | 16 | Caller is not the stored admin |
+| `FeeBpsTooHigh` | 27 | `fee_bps > 500` |
+| `InvalidActivationTime` | 30 | `activation_time < current_ledger_time` |
+
+---
+
+### `cancel_protocol_fee_proposal`
+
+Cancels a pending protocol fee proposal before activation.
+
+**Authorization:** `admin` must sign.
+
+---
+
+### `activate_protocol_fee`
+
+Activates a pending protocol fee proposal once its activation time has arrived. Updates active fee parameters and clears the proposal.
+
+**Authorization:** `admin` must sign.
+
+#### Error codes
+
+| Error | Code | Trigger |
+|-------|------|---------|
+| `NotAdmin` | 16 | Caller is not the stored admin |
+| `NoPendingFeeProposal` | 28 | No fee proposal currently pending |
+| `FeeActivationTimeNotReached` | 29 | Current ledger timestamp < `activation_time` |
+
+---
+
+### `get_proposed_protocol_fee`
+
+Read-only query returning the pending `ProposedFeeConfig` (`fee_bps`, `fee_collector`, `activation_time`, `proposed_at`), or `None`.
+
+**Authorization:** None required.
+
+---
+
+### `get_protocol_fee`
+
+Read-only query returning the active `ProtocolFeeConfig` (`fee_bps`, `fee_collector`), or `None`.
+
+**Authorization:** None required.
+
+---
+
 ### `migrate`
 
 Rewrite the listed subscription records using the current schema, defaulting newly added optional fields, then store `CURRENT_SCHEMA_VERSION`. Calling migration again for the current version is safe. Emits `contract_migrated` when the schema version advances.

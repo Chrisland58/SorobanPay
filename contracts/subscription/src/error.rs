@@ -41,4 +41,12 @@ pub enum ContractError {
     NotInitialized        = 17,
     /// Error code 19: subscription grace period has not elapsed.
     GracePeriodNotElapsed = 19,
+    /// Error code 27: protocol fee in basis points exceeds MAX_FEE_BPS (500 bps = 5%) (#1611).
+    FeeBpsTooHigh         = 27,
+    /// Error code 28: no pending protocol fee proposal found (#1611).
+    NoPendingFeeProposal  = 28,
+    /// Error code 29: proposed fee activation time has not yet arrived (#1611).
+    FeeActivationTimeNotReached = 29,
+    /// Error code 30: activation time must be in the future (#1611).
+    InvalidActivationTime = 30,
 }
