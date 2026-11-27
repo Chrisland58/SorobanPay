@@ -16,6 +16,8 @@ This guide explains how Soroban persistent-storage TTL works within SorobanPay, 
 6. [Alert Threshold Justification](#6-alert-threshold-justification)
 7. [Stuck or Duplicate Payment Runbook](#7-stuck-or-duplicate-payment-runbook)
 8. [Observability: Logs, Metrics, Traces, and Correlation IDs](#7-observability-logs-metrics-traces-and-correlation-ids)
+9. [Expired Subscription Recovery Runbook](#9-expired-subscription-recovery-runbook)
+10. [Failed Rollback Escalation Runbook](#10-failed-rollback-escalation-runbook)
 
 ---
 
@@ -1260,6 +1262,60 @@ in [§8](#8-monitoring-dashboard-setup). If the subscription expired because pay
 were never collected (e.g., an annual subscription where the merchant missed the
 payment window), configure a proactive TTL refresh using the procedure in
 [§3 — Programmatic TTL Extension](#3-programmatic-ttl-extension).
+
+---
+
+## 10. Failed Rollback Escalation Runbook
+
+### Overview
+When a deployment rollback is executed (`deploy/rollback.sh`), completion is strictly gated on post-rollback application readiness and dependency reachability (`/health/ready` or `/health`). If the restored service cannot reach PostgreSQL, Redis, or the configured Soroban RPC, or if the health check times out after bounded retries, the rollback halts with an exit code of `1` and surfaces an operational escalation alert.
+
+### Failure Classification & Outcomes
+
+| Outcome | Trigger | Root Causes | Immediate Action |
+|---|---|---|---|
+| **TIMEOUT** | Health endpoint unreachable or timed out across retries (`HEALTH_TIMEOUT_SECONDS`, `MAX_HEALTH_RETRIES`) | Pod crash loop, ingress misrouting, network partition, or OOMKilled container | 1. Check pod status: `kubectl get pods -n sorobanpay`<br>2. Check container crash logs: `kubectl logs -n sorobanpay deployment/sorobanpay-api --previous`<br>3. Verify service endpoints: `kubectl get endpoints -n sorobanpay` |
+| **PARTIAL RECOVERY** | HTTP 200 returned but dependency checks report `error` or `unhealthy` | Service booted but cannot establish connections to database, Redis, or RPC | 1. Check database connectivity: `kubectl exec -n sorobanpay postgresql-0 -- pg_isready`<br>2. Check Redis ping: `kubectl exec -n sorobanpay redis-0 -- redis-cli PING`<br>3. Check RPC availability: `curl -I https://soroban-testnet.stellar.org/health`<br>4. Verify secret injection: `kubectl describe secrets -n sorobanpay sorobanpay-secrets` |
+| **HARD FAILURE** | Health endpoint responds with HTTP 500 / 503 or unhandled panic | Application configuration mismatch, schema migration incompatibility, or missing environment variables | 1. Inspect recent rollback deployment revision: `kubectl rollout history deployment/sorobanpay-api -n sorobanpay`<br>2. Verify schema status: check if forward migrations broke backward compatibility.<br>3. Check configuration drift between checkpoints. |
+
+### Step-by-Step Operator Escalation Procedure
+
+1. **Acknowledge and Declare Incident**:
+   - Notify the engineering on-call channel: `#incident-sorobanpay`.
+   - Freeze active release pipelines and deployment triggers.
+
+2. **Diagnose Workload Pods**:
+   ```bash
+   # Check pod states and events
+   kubectl describe pods -n sorobanpay -l app.kubernetes.io/name=sorobanpay
+   
+   # Inspect logs for dependency errors
+   kubectl logs -n sorobanpay deployment/sorobanpay-api --tail=200
+   ```
+
+3. **Verify Supporting Infrastructure**:
+   ```bash
+   # PostgreSQL
+   kubectl exec -n sorobanpay postgresql-0 -- pg_isready -U sorobanpay
+   
+   # Redis
+   kubectl exec -n sorobanpay redis-0 -- redis-cli PING
+   
+   # RPC Reachability from within the cluster
+   kubectl exec -n sorobanpay deployment/sorobanpay-api -- curl -sI https://soroban-testnet.stellar.org/health
+   ```
+
+4. **Escalation Path & Manual Recovery**:
+   - If a previous stable checkpoint exists in `deploy/checkpoints/`:
+     ```bash
+     bash deploy/rollback.sh --list
+     bash deploy/rollback.sh --rollback deploy/checkpoints/<known_good_checkpoint>.json
+     ```
+   - If database migrations were applied forward and cannot support the restored code, enact database point-in-time recovery (PITR) or run backward-compatible compensatory migration.
+   - For complete recovery verification, run manual health gating:
+     ```bash
+     bash deploy/rollback.sh --verify-health http://<endpoint>/health/ready
+     ```
 
 ---
 

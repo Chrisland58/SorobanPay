@@ -1,4 +1,6 @@
 import { Router, Request, Response } from 'express';
+import { getPoolStats, getPool } from '../db/pool';
+import { setDatabaseHealthSignal } from '../services/metricsService';
 
 /** Bounded check timeout in milliseconds (#1076). */
 export const CHECK_TIMEOUT_MS = 5000;
@@ -46,15 +48,19 @@ export class HealthState {
   }
 }
 
-// GET /health — aggregate liveness + dependency status
+// GET /health — aggregate liveness + dependency status + db pool health signals
 extendedHealthRouter.get('/health', async (_req: Request, res: Response) => {
+  const isPostgresHealthy = HealthState.postgres === 'healthy';
   const isHealthy =
-    HealthState.postgres === 'healthy' &&
+    isPostgresHealthy &&
     HealthState.redis === 'healthy' &&
     HealthState.stellarRpc === 'healthy';
 
+  setDatabaseHealthSignal(isPostgresHealthy);
+
   const status = isHealthy ? 'healthy' : 'degraded';
   const uptime = Math.floor((Date.now() - HealthState.startTime) / 1000);
+  const poolStats = getPoolStats();
 
   return res.status(isHealthy ? 200 : 503).json({
     status,
@@ -65,6 +71,15 @@ extendedHealthRouter.get('/health', async (_req: Request, res: Response) => {
       stellar_rpc: HealthState.stellarRpc,
       queue: HealthState.queue,
       indexer_lag_seconds: HealthState.indexerLagSeconds,
+      database_pool: {
+        size: poolStats.size,
+        active: poolStats.active,
+        idle: poolStats.idle,
+        waiting: poolStats.waiting,
+        utilization_pct: Math.round(poolStats.utilization * 100) / 100,
+        saturation_pct: Math.round(poolStats.saturation * 100) / 100,
+        timeouts: poolStats.timeouts,
+      },
     },
   });
 });
@@ -98,4 +113,47 @@ extendedHealthRouter.get('/health/ready', (_req: Request, res: Response) => {
 // GET /health/live — liveness probe: process is alive (never gated on deps)
 extendedHealthRouter.get('/health/live', (_req: Request, res: Response) => {
   return res.status(200).json({ status: 'alive' });
+});
+
+// GET /health/database — specific database health and pool saturation signal (#1681)
+extendedHealthRouter.get('/health/database', async (_req: Request, res: Response) => {
+  const poolStats = getPoolStats();
+  let dbReachable = HealthState.postgres === 'healthy';
+  let queryLatencyMs: number | null = null;
+
+  if (process.env.DATABASE_URL) {
+    const probe = await checkWithTimeout(async () => {
+      const start = Date.now();
+      const p = getPool();
+      await p.query('SELECT 1');
+      return Date.now() - start;
+    }, 2000);
+
+    if (probe !== null) {
+      queryLatencyMs = probe;
+      dbReachable = true;
+    } else if (HealthState.postgres !== 'healthy') {
+      dbReachable = false;
+    }
+  }
+
+  setDatabaseHealthSignal(dbReachable);
+
+  const isSaturated = poolStats.saturation >= 90 || poolStats.waiting > 0;
+  const isHealthy = dbReachable && !isSaturated;
+  const statusCode = !dbReachable ? 503 : isSaturated ? 429 : 200;
+
+  return res.status(statusCode).json({
+    status: !dbReachable ? 'down' : isSaturated ? 'saturated' : 'healthy',
+    pool: {
+      size: poolStats.size,
+      active: poolStats.active,
+      idle: poolStats.idle,
+      waiting: poolStats.waiting,
+      utilization_pct: Math.round(poolStats.utilization * 100) / 100,
+      saturation_pct: Math.round(poolStats.saturation * 100) / 100,
+      timeouts: poolStats.timeouts,
+    },
+    latency_ms: queryLatencyMs,
+  });
 });
