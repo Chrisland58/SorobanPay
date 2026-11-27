@@ -210,9 +210,15 @@ amount and/or billing interval.
 - `Address` - Token contract address
 
 **Data**:
-- `i128` - Payment amount transferred
+- `(i128 amount, u32 payment_nonce)` - Payment amount transferred and monotonic sequence counter.
 
-**When Emitted**: After successful token transfer and timestamp update.
+**Payment Sequence Semantics**:
+- Monotonically increasing sequence stored per subscription (`payment_nonce`).
+- Increments by exactly 1 upon successful payment execution.
+- Failed payments leave sequence state completely unchanged (ensuring retries do not skip sequence numbers).
+- Enables indexers to detect missing, repeated, or out-of-order settlement events.
+
+**When Emitted**: After successful token transfer and storage update.
 
 **Rust Example**:
 ```rust
@@ -221,7 +227,8 @@ events::emit_executed(
     &subscriber,
     &merchant,
     &token, 
-    data.amount
+    data.amount,
+    data.payment_nonce
 );
 ```
 

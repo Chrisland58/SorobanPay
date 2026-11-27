@@ -909,7 +909,7 @@ impl SubscriptionProtocol {
         // drift accumulation for merchants who collect consistently late.
         data.next_payment = now + data.interval;
         data.overdue_since = None;
-        data.payment_nonce = data.payment_nonce.checked_add(1).ok_or(ContractError::InvalidTimestamp)?;
+        data.payment_nonce = data.payment_nonce.checked_add(1).ok_or(ContractError::SequenceOverflow)?;
         env.storage().persistent().set(&key, &data);
         env.storage()
             .persistent()
@@ -922,6 +922,10 @@ impl SubscriptionProtocol {
         write_execution_marker(&env, &hash, data.payment_nonce);
 
         events::emit_executed(&env, &subscriber, &merchant, &data.token, data.amount, data.payment_nonce);
+
+        Ok(())
+    }
+
     /// Attempt payment collection for each subscriber in one merchant-authorized call.
     ///
     /// Subscribers without an active, due, sufficiently funded subscription are
@@ -1031,7 +1035,7 @@ impl SubscriptionProtocol {
             // with execute_payment behaviour.
             data.next_payment = now + data.interval;
             data.overdue_since = None;
-            data.payment_nonce = data.payment_nonce.checked_add(1).ok_or(ContractError::InvalidTimestamp)?;
+            data.payment_nonce = data.payment_nonce.checked_add(1).ok_or(ContractError::SequenceOverflow)?;
             env.storage().persistent().set(&key, &data);
             hashes_to_extend.push_back(hash);
 
@@ -1243,6 +1247,28 @@ impl SubscriptionProtocol {
             .unwrap_or_else(|| Vec::new(&env));
         index.len()
     }
+
+    /// Return the checked monotonic payment sequence number for an active subscription.
+    ///
+    /// # Returns
+    /// The sequence number (0 initially, incremented by 1 on each successful payment).
+    ///
+    /// # Errors
+    /// - `ContractError::NoActiveSubscription` if no active subscription exists.
+    pub fn get_payment_sequence(
+        env: Env,
+        subscriber: Address,
+        merchant: Address,
+    ) -> Result<u32, ContractError> {
+        let hash = subscription_key(&env, &subscriber, &merchant);
+        let key = DataKey::Subscription(hash);
+        let data: SubscriptionData = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .ok_or(ContractError::NoActiveSubscription)?;
+        Ok(data.payment_nonce)
+    }
 }
 
 #[cfg(test)]
@@ -1262,3 +1288,6 @@ mod regression_tests;
 
 #[cfg(test)]
 mod pause_resume_tests;
+
+#[cfg(test)]
+mod sequence_tests;

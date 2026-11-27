@@ -88,6 +88,8 @@ pub struct SubscriptionData {
     pub paused_until: Option<u64>,
     /// Timestamp when the subscription first became overdue.
     pub overdue_since: Option<u64>,
+    /// Monotonically increasing sequence number for successful payments.
+    pub payment_nonce: u32,
 }
 
 /// Subscription layout stored before schema version 2.
